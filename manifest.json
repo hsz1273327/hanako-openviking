@@ -1,0 +1,121 @@
+{
+  "manifestVersion": 2,
+  "id": "hanako-openviking",
+  "name": "OpenViking 共享记忆与技能",
+  "version": "0.1.0",
+  "entry": "index.js",
+  "icon": "assets/icon.svg",
+  "description": "把本机 Hana 接入 OpenViking，与其它机器上的 OpenHanako、以及自托管的其它 agent 共享记忆与技能。",
+  "minAppVersion": "1.1.7-beta",
+  "capabilities": [
+    "app/hooks.agent-before-start",
+    "app/hooks.provider-before-request",
+    "app/hooks.observe",
+    "app/tools.expose-to-model",
+    "app/resources.read"
+  ],
+  "network": {
+    "allowedHosts": ["192.168.50.142", "127.0.0.1", "localhost"],
+    "methods": ["GET", "POST"],
+    "allowLocalhost": true,
+    "defaultTimeoutMs": 1500,
+    "maxResponseBytes": 2097152
+  },
+  "contributes": {
+    "settings": {
+      "title": "OpenViking",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "总开关",
+            "description": "关闭后读写全停、零联网，等同于没装。",
+            "default": false
+          },
+          "serverUrl": {
+            "type": "string",
+            "title": "Server 地址",
+            "description": "OpenViking server 的地址，与其它机器、Hermes 指向同一个。",
+            "default": "http://192.168.50.142:8000"
+          },
+          "apiKey": {
+            "type": "string",
+            "title": "API Key",
+            "description": "OpenViking user key，来自 ovcli.conf。只存在本机设置里。",
+            "sensitive": true
+          },
+          "peerPrefix": {
+            "type": "string",
+            "title": "门牌前缀",
+            "description": "区分机器，例如 mbp / desktop。留空则 peer 就是助手目录名。",
+            "default": ""
+          },
+          "mergeMemory": {
+            "type": "boolean",
+            "title": "合并记忆",
+            "description": "打开后同机所有助手共用一个 peer，记忆完全合并。",
+            "default": false
+          },
+          "autoRecall": {
+            "type": "boolean",
+            "title": "自动召回",
+            "description": "每轮从 OpenViking 召回相关记忆并注入。",
+            "default": true
+          },
+          "autoCapture": {
+            "type": "boolean",
+            "title": "自动写回",
+            "description": "每轮结束后把对话写回 OpenViking。",
+            "default": true
+          },
+          "readOnly": {
+            "type": "boolean",
+            "title": "只读模式",
+            "description": "只召回、不写回。先观察一段时间用。",
+            "default": false
+          },
+          "recallPeerScope": {
+            "type": "string",
+            "title": "召回范围",
+            "description": "all 跨门牌召回（别的机器、Hermes 写的也能看到），self 只看本机。",
+            "default": "all",
+            "enum": ["all", "self"]
+          },
+          "requestTimeoutMs": {
+            "type": "integer",
+            "title": "请求超时",
+            "description": "单次请求超时（毫秒）。连不上就短路，宜短。",
+            "default": 1500
+          },
+          "injectBudgetTokens": {
+            "type": "integer",
+            "title": "注入预算",
+            "description": "记忆 + 技能合计每轮最多注入多少 token。超了先砍技能再砍记忆。",
+            "default": 2500
+          },
+          "skillRouting": {
+            "type": "boolean",
+            "title": "子会话自动路由",
+            "description": "子会话开始时按分派内容检索一次技能，生成任务工作集。",
+            "default": true
+          },
+          "probe": {
+            "type": "boolean",
+            "title": "探针日志",
+            "description": "把钩子的调用频率与载荷形状写进 probe.log。装上先开一天。",
+            "default": false
+          }
+        }
+      }
+    },
+    "cards": [
+      {
+        "id": "panel",
+        "title": "OpenViking",
+        "route": "/panel.html",
+        "face": { "image": "assets/cover.svg" }
+      }
+    ]
+  }
+}

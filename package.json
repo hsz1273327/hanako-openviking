@@ -1,0 +1,10 @@
+{
+  "name": "hanako-openviking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hana v2 App: share memory and skills through an OpenViking hub.",
+  "scripts": {
+    "smoke": "node dev/smoke.mjs"
+  }
+}
