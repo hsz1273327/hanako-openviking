@@ -24,6 +24,7 @@ async function offlineReason(sdk) {
   const sw = await readSwitches(sdk);
   if (!sw.enabled) return "OpenViking 未启用（总开关关着），共享技能库当前不可用。";
   const conn = await readConnection(sdk);
+  if (!conn.serverUrl) return "OpenViking 未填 Server 地址，共享技能库当前不可用。";
   if (!conn.apiKey) return "OpenViking 未填 API Key，共享技能库当前不可用。";
   return null;
 }

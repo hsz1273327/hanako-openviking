@@ -61,14 +61,9 @@ export default function registerConnRoutes(app, ctx) {
       }
       if (key === "apiKey") {
         const value = String(raw ?? "").trim();
-        // 空字符串表示"清除"，不写就把旧 key 留着。
-        if (value === "") {
-          await ctx.config.set("apiKey", "");
-          applied.push("apiKey");
-        } else if (/^[\s]*$/.test(value) === false) {
-          await ctx.config.set("apiKey", value);
-          applied.push("apiKey");
-        }
+        // 空字符串表示“清除”；非空直接覆盖（已 trim），行为与旧分支完全一致。
+        await ctx.config.set("apiKey", value);
+        applied.push("apiKey");
       }
     }
 

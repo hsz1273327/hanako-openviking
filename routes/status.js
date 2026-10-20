@@ -68,7 +68,7 @@ export default function registerStatusRoutes(app, ctx) {
       peer: resolvePeer(conn, null),
     };
 
-    if (!sw.enabled || !conn.apiKey) {
+    if (!sw.enabled || !conn.serverUrl || !conn.apiKey) {
       return c.json({ ...report, reach: "idle", health: null, ready: null }, 200);
     }
 

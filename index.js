@@ -1,16 +1,16 @@
-// 入口。v0.1 的职责：把三个接缝挂上，装成可安装的探针，不做任何注入。
+// 入口。把接缝挂上：探针记录事实，记忆召回按轮注入，技能工具按需调用。
 //
-// 分工（待实测确认后才会变成真的注入）：
-//   agent/before-start    每轮开始，可改 systemPrompt / 注入一条 message
-//   provider/before-request 每次发往 provider 的请求，可改写整个 payload
-//   agent/settled         轮次结束，只读
+//   agent/before-start       每轮开始（探针 / 未来技能路由）
+//   provider/before-request  每次发往 provider 的请求：探针在前，召回在后
+//   agent/settled            轮次结束（探针 / 未来写回）
 //
-// 探针只写日志，不改任何返回值。开关在设置里，默认关。
+// 任何钩子失败都不得影响本轮对话：探针只写日志，召回失败返回 undefined。
 
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { resolvePeer } from "./src/ov/identity.js";
+import { createRecallHandler } from "./src/memory/recall.js";
 import { createProbe } from "./src/probe.js";
 import { skillFindTool, skillLoadTool } from "./src/skills/tools.js";
 import { markClosed, touchSession } from "./src/state/session.js";
@@ -20,6 +20,8 @@ export const name = "hanako-openviking";
 export default defineApp(async (sdk) => {
   const probe = createProbe({ dataDir: sdk.dataDir, logger: sdk.logger });
   const probeOn = async () => (await sdk.config.get("probe")) === true;
+  // 一个进程一份去重表：before-request 按模型步触发，同一用户文本只召回一次。
+  const recall = createRecallHandler(sdk);
 
   await sdk.tools.register({
     name: "openviking_status",
@@ -38,7 +40,7 @@ export default defineApp(async (sdk) => {
         timeoutMs: conn.timeoutMs,
       };
 
-      if (sw.enabled && conn.apiKey) {
+      if (sw.enabled && conn.serverUrl && conn.apiKey) {
         const client = createClient({
           ...conn,
           fetchImpl: sdk.network.fetch.bind(sdk.network),
@@ -88,8 +90,15 @@ export default defineApp(async (sdk) => {
   });
 
   await sdk.hooks.onDecision("provider/before-request", async (invocation) => {
+    // 探针在前：只读、只写日志，返回值恒为 undefined。
     if (await probeOn()) await probe("provider/before-request", invocation);
-    return undefined;
+    // 召回在后：成功返回 { payload }，其余一律 undefined。两者互不干扰。
+    try {
+      return await recall(invocation);
+    } catch (error) {
+      sdk.logger.warn(`openviking recall failed: ${error?.message || error}`);
+      return undefined;
+    }
   });
 
   await sdk.hooks.on("agent/settled", async (invocation) => {

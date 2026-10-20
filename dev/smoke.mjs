@@ -16,6 +16,16 @@ import {
 } from "../src/inject/plan.js";
 import { skillFindTool, skillLoadTool } from "../src/skills/tools.js";
 import {
+  createDeduper,
+  createRecallHandler,
+  extractRecallText,
+  fingerprint,
+  memoryBlock,
+  resetShapeWarning,
+  DEDUP_LIMIT,
+  MEMORY_MAX_TOKENS,
+} from "../src/memory/recall.js";
+import {
   readSession,
   patchSession,
   effective,
@@ -43,6 +53,28 @@ function eq(label, actual, expected) {
 // ---- mock sdk.config ----
 function sdkWith(values = {}) {
   return { config: { get: async (key) => values[key] } };
+}
+
+// ---- mock sdk（召回用：配置 + 网络 + 临时 dataDir）----
+// reads 统计 sdk.config.get 的调用次数，用来断言"去重键提前"真的省掉了配置读取。
+function recallSdk({ values = {}, fetchImpl, dataDir, logger, reads }) {
+  const counter = reads || { count: 0 };
+  const sink = logger || {};
+  return {
+    dataDir,
+    reads: counter,
+    config: {
+      get: async (key) => {
+        counter.count += 1;
+        return values[key];
+      },
+    },
+    network: { fetch: fetchImpl },
+    logger: {
+      info: (...args) => sink.info?.(...args),
+      warn: (...args) => sink.warn?.(...args),
+    },
+  };
 }
 
 // ---- mock fetch ----
@@ -84,9 +116,15 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   await client.recall("昨天说的那件事", { peerScope: "self", maxTokens: 800 });
   const body = JSON.parse(calls[0].init.body);
   eq("recall 用 context 模式", body.mode, "context");
-  eq("recall peer_scope", body.peer_scope, "self");
+  eq("recall peer_scope(self 映射为 actor)", body.peer_scope, "actor");
   eq("recall max_tokens", body.max_tokens, 800);
   eq("recall 路径", calls[0].url, "http://h:1/api/v1/search/search");
+
+  await client.recall("跨门牌", { peerScope: "all" });
+  eq("recall peer_scope(all 原样)", JSON.parse(calls[1].init.body).peer_scope, "all");
+
+  await client.recall("默认范围");
+  eq("recall peer_scope 默认 all", JSON.parse(calls[2].init.body).peer_scope, "all");
 }
 
 {
@@ -270,6 +308,18 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   const offBody = JSON.parse(off.content[0].text);
   eq("未启用时不联网且说明原因", offBody.ok, false);
   check("原因里提到未启用", offBody.reason.includes("未启用"), offBody.reason);
+
+  const noUrlSdk = {
+    config: {
+      get: async (key) =>
+        ({ enabled: true, apiKey: "k", serverUrl: "" })[key],
+    },
+    network: { fetch: async () => { throw new Error("不该联网"); } },
+    logger: { info() {}, warn() {} },
+  };
+  const noUrl = JSON.parse((await skillFindTool(noUrlSdk).execute({ query: "任何" })).content[0].text);
+  eq("没 serverUrl 时不联网", noUrl.ok, false);
+  check("原因里提到 Server 地址", noUrl.reason.includes("Server 地址"), noUrl.reason);
 }
 
 // ================= state/session =================
@@ -332,6 +382,486 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   check("过期会话被清掉", !fs.existsSync(staleFile));
 
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= memory/recall =================
+{
+  // ---- 去重：同一会话、同一句用户文本，只召回一次 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-dedupe");
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const { calls, fetchImpl } = mockFetch({
+    body: {
+      status: "ok",
+      result: { rendered: "<memory uri=\"viking://user/default/mem\">周三要交稿。</memory>" },
+    },
+  });
+  const sdk = recallSdk({
+    values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+    fetchImpl,
+    dataDir: dir,
+  });
+  const handler = createRecallHandler(sdk);
+  const session = {
+    sessionId: "recall-dedupe",
+    sessionPath: "/Users/u/.hanako/agents/agent-x/sessions/a.jsonl",
+  };
+  const payload = {
+    model: "m",
+    messages: [
+      { role: "user", content: "什么时候交稿？" },
+      { role: "assistant", content: "我查一下" },
+      { role: "user", content: "我记得是周三？" },
+    ],
+  };
+  const before = JSON.stringify(payload);
+
+  const first = await handler({ payload, session });
+  check("召回成功返回 payload", Boolean(first?.payload));
+  eq("注入后消息条数不变", first?.payload.messages.length, 3);
+  check(
+    "最后一条用户消息以记忆标记开头",
+    first?.payload.messages[2].content.startsWith("<openviking-memory>"),
+  );
+  check("原用户文本仍在末尾", first?.payload.messages[2].content.endsWith("我记得是周三？"));
+  check("记忆正文在块里", first?.payload.messages[2].content.includes("周三要交稿。"));
+  eq("助手消息没被动过", first?.payload.messages[1].content, "我查一下");
+  eq("原 payload 未被修改", JSON.stringify(payload), before);
+  eq("只发了一次召回请求", calls.length, 1);
+
+  const reqBody = JSON.parse(calls[0].init.body);
+  eq("召回走 context 模式", reqBody.mode, "context");
+  eq("默认跨门牌召回", reqBody.peer_scope, "all");
+  eq("预算取 DESIGN 上限", reqBody.max_tokens, MEMORY_MAX_TOKENS);
+  eq("查询是剥掉注入后的文本", reqBody.query, "我记得是周三？");
+  eq("召回请求带 actor peer", calls[0].init.headers["X-OpenViking-Actor-Peer"], "agent-x");
+
+  const again = await handler({ payload: first.payload, session });
+  eq("第二次同文本返回 undefined", again, undefined);
+  eq("第二次不发请求", calls.length, 1);
+
+  const otherText = { messages: [{ role: "user", content: "换个问题" }] };
+  const other = await handler({ payload: otherText, session });
+  check("不同文本仍会召回", Boolean(other?.payload));
+  eq("不同文本发第二次请求", calls.length, 2);
+
+  const state = readSession(dir, "recall-dedupe");
+  eq("召回轮次记了两次", state.recall.turns, 2);
+  check("注入 token 累加", state.recall.injectedTokens > 0);
+  check("记了最后召回时间", typeof state.recall.lastAt === "string");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 未启用 / 没 key：一次请求都不发 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-off");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const session = { sessionId: "recall-off" };
+  const payload = { messages: [{ role: "user", content: "在吗" }] };
+  const boom = {
+    calls: 0,
+    fetchImpl: async () => {
+      boom.calls += 1;
+      throw new Error("不该联网");
+    },
+  };
+
+  const off = createRecallHandler(
+    recallSdk({
+      values: { enabled: false, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq("总闸关时返回 undefined", await off({ payload, session }), undefined);
+  eq("总闸关时不发请求", boom.calls, 0);
+
+  const noKey = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "", serverUrl: "http://h:1" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq("没 key 时返回 undefined", await noKey({ payload, session }), undefined);
+  eq("没 key 时不发请求", boom.calls, 0);
+
+  const noUrl = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq("没 serverUrl 时返回 undefined", await noUrl({ payload, session }), undefined);
+  eq("没 serverUrl 时不发请求", boom.calls, 0);
+
+  const noSession = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq("没有 sessionId 时返回 undefined", await noSession({ payload }), undefined);
+  eq("没有 sessionId 时不发请求", boom.calls, 0);
+
+  const empty = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq(
+    "没有用户文本时返回 undefined",
+    await empty({ payload: { messages: [{ role: "assistant", content: "嗯" }] }, session }),
+    undefined,
+  );
+  eq("没有用户文本时不发请求", boom.calls, 0);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 形状不认识：返回 undefined，不抛，也不联网 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-shape");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const boom = {
+    calls: 0,
+    fetchImpl: async () => {
+      boom.calls += 1;
+      throw new Error("不该联网");
+    },
+  };
+  const handler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: boom.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+
+  let threw = null;
+  let result;
+  try {
+    result = await handler({ payload: { model: "m" }, session: { sessionId: "shape-1" } });
+  } catch (error) {
+    threw = error;
+  }
+  eq("没有 messages 时返回 undefined", result, undefined);
+  eq("没有 messages 时不抛", threw, null);
+  eq("没有 messages 时不联网", boom.calls, 0);
+
+  // 有 messages、能联网，但响应里没有可读文本 -> 仍然不改载荷。
+  const emptyBody = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: mockFetch({ body: { status: "ok", result: { total: 0 } } }).fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  const payload = { messages: [{ role: "user", content: "有没有记忆" }] };
+  eq(
+    "响应无文本时返回 undefined",
+    await emptyBody({ payload, session: { sessionId: "shape-2" } }),
+    undefined,
+  );
+  eq("响应无文本时 payload 原样", payload.messages[0].content, "有没有记忆");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 失败路径：payload 原样，且同一文本不重复试错 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-fail");
+  fs.rmSync(dir, { recursive: true, force: true });
+  let calls = 0;
+  const handler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error("ETIMEDOUT");
+      },
+      dataDir: dir,
+    }),
+  );
+  const payload = { messages: [{ role: "user", content: "断网时问一句" }] };
+  const session = { sessionId: "fail-1" };
+  const before = JSON.stringify(payload);
+
+  let threw = null;
+  let result;
+  try {
+    result = await handler({ payload, session });
+  } catch (error) {
+    threw = error;
+  }
+  eq("网络失败返回 undefined", result, undefined);
+  eq("网络失败不抛", threw, null);
+  eq("失败时 payload 深度相等", JSON.stringify(payload), before);
+  eq("失败时调用者手里还是原引用", payload.messages[0].content, "断网时问一句");
+  eq("失败记了一次请求", calls, 1);
+
+  await handler({ payload, session });
+  eq("失败后同文本不再重试", calls, 1);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 会话覆盖：autoRecall / recallPeerScope / readOnly ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-override");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    recallPeerScope: "self",
+  };
+  const payload = { messages: [{ role: "user", content: "跨门牌找找" }] };
+
+  patchSession(dir, "ov-off", { overrides: { autoRecall: false } });
+  const autoOff = mockFetch({ body: { status: "ok", result: { rendered: "不该出现" } } });
+  const offHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: autoOff.fetchImpl, dataDir: dir }),
+  );
+  eq(
+    "会话关掉 autoRecall 时返回 undefined",
+    await offHandler({ payload, session: { sessionId: "ov-off" } }),
+    undefined,
+  );
+  eq("会话关掉 autoRecall 时不发请求", autoOff.calls.length, 0);
+
+  patchSession(dir, "ov-scope", { overrides: { recallPeerScope: "all", readOnly: true } });
+  const scoped = mockFetch({ body: { status: "ok", result: { rendered: "跨门牌的记忆" } } });
+  const scopeHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: scoped.fetchImpl, dataDir: dir }),
+  );
+  const scopedResult = await scopeHandler({
+    payload: { messages: [{ role: "user", content: "别的机器说过什么" }] },
+    session: { sessionId: "ov-scope" },
+  });
+  check("只读模式不影响召回", Boolean(scopedResult?.payload));
+  eq("会话覆盖召回范围", JSON.parse(scoped.calls[0].init.body).peer_scope, "all");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 真实响应形状：rendered 主路径 / digest / entries 兜底 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-rendered");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = { enabled: true, apiKey: "k", serverUrl: "http://h:1" };
+  const renderedXml =
+    '<memory uri="viking://user/default/skills" type="skills" score="0.57" detail="overview">\n预览\n</memory>';
+
+  const renderedFetch = mockFetch({
+    body: {
+      status: "ok",
+      result: {
+        entries: [{ text: "条目不该赢" }],
+        rendered: renderedXml,
+        digest: "摘要不该赢",
+        stats: {},
+      },
+    },
+  });
+  const renderedHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: renderedFetch.fetchImpl, dataDir: dir }),
+  );
+  const renderedResult = await renderedHandler({
+    payload: { messages: [{ role: "user", content: "rendered 优先" }] },
+    session: { sessionId: "shape-rendered" },
+  });
+  check("rendered 形状注入成功", Boolean(renderedResult?.payload));
+  check("rendered 内容进块", renderedResult?.payload.messages[0].content.includes(renderedXml));
+  check(
+    "rendered 优先于 digest 与 entries",
+    !renderedResult?.payload.messages[0].content.includes("摘要不该赢") &&
+      !renderedResult?.payload.messages[0].content.includes("条目不该赢"),
+  );
+
+  const digestFetch = mockFetch({
+    body: {
+      status: "ok",
+      result: { entries: [{ text: "条目也不该赢" }], rendered: "", digest: "只有摘要" },
+    },
+  });
+  const digestHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: digestFetch.fetchImpl, dataDir: dir }),
+  );
+  const digestResult = await digestHandler({
+    payload: { messages: [{ role: "user", content: "digest 兜底" }] },
+    session: { sessionId: "shape-digest" },
+  });
+  check("digest 形状注入成功", Boolean(digestResult?.payload));
+  check("空 rendered 让位给 digest", digestResult?.payload.messages[0].content.includes("只有摘要"));
+  check("digest 命中时不再看 entries", !digestResult?.payload.messages[0].content.includes("条目也不该赢"));
+
+  const entriesFetch = mockFetch({
+    body: {
+      status: "ok",
+      result: {
+        entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }],
+        rendered: "",
+        digest: "",
+        stats: {},
+      },
+    },
+  });
+  const entriesHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: entriesFetch.fetchImpl, dataDir: dir }),
+  );
+  const entriesResult = await entriesHandler({
+    payload: { messages: [{ role: "user", content: "entries 兜底" }] },
+    session: { sessionId: "shape-entries" },
+  });
+  check("entries 形状注入成功", Boolean(entriesResult?.payload));
+  check(
+    "entries 用空行拼起来且跳过空项",
+    entriesResult?.payload.messages[0].content.includes("第一条\n\n第二条"),
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 三者皆空：返回 undefined，且同一进程只告警一次 ----
+  resetShapeWarning();
+  const dir = path.join(import.meta.dirname, ".tmp-recall-warn");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = { enabled: true, apiKey: "k", serverUrl: "http://h:1" };
+  const warnings = [];
+  const infos = [];
+  const logger = { info: (m) => infos.push(m), warn: (m) => warnings.push(m) };
+  const emptyFetch = () =>
+    mockFetch({ body: { status: "ok", result: { total: 0, stats: {} } } }).fetchImpl;
+
+  const handler = createRecallHandler(
+    recallSdk({ values, fetchImpl: emptyFetch(), dataDir: dir, logger }),
+  );
+  const payload = { messages: [{ role: "user", content: "这一句没有记忆" }] };
+  const session = { sessionId: "warn-1" };
+  eq("三者皆空时返回 undefined", await handler({ payload, session }), undefined);
+  eq("未知形状告警一次", warnings.length, 1);
+  check(
+    "告警含「响应形状未识别」与键名",
+    warnings[0]?.includes("响应形状未识别") &&
+      warnings[0]?.includes("total") &&
+      warnings[0]?.includes("stats"),
+  );
+  eq("payload 原样未改", payload.messages[0].content, "这一句没有记忆");
+
+  await handler({ payload, session });
+  eq("同文本重复调用不再告警", warnings.length, 1);
+
+  const otherHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: emptyFetch(), dataDir: dir, logger }),
+  );
+  await otherHandler({
+    payload: { messages: [{ role: "user", content: "另一句也没有" }] },
+    session: { sessionId: "warn-2" },
+  });
+  eq("同进程其他会话也不再告警", warnings.length, 1);
+  check("仍然只发了一次日志而非每轮刷屏", infos.filter((m) => m.includes("no text")).length === 2);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 日志噪音：跳过日志排在去重键之后，同一会话同一原因一轮只记一次 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-noise");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const infos = [];
+  const boom = async () => {
+    throw new Error("不该联网");
+  };
+  const sdk = recallSdk({
+    values: { enabled: false, apiKey: "k", serverUrl: "http://h:1" },
+    fetchImpl: boom,
+    dataDir: dir,
+    logger: { info: (m) => infos.push(m) },
+  });
+  const handler = createRecallHandler(sdk);
+  const payload = { messages: [{ role: "user", content: "闸关着问一句" }] };
+  const session = { sessionId: "noise-off" };
+
+  for (let i = 0; i < 12; i += 1) await handler({ payload, session });
+  eq(
+    "关闸时一轮只记一条 skip: disabled",
+    infos.filter((m) => m.includes("skip: disabled")).length,
+    1,
+  );
+  eq("12 次步调用总共只记一条日志", infos.length, 1);
+
+  const readsAfterFirst = sdk.reads.count;
+  check("首轮确实读了配置", readsAfterFirst > 0);
+  await handler({ payload, session });
+  eq("重复调用不再读配置", sdk.reads.count, readsAfterFirst);
+
+  const infos2 = [];
+  const noId = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "", serverUrl: "http://h:1" },
+      fetchImpl: boom,
+      dataDir: dir,
+      logger: { info: (m) => infos2.push(m) },
+    }),
+  );
+  for (let i = 0; i < 3; i += 1) {
+    await noId({ payload, session: { sessionId: "noise-noid" } });
+  }
+  eq(
+    "没身份时重复调用也只记一条",
+    infos2.filter((m) => m.includes("skip: no identity")).length,
+    1,
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 纯函数：指纹 / 去重容量 / 响应解析 / 预算截断 ----
+  eq("指纹稳定", fingerprint("同一句"), fingerprint("同一句"));
+  check("不同文本指纹不同", fingerprint("甲") !== fingerprint("乙"));
+
+  const deduper = createDeduper(3);
+  eq("首次占键成功", deduper.claim("a"), true);
+  eq("重复占键失败", deduper.claim("a"), false);
+  deduper.claim("b");
+  deduper.claim("c");
+  deduper.claim("d");
+  eq("超容量按最旧淘汰", deduper.has("a"), false);
+  check("新键保留", deduper.has("d"));
+  eq("容量不超过上限", deduper.size, 3);
+  check("默认容量常量可用", DEDUP_LIMIT >= 100);
+
+  eq("响应是字符串", extractRecallText("  一段记忆  "), "一段记忆");
+  eq(
+    "rendered 优先",
+    extractRecallText({ rendered: "渲染块", digest: "摘要", entries: [{ text: "条目" }] }),
+    "渲染块",
+  );
+  eq(
+    "空 rendered 落到 digest",
+    extractRecallText({ rendered: "  ", digest: "只有摘要", entries: [{ text: "条目" }] }),
+    "只有摘要",
+  );
+  eq(
+    "没有 rendered/digest 时拼 entries",
+    extractRecallText({ entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }] }),
+    "第一条\n\n第二条",
+  );
+  eq("旧猜测键不再猜", extractRecallText({ context: "旧形状" }), "");
+  eq("响应无文本给空串", extractRecallText({ total: 0 }), "");
+  eq("响应是 null 给空串", extractRecallText(null), "");
+
+  const block = memoryBlock("啊".repeat(400), 20);
+  check("记忆块带开关标记", block.startsWith("<openviking-memory>") && block.endsWith("</openviking-memory>"));
+  check("超预算时截断且标记完整", block.includes("…") && block.endsWith("</openviking-memory>"));
 }
 
 // ================= 结果 =================

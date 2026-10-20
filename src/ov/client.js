@@ -5,6 +5,18 @@
 //   失败 { status:"error", error:{code,message} } —— HTTP 错误走顶层 error，不要去翻 result.status
 // 身份头：X-API-Key；跨机区分用 X-OpenViking-Actor-Peer。
 
+/**
+ * peer_scope 线上值映射。
+ *
+ * 对外（manifest 枚举、会话覆盖、DESIGN）一直用 all / self；但 v0.4.16 的
+ * /api/v1/search/search 只接受 'actor' | 'all'，传 self 会直接 HTTP 400：
+ *   {"code":"INVALID_ARGUMENT","message":"body.peer_scope: Input should be 'actor' or 'all'"}
+ * 所以发请求前把 self 翻译成 actor；all 原样。未知值按 all 处理（与旧默认值一致）。
+ */
+export function wirePeerScope(scope) {
+  return scope === "self" ? "actor" : "all";
+}
+
 export function createClient({
   serverUrl,
   apiKey,
@@ -53,7 +65,7 @@ export function createClient({
         body: JSON.stringify({
           query,
           mode: "context",
-          peer_scope: opts.peerScope ?? "all",
+          peer_scope: wirePeerScope(opts.peerScope),
           max_tokens: opts.maxTokens ?? 2000,
           score_threshold: opts.scoreThreshold ?? 0.35,
         }),
