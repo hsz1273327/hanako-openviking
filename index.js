@@ -12,6 +12,8 @@ import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { resolvePeer } from "./src/ov/identity.js";
 import { createProbe } from "./src/probe.js";
+import { skillFindTool, skillLoadTool } from "./src/skills/tools.js";
+import { markClosed, touchSession } from "./src/state/session.js";
 
 export const name = "hanako-openviking";
 
@@ -50,6 +52,32 @@ export default defineApp(async (sdk) => {
 
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
     },
+  });
+
+  // ---- 技能工具：不依赖钩子语义，装上就能用 ----
+  await sdk.tools.register(skillFindTool(sdk));
+  await sdk.tools.register(skillLoadTool(sdk));
+
+  // ---- 会话生命周期：开的时候建一份，关的时候打标记 ----
+  // 宿主没有"会话已删"事件，物理删除交给 state/session.js 的过期清理。
+  await sdk.hooks.on("agent/session-start", async (invocation) => {
+    const sessionId = invocation?.session?.sessionId;
+    if (!sessionId) return;
+    try {
+      touchSession(sdk.dataDir, sessionId);
+    } catch (error) {
+      sdk.logger.warn(`openviking session-start state failed: ${error?.message || error}`);
+    }
+  });
+
+  await sdk.hooks.on("session.shutdown", async (invocation) => {
+    const sessionId = invocation?.session?.sessionId;
+    if (!sessionId) return;
+    try {
+      markClosed(sdk.dataDir, sessionId, invocation?.reason);
+    } catch (error) {
+      sdk.logger.warn(`openviking session-shutdown state failed: ${error?.message || error}`);
+    }
   });
 
   // ---- 探针：三个接缝各记一行，返回值一律不改 ----

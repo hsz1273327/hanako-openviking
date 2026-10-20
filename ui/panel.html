@@ -1,24 +1,74 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="zh">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenViking 共享记忆与技能</title>
+  <title>OpenViking</title>
   <link rel="stylesheet" href="./assets/panel.css">
-  <link rel="stylesheet" href="./assets/app-ui.css">
 </head>
 <body>
-  <main data-hana-app-ui>
-    <h1>OpenViking 共享记忆与技能</h1>
-    <p id="startup-status" role="status">Loading App...</p>
-    <div id="form"></div>
-    <p id="greeting" role="status"></p>
+  <!-- 整页：把"这台机器在一个共享中枢里是什么身份、通不通、在不在记"摊开。
+       只读。改开关仍然回设置页——一个表面只承担一件事，权限边界才清楚。 -->
+  <main class="page" data-hana-app-ui>
+    <header class="bar">
+      <div class="bar-main">
+        <span id="dot" class="dot idle" aria-hidden="true"></span>
+        <h1 class="title">OpenViking</h1>
+        <span id="badge" class="badge">未启用</span>
+      </div>
+      <div class="bar-side">
+        <span id="peerLine" class="peer"></span>
+        <button id="refresh" class="btn" type="button">刷新</button>
+      </div>
+    </header>
+
+    <section class="grid">
+      <article class="block">
+        <h2 class="block-title">中枢</h2>
+        <dl class="kv">
+          <dt>地址</dt><dd id="server">—</dd>
+          <dt>API Key</dt><dd id="keyState">—</dd>
+          <dt>版本</dt><dd id="version">—</dd>
+          <dt>往返</dt><dd id="latency">—</dd>
+        </dl>
+        <ul id="checks" class="checks"></ul>
+        <p id="reachError" class="note warn" hidden></p>
+      </article>
+
+      <article class="block">
+        <h2 class="block-title">身份</h2>
+        <dl class="kv">
+          <dt>peer</dt><dd id="peer">—</dd>
+          <dt>召回范围</dt><dd id="scope">—</dd>
+          <dt>超时</dt><dd id="timeout">—</dd>
+          <dt>注入预算</dt><dd id="budget">—</dd>
+        </dl>
+        <p class="note">peer 决定"这条记忆算谁的"。同机不同助手各自一个门牌；合并记忆打开时折成一个。</p>
+      </article>
+
+      <article class="block">
+        <h2 class="block-title">全局开关</h2>
+        <ul class="toggles">
+          <li><span id="swEnabled" class="chip">总闸</span><em>关着等于没装</em></li>
+          <li><span id="swReadOnly" class="chip">只读</span><em>只召回不写</em></li>
+          <li><span id="swProbe" class="chip">探针</span><em>记事实</em></li>
+          <li><span id="swMemory" class="chip">记忆召回</span><em>每轮注入</em></li>
+          <li><span id="swCapture" class="chip">写回</span><em>轮次结束</em></li>
+          <li><span id="swSkill" class="chip">技能路由</span><em>子会话</em></li>
+        </ul>
+        <p id="swNote" class="note"></p>
+        <p class="note">这些都存在这台机器上，改一次全局生效；单个会话的状态看右侧小卡。</p>
+      </article>
+
+      <article class="block wide">
+        <h2 class="block-title">探针 / 注入日志</h2>
+        <div id="logSummary" class="chips"></div>
+        <pre id="logBody" class="log">（还没有记录）</pre>
+      </article>
+    </section>
+
+    <footer id="foot" class="foot"></footer>
   </main>
-  <script>
-    window.addEventListener('error', () => {
-      document.getElementById('startup-status').textContent = 'App failed to start. Check its resources and run the App validator.';
-    }, true);
-  </script>
   <script type="module" src="./assets/panel.js"></script>
 </body>
 </html>

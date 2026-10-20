@@ -1,0 +1,107 @@
+/* 常驻小卡。同一条硬规矩：不依赖宿主主题变量，只用中性 rgba 与 currentColor。 */
+
+html, body {
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font: 400 12.5px/1.45 var(--font-ui, system-ui, -apple-system, "Microsoft YaHei", sans-serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+.ov {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px 11px;
+  min-width: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(128, 128, 128, 0.45);
+}
+.dot.ok { background: #6f8f68; }
+.dot.down { background: #c2554b; }
+
+.state {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peer {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 55%;
+}
+
+.meta { gap: 10px; }
+
+.meta-item {
+  font-size: 11px;
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chips { gap: 5px; flex-wrap: wrap; }
+
+.chip {
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.26);
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip:hover { opacity: 0.85; }
+
+/* 跟随全局：虚线，说明这一项的值不属于这个会话 */
+.chip.follow { border-style: dashed; }
+
+/* 会话覆盖：实线高亮，说明这一项被这段对话单独改过 */
+.chip.over {
+  border-style: solid;
+  border-color: rgba(111, 143, 104, 0.7);
+}
+
+.chip.on {
+  opacity: 1;
+  border-color: rgba(111, 143, 104, 0.55);
+  background: rgba(111, 143, 104, 0.12);
+  color: #5d7d56;
+}
+.chip.on.follow { border-color: rgba(111, 143, 104, 0.35); }
+
+.hint {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  opacity: 0.55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hint:empty { display: none; }
+.hint.warn { color: #b8564d; opacity: 0.9; }

@@ -1,4 +1,226 @@
-html, body { margin: 0; min-height: 100%; background: var(--bg, #f7f3eb); color: var(--text, #3b342b); font-family: system-ui, sans-serif; }
-main { box-sizing: border-box; min-height: 100vh; padding: 24px; }
-h1 { margin: 0 0 12px; font-size: 20px; font-weight: 500; }
-p { margin: 0; line-height: 1.6; }
+/* 整页控制台。
+   硬规矩：只用中性 rgba 和 currentColor，不依赖宿主的主题变量。
+   依赖变量的代价是——变量没注入时整条声明作废，页面变成一张白纸，
+   而失败是静默的，看起来像"没写 CSS"。 */
+
+html, body {
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font: 400 13px/1.55 var(--font-ui, system-ui, -apple-system, "Microsoft YaHei", sans-serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 22px 24px 40px;
+  display: grid;
+  gap: 18px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bar-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.bar-side {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(128, 128, 128, 0.45);
+}
+.dot.ok { background: #6f8f68; }
+.dot.down { background: #c2554b; }
+
+.badge {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  opacity: 0.85;
+}
+.badge.ok {
+  border-color: rgba(111, 143, 104, 0.55);
+  background: rgba(111, 143, 104, 0.12);
+  color: #5d7d56;
+}
+.badge.down {
+  border-color: rgba(194, 85, 75, 0.5);
+  color: #b8564d;
+}
+
+.peer {
+  font-size: 11.5px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.32);
+  background: rgba(128, 128, 128, 0.06);
+  color: inherit;
+  cursor: pointer;
+}
+.btn:hover { background: rgba(128, 128, 128, 0.14); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.block {
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.block.wide { grid-column: 1 / -1; }
+
+.block-title {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.kv {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 5px 14px;
+  font-size: 12.5px;
+}
+.kv dt { opacity: 0.62; }
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.checks {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.checks li {
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.26);
+  opacity: 0.75;
+}
+.checks li.ok {
+  border-color: rgba(111, 143, 104, 0.5);
+  color: #5d7d56;
+  opacity: 1;
+}
+.checks li.bad {
+  border-color: rgba(194, 85, 75, 0.5);
+  color: #b8564d;
+  opacity: 1;
+}
+
+.toggles {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.toggles li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.toggles em {
+  font-style: normal;
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.chip {
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.272);
+  opacity: 0.55;
+}
+.chip.on {
+  opacity: 1;
+  border-color: rgba(111, 143, 104, 0.55);
+  background: rgba(111, 143, 104, 0.12);
+  color: #5d7d56;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  opacity: 0.62;
+}
+.note.warn { color: #b8564d; opacity: 0.95; }
+
+.log {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  font: 11px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  opacity: 0.8;
+  background: rgba(128, 128, 128, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.foot {
+  font-size: 11px;
+  opacity: 0.5;
+  text-align: center;
+}

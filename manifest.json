@@ -24,6 +24,7 @@
   "contributes": {
     "settings": {
       "title": "OpenViking",
+      "ui": { "route": "/settings.html" },
       "schema": {
         "type": "object",
         "properties": {
@@ -36,8 +37,8 @@
           "serverUrl": {
             "type": "string",
             "title": "Server 地址",
-            "description": "OpenViking server 的地址，与其它机器、Hermes 指向同一个。",
-            "default": "http://192.168.50.142:8000"
+            "description": "OpenViking server 的地址。本机直连用默认值；接局域网或远端时填它的地址。",
+            "default": "http://127.0.0.1:8000"
           },
           "apiKey": {
             "type": "string",
@@ -113,8 +114,26 @@
       {
         "id": "panel",
         "title": "OpenViking",
+        "description": "共享记忆与技能的控制台：身份、连通、开关、探针",
         "route": "/panel.html",
+        "cardForm": "flush",
+        "realization": "page",
+        "siteNavEntry": true,
+        "pageIcon": "assets/icon.svg",
         "face": { "image": "assets/cover.svg" }
+      },
+      {
+        "id": "status",
+        "title": "OpenViking 状态",
+        "description": "常驻小卡：连通、peer、开关、探针计数",
+        "route": "/card.html",
+        "cardForm": "flush",
+        "face": { "image": "assets/cover.svg" },
+        "functionPanel": {
+          "id": "openviking-status",
+          "label": "OpenViking",
+          "route": "/card.html"
+        }
       }
     ]
   }

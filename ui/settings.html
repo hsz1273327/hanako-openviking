@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenViking 设置</title>
+  <link rel="stylesheet" href="./assets/panel.css">
+  <style>
+    .page { display: block; max-width: 560px; padding: 4px 2px 18px; }
+    .field { display: grid; gap: 5px; margin-bottom: 14px; }
+    .field label { font-size: 12px; opacity: 0.75; }
+    .field input {
+      font: inherit;
+      font-size: 13px;
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border-radius: 9px;
+      border: 1px solid rgba(128, 128, 128, 0.34);
+      background: rgba(128, 128, 128, 0.06);
+      color: inherit;
+      min-width: 0;
+    }
+    .field input::placeholder { color: currentColor; opacity: 0.4; }
+    .field input:focus {
+      outline: none;
+      border-color: rgba(111, 143, 104, 0.75);
+      box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.16);
+    }
+    .field .hint { font-size: 11px; opacity: 0.55; }
+    .actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+    .status { font-size: 11.5px; opacity: 0.75; }
+    .status.ok { color: #5d7d56; opacity: 1; }
+    .status.bad { color: #b8564d; opacity: 1; }
+    .footnote {
+      margin: 18px 0 0;
+      padding-top: 12px;
+      border-top: 1px solid rgba(128, 128, 128, 0.2);
+      font-size: 11.5px;
+      line-height: 1.55;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+<body>
+  <!-- 设置页只做一件事：把这台机器接到中枢上去。
+       三个字段填完就该再也不用来。其余开关都在 OpenViking 页面里。 -->
+  <main class="page" data-hana-app-ui>
+    <div class="field">
+      <label for="serverUrl">服务地址</label>
+      <input id="serverUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8000">
+      <span class="hint">本机直连用默认值即可；接局域网或远端时填那台的地址。</span>
+    </div>
+
+    <div class="field">
+      <label for="apiKey">API Key</label>
+      <input id="apiKey" type="text" spellcheck="false" autocomplete="off" placeholder="未填写">
+      <span class="hint" id="keyHint">保存在本机 App 设置里，不会回显、不进日志。</span>
+    </div>
+
+    <div class="field">
+      <label for="peerPrefix">门牌前缀</label>
+      <input id="peerPrefix" type="text" spellcheck="false" placeholder="如 mbp / desktop，可留空">
+      <span class="hint">同机不同助手各自一个门牌：前缀-助手目录名。留空就只用助手目录名。</span>
+    </div>
+
+    <div class="actions">
+      <button id="save" class="btn" type="button">保存</button>
+      <span id="status" class="status"></span>
+    </div>
+
+    <p class="footnote">
+      总开关、召回、写回、只读、探针这些运行时开关不在这一页，去「OpenViking」页面改。
+      这一页只在换机器、换 key 的时候才需要打开。
+    </p>
+  </main>
+  <script type="module" src="./assets/settings.js"></script>
+</body>
+</html>

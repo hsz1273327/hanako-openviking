@@ -5,7 +5,7 @@
 
 export const DEFAULTS = {
   enabled: false,
-  serverUrl: "http://192.168.50.142:8000",
+  serverUrl: "http://127.0.0.1:8000",
   apiKey: "",
   peerPrefix: "",
   mergeMemory: false,
