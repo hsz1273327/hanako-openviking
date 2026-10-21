@@ -10,7 +10,8 @@
 
 ### 现状
 
-- 家门口的 OpenViking server 已经在跑（`http://192.168.50.142:8000`，v0.4.16，`auth_mode=api_key`），
+- 家门口的 OpenViking server 已经在跑（`http://<your-openviking-host>:8000`，v0.4.16，`auth_mode=api_key`），
+  测试机的真实地址不入库；仓库里的默认值是 `http://127.0.0.1:8000`，安装者填自己的地址。
   Hermes 已经接在里面。
 - 主力机上的 OpenHanako 与会话所在的 MBP 各自拥有一份"只属于自己"的记忆和技能。
 - 已有的 v1 插件 `openviking-memory`（源目录 `~/WORKSPACE/Hanako/openviking-memory-plugin`）
