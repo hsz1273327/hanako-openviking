@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import { createClient } from "../ov/client.js";
+import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
 import { readConnection, readSwitches } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
@@ -234,7 +235,7 @@ export function createRecallHandler(sdk, options = {}) {
     const client = createClient({
       ...conn,
       peer: resolvePeer(conn, session?.sessionPath),
-      fetchImpl: sdk.network?.fetch ? sdk.network.fetch.bind(sdk.network) : undefined,
+      ...transportFor(sdk),
     });
 
     let result;

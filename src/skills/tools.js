@@ -8,6 +8,7 @@
 import { readConnection, readSwitches } from "../ov/settings.js";
 import { resolvePeer } from "../ov/identity.js";
 import { createClient } from "../ov/client.js";
+import { transportFor } from "../ov/transport.js";
 
 const FIND_DEFAULT_LIMIT = 5;
 const FIND_DEFAULT_THRESHOLD = 0.45;
@@ -33,7 +34,7 @@ function clientOf(sdk, conn) {
   return createClient({
     ...conn,
     peer: resolvePeer(conn, null),
-    fetchImpl: sdk.network.fetch.bind(sdk.network),
+    ...transportFor(sdk),
   });
 }
 

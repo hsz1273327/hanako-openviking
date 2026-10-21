@@ -6,9 +6,11 @@
 //
 // 任何钩子失败都不得影响本轮对话：探针只写日志，召回失败返回 undefined。
 
+import { randomBytes } from "node:crypto";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
+import { createRuntimeTransport, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
 import { resolvePeer } from "./src/ov/identity.js";
 import { createRecallHandler } from "./src/memory/recall.js";
 import { createProbe } from "./src/probe.js";
@@ -17,7 +19,55 @@ import { markClosed, touchSession } from "./src/state/session.js";
 
 export const name = "hanako-openviking";
 
+const DEFAULT_RUNTIME_PORT = 47821;
+
+/**
+ * 起受管运行时（native + external network），并把它的 sendJson 记成进程级出口。
+ *
+ * 失败不阻断装载：记一条 warning，退回 ctx.network.fetch（受 manifest 白名单）。
+ * /status 的 transport 字段据此显示 runtime / direct / down。
+ */
+async function startManagedRuntime(sdk) {
+  // token 只活在本进程内，每次启动重生成；只经 argv 交给自己的子进程，不进日志。
+  const token = randomBytes(16).toString("hex");
+  let port = DEFAULT_RUNTIME_PORT;
+
+  try {
+    port = Number(await sdk.config.get("runtimePort")) || DEFAULT_RUNTIME_PORT;
+    if (typeof sdk.runtime?.start !== "function" || typeof sdk.runtime?.fetch !== "function") {
+      throw new Error("宿主没有提供 ctx.runtime.start / fetch");
+    }
+    const info = await sdk.runtime.start({
+      runtime: "node",
+      entry: "runtime/service.mjs",
+      profile: "native",
+      network: "external",
+      args: [`--port=${port}`, `--token=${token}`],
+      service: { port, readyMarker: "APP_READY" },
+    });
+    const runtimeId = info?.runtimeId;
+    if (typeof runtimeId !== "string" || !runtimeId) {
+      throw new Error("runtime.start 没有返回 runtimeId");
+    }
+
+    const transport = createRuntimeTransport({
+      runtimeFetch: sdk.runtime.fetch.bind(sdk.runtime),
+      runtimeId,
+      timeoutMs: 1500,
+      logger: sdk.logger,
+    });
+    setRuntimeTransport({ send: transport.sendJson, runtimeId, port, error: null });
+    sdk.logger.info(`openviking runtime ready (runtimeId=${runtimeId}, port=${port})`);
+  } catch (error) {
+    const message = String(error?.message || error);
+    setRuntimeTransport({ send: null, runtimeId: null, port, error: message });
+    sdk.logger.warn(`openviking runtime unavailable, falling back to ctx.network: ${message}`);
+  }
+}
+
 export default defineApp(async (sdk) => {
+  await startManagedRuntime(sdk);
+
   const probe = createProbe({ dataDir: sdk.dataDir, logger: sdk.logger });
   const probeOn = async () => (await sdk.config.get("probe")) === true;
   // 一个进程一份去重表：before-request 按模型步触发，同一用户文本只召回一次。
@@ -41,12 +91,15 @@ export default defineApp(async (sdk) => {
       };
 
       if (sw.enabled && conn.serverUrl && conn.apiKey) {
-        const client = createClient({
-          ...conn,
-          fetchImpl: sdk.network.fetch.bind(sdk.network),
-        });
-        report.health = await safe(() => client.health());
-        report.ready = await safe(() => client.ready());
+        const transport = transportFor(sdk);
+        if (transport.mode === "down") {
+          report.health = null;
+          report.ready = null;
+        } else {
+          const client = createClient({ ...conn, ...transport });
+          report.health = await safe(() => client.health());
+          report.ready = await safe(() => client.ready());
+        }
       } else {
         report.health = null;
         report.ready = null;

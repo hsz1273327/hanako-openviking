@@ -10,6 +10,7 @@ import path from "node:path";
 import { readConnection, readSwitches } from "../src/ov/settings.js";
 import { resolvePeer } from "../src/ov/identity.js";
 import { createClient } from "../src/ov/client.js";
+import { transportFor } from "../src/ov/transport.js";
 
 const LOG_TAIL = 24;
 
@@ -50,6 +51,7 @@ export default function registerStatusRoutes(app, ctx) {
     const sw = await readSwitches(ctx);
     const conn = await readConnection(ctx);
     const probeLines = readTail(path.join(dir, "probe.log"));
+    const transport = transportFor(ctx);
 
     const report = {
       enabled: sw.enabled,
@@ -64,6 +66,8 @@ export default function registerStatusRoutes(app, ctx) {
       budgetTokens: conn.injectBudgetTokens,
       recallScope: conn.recallPeerScope,
       probeLog: summarizeLog(probeLines),
+      // 当前出口：runtime（受管代理）/ direct（ctx.network）/ down（两条都不可用）。
+      transport: transport.mode,
       // peer 纯本地推导，不联网。未启用时也应该知道"我是谁"。
       peer: resolvePeer(conn, null),
     };
@@ -72,10 +76,14 @@ export default function registerStatusRoutes(app, ctx) {
       return c.json({ ...report, reach: "idle", health: null, ready: null }, 200);
     }
 
-    const client = createClient({
-      ...conn,
-      fetchImpl: ctx?.network?.fetch?.bind(ctx.network) ?? globalThis.fetch,
-    });
+    if (transport.mode === "down") {
+      return c.json(
+        { ...report, reach: "down", health: null, ready: null, error: "没有可用的网络出口" },
+        200,
+      );
+    }
+
+    const client = createClient({ ...conn, ...transport });
 
     try {
       report.health = await client.health();

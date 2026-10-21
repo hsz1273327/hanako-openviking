@@ -4,6 +4,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "../src/ov/client.js";
+import {
+  createRuntimeTransport,
+  resetRuntimeTransport,
+  setRuntimeTransport,
+  transportFor,
+} from "../src/ov/transport.js";
+import { normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
+import registerStatusRoutes from "../routes/status.js";
 import { resolvePeer, agentDirFromSessionPath } from "../src/ov/identity.js";
 import { readConnection, readSwitches, DEFAULTS } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
@@ -155,6 +163,237 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   }
   check("错误封装会抛", caught !== null);
   check("抛出里带 code", caught?.includes("NOT_FOUND"), caught);
+}
+
+// ================= 受管运行时传输 =================
+
+// 一个假的宿主 ctx.runtime.fetch：记下调用，回一个合规的代理信封。
+function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } = {}) {
+  const calls = [];
+  const runtimeFetch = async (runtimeId, path, init) => {
+    calls.push({ runtimeId, path, init });
+    return new Response(
+      JSON.stringify({
+        status,
+        headers,
+        body: JSON.stringify(result),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  return { calls, runtimeFetch };
+}
+
+{
+  // ---- 信封打包：URL / method / headers / body 都在，API Key 只在信封里 ----
+  const { calls, runtimeFetch } = mockRuntimeFetch({
+    result: { status: "ok", result: { rendered: "一条记忆" } },
+  });
+  const transport = createRuntimeTransport({ runtimeFetch, runtimeId: "rt-7", timeoutMs: 1800 });
+  const client = createClient({
+    serverUrl: "http://192.168.50.142:8000/",
+    apiKey: "secret-key",
+    peer: "mbp-hanako",
+    timeoutMs: 1800,
+    send: transport.sendJson,
+  });
+
+  const result = await client.recall("昨天说的那件事", { peerScope: "self", maxTokens: 800 });
+  eq("运行时路径拿到 result", result, { rendered: "一条记忆" });
+  eq("只经 runtime.fetch 发一次", calls.length, 1);
+  eq("runtimeId 到位", calls[0].runtimeId, "rt-7");
+  eq("代理路径是 /fetch", calls[0].path, "/fetch");
+  eq("代理用 POST", calls[0].init.method, "POST");
+  eq("代理请求体是 JSON 字符串", typeof calls[0].init.body, "string");
+
+  const envelope = JSON.parse(calls[0].init.body);
+  eq("信封 url", envelope.url, "http://192.168.50.142:8000/api/v1/search/search");
+  eq("信封 method", envelope.method, "POST");
+  eq("信封带 API Key", envelope.headers["X-API-Key"], "secret-key");
+  eq("信封带 actor peer", envelope.headers["X-OpenViking-Actor-Peer"], "mbp-hanako");
+  eq("信封 body 保留字符串形态", typeof envelope.body, "string");
+  eq("信封 body 里 self 映射为 actor", JSON.parse(envelope.body).peer_scope, "actor");
+  eq("信封带这次连接的超时", envelope.timeoutMs, 1800);
+  eq("信封带 maxBytes", envelope.maxBytes, 2_097_152);
+  check(
+    "API Key 不在 runtime.fetch 的请求头里",
+    !JSON.stringify(calls[0].init.headers).includes("secret-key"),
+    JSON.stringify(calls[0].init.headers),
+  );
+  check(
+    "API Key 不在 runtime.fetch 的别的参数里",
+    !JSON.stringify({ runtimeId: calls[0].runtimeId, path: calls[0].path }).includes("secret-key"),
+  );
+}
+
+{
+  // ---- 代理返回非 2xx：client 仍按 OpenViking 错误体判 ----
+  const { calls, runtimeFetch } = mockRuntimeFetch({
+    status: 404,
+    result: { status: "error", error: { code: "NOT_FOUND", message: "no such skill" } },
+  });
+  const client = createClient({
+    serverUrl: "http://h:1",
+    apiKey: "k",
+    send: createRuntimeTransport({ runtimeFetch, runtimeId: "rt-1" }).sendJson,
+  });
+  let caught = null;
+  try {
+    await client.getSkill("missing");
+  } catch (error) {
+    caught = String(error.message);
+  }
+  eq("非 2xx 只发一次", calls.length, 1);
+  check("非 2xx 时抛错", caught !== null);
+  check("错误体里的 code 透出来", caught?.includes("NOT_FOUND"), caught);
+  check("错误体里的 message 透出来", caught?.includes("no such skill"), caught);
+}
+
+{
+  // ---- 代理自己失败：错误带 code ----
+  const unauthorized = async () =>
+    new Response(
+      JSON.stringify({ error: { code: "BAD_REQUEST", message: "x-ov-token 不匹配" } }),
+      { status: 403 },
+    );
+  const warnings = [];
+  let caught = null;
+  try {
+    await createRuntimeTransport({
+      runtimeFetch: unauthorized,
+      runtimeId: "rt-1",
+      logger: { warn: (message) => warnings.push(message) },
+    }).sendJson("http://h:1/health", { headers: { "X-API-Key": "secret-key" } });
+  } catch (error) {
+    caught = error;
+  }
+  eq("代理 403 抛 TransportError", caught?.name, "TransportError");
+  eq("代理 403 的 code", caught?.code, "BAD_REQUEST");
+  check(
+    "失败日志不含 API Key",
+    !warnings.join(" ").includes("secret-key"),
+    warnings.join(" | "),
+  );
+
+  const bridgeBroken = async () => {
+    const error = new Error("runtime not ready");
+    error.code = "APP_RUNTIME_NOT_READY";
+    throw error;
+  };
+  caught = null;
+  try {
+    await createRuntimeTransport({ runtimeFetch: bridgeBroken, runtimeId: "rt-1" }).sendJson(
+      "http://h:1/health",
+      {},
+    );
+  } catch (error) {
+    caught = error;
+  }
+  eq("桥本身失败时保留宿主 code", caught?.code, "APP_RUNTIME_NOT_READY");
+
+  const timeout = async () =>
+    new Response(JSON.stringify({ error: { code: "TIMEOUT", message: "too slow" } }), {
+      status: 504,
+    });
+  caught = null;
+  try {
+    await createRuntimeTransport({ runtimeFetch: timeout, runtimeId: "rt-1" }).sendJson(
+      "http://h:1/health",
+      {},
+    );
+  } catch (error) {
+    caught = error;
+  }
+  eq("代理超时的 code", caught?.code, "TIMEOUT");
+}
+
+{
+  // ---- 降级：没有运行时就用 ctx.network.fetch ----
+  resetRuntimeTransport();
+  const { calls, fetchImpl } = mockFetch({ body: { status: "ok", result: { healthy: true } } });
+  const fallback = transportFor({ network: { fetch: fetchImpl } });
+  eq("没有运行时回落到 direct", fallback.mode, "direct");
+  eq("direct 带 fetchImpl", typeof fallback.fetchImpl, "function");
+
+  const client = createClient({ serverUrl: "http://h:1", apiKey: "k", ...fallback });
+  eq("direct 路径仍能拿到 result", await client.health(), { healthy: true });
+  eq("direct 路径走的是原 fetch", calls.length, 1);
+
+  eq("两条都不可用时是 down", transportFor({}).mode, "down");
+  resetRuntimeTransport();
+}
+
+{
+  // ---- 运行时状态：/status 的 transport 字段 ----
+  const dir = path.join(import.meta.dirname, ".tmp-status-transport");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const handlers = {};
+  const app = { get: (route, handler) => { handlers[route] = handler; } };
+  const ctx = {
+    dataDir: dir,
+    config: { get: async () => undefined },
+    // 不该被调用：总闸关着时 /status 必须零联网。
+    network: { fetch: async () => { throw new Error("不该联网"); } },
+  };
+  registerStatusRoutes(app, ctx);
+  const invoke = () => handlers["/status"]({ json: (body, status) => ({ body, status }) });
+
+  resetRuntimeTransport();
+  const direct = await invoke();
+  eq("没有运行时时 /status 报 direct", direct.body.transport, "direct");
+  eq("总闸关着时 reach 仍是 idle", direct.body.reach, "idle");
+
+  setRuntimeTransport({ send: async () => ({ status: 200, ok: true, data: {} }), runtimeId: "rt-9" });
+  const viaRuntime = await invoke();
+  eq("运行时就绪时 /status 报 runtime", viaRuntime.body.transport, "runtime");
+
+  resetRuntimeTransport();
+  const down = await invoke();
+  eq("没有 ctx.network 时是 down", transportFor({}).mode, "down");
+  check("降级后 direct 仍可用", down.body.transport === "direct");
+
+  resetRuntimeTransport();
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 服务端参数与信封校验（纯函数） ----
+  eq("缺省端口", parseArgs([]).port, 47821);
+  eq("argv 里的端口", parseArgs(["--port=5000"]).port, 5000);
+  eq("argv 里的 token", parseArgs(["--token=abc"]).token, "abc");
+
+  const ok = normalizeEnvelope({
+    url: "http://192.168.50.142:8000/health",
+    method: "get",
+    headers: { Host: "evil", "X-API-Key": "k", "Content-Length": "9" },
+    timeoutMs: 999999,
+  });
+  eq("协议保留", ok.url.protocol, "http:");
+  eq("method 转大写", ok.method, "GET");
+  eq("逐跳头被剥掉", ok.headers.host, undefined);
+  eq("Content-Length 被剥掉", ok.headers["content-length"], undefined);
+  eq("自定义头保留", ok.headers["x-api-key"], "k");
+  eq("超时上限 30000", ok.timeoutMs, 30000);
+  eq("maxBytes 缺省", ok.maxBytes, 2_097_152);
+  eq("缺省 method", normalizeEnvelope({ url: "https://h/x" }).method, "GET");
+
+  let rejected = null;
+  try {
+    normalizeEnvelope({ url: "file:///etc/passwd" });
+  } catch (error) {
+    rejected = error;
+  }
+  eq("非 http/https 被拒", rejected?.code, "BAD_REQUEST");
+
+  rejected = null;
+  try {
+    normalizeEnvelope({ url: "http://h/x", body: { not: "string" } });
+  } catch (error) {
+    rejected = error;
+  }
+  eq("非字符串 body 被拒", rejected?.code, "BAD_REQUEST");
 }
 
 // ================= identity =================

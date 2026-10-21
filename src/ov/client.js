@@ -23,8 +23,11 @@ export function createClient({
   peer,
   timeoutMs = 1500,
   fetchImpl,
+  send,
 } = {}) {
   const base = String(serverUrl || "").replace(/\/+$/, "");
+  // send 优先（受管运行时的 transport.sendJson）；没有就退回 fetchImpl。
+  const doSend = typeof send === "function" ? send : null;
   const doFetch = fetchImpl || globalThis.fetch;
 
   function headers(extra) {
@@ -35,20 +38,47 @@ export function createClient({
     return h;
   }
 
+  // 两条出口只在"怎么拿到 status / ok / data"上不同，判错误体的逻辑共用一份。
+  function unwrap(path, { status, ok, data, statusText = "" }) {
+    if (!ok || data?.status === "error") {
+      const code = data?.error?.code || `HTTP ${status}`;
+      const message = data?.error?.message || statusText || "";
+      throw new Error(`OpenViking ${path}: ${code} ${message}`.trim());
+    }
+    return data?.result;
+  }
+
   async function call(path, init = {}) {
-    const res = await doFetch(base + path, {
+    const url = base + path;
+    const requestHeaders = headers(init.headers);
+
+    if (doSend) {
+      const result = await doSend(url, {
+        method: init.method || "GET",
+        headers: requestHeaders,
+        body: init.body,
+        timeoutMs,
+      });
+      return unwrap(path, {
+        status: result?.status,
+        ok: result?.ok === true,
+        data: result?.data ?? null,
+      });
+    }
+
+    const res = await doFetch(url, {
       ...init,
-      headers: headers(init.headers),
+      headers: requestHeaders,
       // 连不上即短路：超时极短，失败直接抛，由调用方吞掉并降级。
       signal: AbortSignal.timeout(timeoutMs),
     });
     const data = await res.json().catch(() => null);
-    if (!res.ok || data?.status === "error") {
-      const code = data?.error?.code || `HTTP ${res.status}`;
-      const message = data?.error?.message || res.statusText || "";
-      throw new Error(`OpenViking ${path}: ${code} ${message}`.trim());
-    }
-    return data?.result;
+    return unwrap(path, {
+      status: res.status,
+      ok: res.ok,
+      data,
+      statusText: res.statusText,
+    });
   }
 
   return {
