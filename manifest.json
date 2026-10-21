@@ -5,14 +5,17 @@
   "version": "0.1.0",
   "entry": "index.js",
   "icon": "assets/icon.svg",
-  "description": "把本机 Hana 接入 OpenViking，与其它机器上的 OpenHanako、以及自托管的其它 agent 共享记忆与技能。",
+  "description": "把本机 Hana 接入 OpenViking，与其它机器上的 OpenHanako、以及自托管的其它 agent 共享记忆与技能。通过一个受管本地服务访问你自填的地址。",
   "minAppVersion": "1.1.7-beta",
   "capabilities": [
     "app/hooks.agent-before-start",
     "app/hooks.provider-before-request",
     "app/hooks.observe",
     "app/tools.expose-to-model",
-    "app/resources.read"
+    "app/resources.read",
+    "app/runtime.execute",
+    "app/runtime.native",
+    "app/runtime.network"
   ],
   "network": {
     "allowedHosts": ["127.0.0.1", "localhost"],
@@ -88,6 +91,12 @@
             "title": "请求超时",
             "description": "单次请求超时（毫秒）。连不上就短路，宜短。",
             "default": 1500
+          },
+          "runtimePort": {
+            "type": "integer",
+            "title": "本地代理端口（内部）",
+            "description": "受管代理进程监听的本地编译端口。默认 47821，与其它程序冲突时才改，改后需重载 App。",
+            "default": 47821
           },
           "injectBudgetTokens": {
             "type": "integer",

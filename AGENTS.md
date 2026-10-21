@@ -1,5 +1,25 @@
 # 仓库约定
 
+## 开工前必读
+
+宿主契约全在 `APPS.md`（`~/.hanako/artifacts/server/<version>/APPS.md`，约 375KB，随宿主升级而变）。**先查文档，再 grep 代码**：代码能告诉你实现长什么样，告诉不了你哪些是设计、哪些是缺口。
+
+按关键词定位，不要通读：
+
+```bash
+grep -n "关键词" APPS.md | head
+sed -n '起,止p' APPS.md
+```
+
+涉及网络、进程、权限、卡片形态的改动，先把这几节读完再用笔：
+
+- 「出站网络（network）」—— `allowedHosts` 的匹配规则、`allowLocalhost` 的真实语义
+- 「受管程序与本地服务」—— `ctx.runtime.start`、`profile: "native"`、`network: "external"`
+- 「子进程」—— `app/process.spawn` 的边界
+- 「贡献一张黑板卡」—— page / 卡片 / 服务卡的声明规则
+
+教训：本仓库第一版传输层走了三轮弯路（curl → spawn → 受管运行时），就因为没先读这一节。
+
 ## 谁写代码
 
 默认委托给 `pi` 实现，助手只负责需求、验收，以及必须用眼睛判断的部分。
