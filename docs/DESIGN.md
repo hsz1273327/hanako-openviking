@@ -110,8 +110,20 @@
   → 把服务端裁好的记忆块注入 payload。阈值与预算交服务端，插件只定上限与超时。
 - **写回**：`agent/settled` → `sdk.sessions.entries` 取正文 → 指纹游标取增量
   → `createSession`（按 peer+sessionId 幂等）→ `messages/batch` → `commit`。
-- **身份**：`peer = <prefix>-<agentDir>`（小明 `mbp-agent-muewpt9i`、小花 `mbp-hanako`）；
-  可选 `mergeMemory` 把所有 agent 折成一个 peer。
+- **身份**：peer 有三种形态，彼此不可混同：
+  - **绑定** `<prefix>-openhanako-<agentDir>`（`mbp-openhanako-blueflower`、`mbp-openhanako-hanako`）——
+    会话路径里解析出了助手目录名；
+  - **合并** `<prefix>-openhanako-merged` —— `mergeMemory` 明确打开，整台机器共用一个身份；
+  - **未绑定** `peer: null` —— 解析不出助手，**不发** `X-OpenViking-Actor-Peer` 头，界面显示“未绑定助手”。
+
+  peer 是**会话级**的：同一个窗口切助手就换 peer。中间那段 `openhanako` 是产品标识，
+  用来把 Hana 的 peer 和别的客户端自报的名字区分开。`-merged` 后缀保证“合并”永远不等于“不知道”：
+  两者若都退化成 `openhanako`，服务端就分不出“用户主动合并”与“解析失败”。
+  门牌前缀写入前先归一化为 slug（小写、非 `[a-z0-9]` 折叠成 `-`、去首尾 `-`），
+  再校验 `^[a-z0-9][a-z0-9-]*$` 且长度 ≤ 32，不满足直接拒绝保存——
+  非 ASCII 头值会让 `Headers` 构造抛 `TypeError`，召回把它当网络失败吞掉，表现为“连上了但永远没有记忆”。
+  未绑定会话**可以召回但不允许写回**：召回只需要 `peer_scope=all`，写回却必须有明确归属；
+  `capture` 落地时必须拦住没有 peer 的会话。
 
 ### B. 技能链路（检索优先，任务级路由，按会话角色分工）
 

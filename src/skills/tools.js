@@ -30,12 +30,32 @@ async function offlineReason(sdk) {
   return null;
 }
 
-function clientOf(sdk, conn) {
+function clientOf(sdk, conn, sessionPath) {
   return createClient({
     ...conn,
-    peer: resolvePeer(conn, null),
+    peer: resolvePeer(conn, sessionPath),
     ...transportFor(sdk),
   });
+}
+
+/**
+ * 这次调用属于哪一段会话，也就是"谁在说话"。
+ *
+ * 只认两个来源，按顺序：
+ *   1. 宿主在 execute 的 context 里给的 sessionPath（APPS.md：单参数调用，
+ *      execute({ ...args, context: { sessionPath, messageId, messageText, callToken? } })）
+ *   2. 注册工具时闭包进来的 options.sessionPath（字符串，或返回字符串的函数）
+ *
+ * **刻意不读模型自己传的 args.sessionPath。** 模型能自报会话路径，就等于允许它
+ * 冒充另一个助手的门牌——APPS.md 写明应用不能自报会话身份，会话路径只能来自宿主。
+ * 下一个想"顺手简化成 args.sessionPath"的人，请先读完这两句再动手。
+ */
+function sessionPathOf(args, options) {
+  const fromContext = args?.context?.sessionPath;
+  if (fromContext) return String(fromContext);
+  const fallback = options?.sessionPath;
+  const value = typeof fallback === "function" ? fallback() : fallback;
+  return value ? String(value) : null;
 }
 
 function compact(entry) {
@@ -49,7 +69,7 @@ function compact(entry) {
   };
 }
 
-export function skillFindTool(sdk) {
+export function skillFindTool(sdk, options = {}) {
   return {
     name: "openviking_skill_find",
     description:
@@ -71,7 +91,7 @@ export function skillFindTool(sdk) {
       if (reason) return text({ ok: false, reason });
 
       const conn = await readConnection(sdk);
-      const client = clientOf(sdk, conn);
+      const client = clientOf(sdk, conn, sessionPathOf(args, options));
       try {
         const result = await client.findSkills(String(args?.query || "").trim(), {
           limit: Number(args?.limit) > 0 ? Number(args.limit) : FIND_DEFAULT_LIMIT,
@@ -100,7 +120,7 @@ export function skillFindTool(sdk) {
   };
 }
 
-export function skillLoadTool(sdk) {
+export function skillLoadTool(sdk, options = {}) {
   return {
     name: "openviking_skill_load",
     description:
@@ -125,7 +145,7 @@ export function skillLoadTool(sdk) {
       if (!name) return text({ ok: false, reason: "缺少 name。" });
 
       const conn = await readConnection(sdk);
-      const client = clientOf(sdk, conn);
+      const client = clientOf(sdk, conn, sessionPathOf(args, options));
       const level = Number(args?.level) === 1 ? 1 : 2;
 
       try {

@@ -34,21 +34,25 @@ export function createClient({
     const h = { "Content-Type": "application/json", ...(extra || {}) };
     if (apiKey) h["X-API-Key"] = apiKey;
     // 服务端据此区分 self / actor_peer / other_peer。
-    if (peer) h["X-OpenViking-Actor-Peer"] = peer;
+    // 没有身份就不冒充：peer 为 null / 空串时**不发**这个头。
+    // "没有 peer"和"peer=openhanako"是两件事，前者服务端才知道它不认识这个来源。
+    const actor = String(peer ?? "").trim();
+    if (actor) h["X-OpenViking-Actor-Peer"] = actor;
     return h;
   }
 
   // 两条出口只在"怎么拿到 status / ok / data"上不同，判错误体的逻辑共用一份。
-  function unwrap(path, { status, ok, data, statusText = "" }) {
+  // mode="raw" 给 /health、/ready 这类直接把字段摆在顶层的端点用。
+  function unwrap(path, { status, ok, data, statusText = "" }, mode = "result") {
     if (!ok || data?.status === "error") {
       const code = data?.error?.code || `HTTP ${status}`;
       const message = data?.error?.message || statusText || "";
       throw new Error(`OpenViking ${path}: ${code} ${message}`.trim());
     }
-    return data?.result;
+    return mode === "raw" ? data : data?.result;
   }
 
-  async function call(path, init = {}) {
+  async function call(path, init = {}, mode = "result") {
     const url = base + path;
     const requestHeaders = headers(init.headers);
 
@@ -59,11 +63,15 @@ export function createClient({
         body: init.body,
         timeoutMs,
       });
-      return unwrap(path, {
-        status: result?.status,
-        ok: result?.ok === true,
-        data: result?.data ?? null,
-      });
+      return unwrap(
+        path,
+        {
+          status: result?.status,
+          ok: result?.ok === true,
+          data: result?.data ?? null,
+        },
+        mode,
+      );
     }
 
     const res = await doFetch(url, {
@@ -73,20 +81,24 @@ export function createClient({
       signal: AbortSignal.timeout(timeoutMs),
     });
     const data = await res.json().catch(() => null);
-    return unwrap(path, {
-      status: res.status,
-      ok: res.ok,
-      data,
-      statusText: res.statusText,
-    });
+    return unwrap(
+      path,
+      {
+        status: res.status,
+        ok: res.ok,
+        data,
+        statusText: res.statusText,
+      },
+      mode,
+    );
   }
 
   return {
     baseUrl: base,
 
-    // 健康检查，免认证。
-    health: () => call("/health", { method: "GET" }),
-    ready: () => call("/ready", { method: "GET" }),
+    // 健康检查，免认证。/health 与 /ready 把字段摆在顶层，没有 result 包一层。
+    health: () => call("/health", { method: "GET" }, "raw"),
+    ready: () => call("/ready", { method: "GET" }, "raw"),
 
     // 记忆召回。mode="context" 返回服务端已按 token 预算组装好的上下文块。
     recall: (query, opts = {}) =>

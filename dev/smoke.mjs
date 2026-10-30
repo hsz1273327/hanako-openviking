@@ -12,7 +12,18 @@ import {
 } from "../src/ov/transport.js";
 import { normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
 import registerStatusRoutes from "../routes/status.js";
-import { resolvePeer, agentDirFromSessionPath } from "../src/ov/identity.js";
+import registerSessionRoutes from "../routes/session.js";
+import registerConnRoutes from "../routes/conn.js";
+import {
+  composePeer,
+  resolvePeer,
+  describePeer,
+  agentDirFromSessionPath,
+  normalizePrefix,
+  peerForSession,
+  noteActivePeer,
+  readActivePeer,
+} from "../src/ov/identity.js";
 import { readConnection, readSwitches, DEFAULTS } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
 import {
@@ -100,7 +111,9 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
 
 // ================= client =================
 {
-  const { calls, fetchImpl } = mockFetch({ body: { status: "ok", result: { healthy: true } } });
+  const { calls, fetchImpl } = mockFetch({
+    body: { status: "ok", healthy: true, version: "v0.4.16" },
+  });
   const client = createClient({
     serverUrl: "http://192.168.50.142:8000/",
     apiKey: "k-123",
@@ -109,12 +122,33 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   });
 
   const result = await client.health();
-  eq("health 返回 result", result, { healthy: true });
+  eq("health 返回顶层字段", result, { status: "ok", healthy: true, version: "v0.4.16" });
+  eq("health 里能拿到版本", result?.version, "v0.4.16");
   eq("base 去掉尾部斜杠", client.baseUrl, "http://192.168.50.142:8000");
   eq("health 走 GET", calls[0].init.method, "GET");
   eq("health URL", calls[0].url, "http://192.168.50.142:8000/health");
   eq("带上 X-API-Key", calls[0].init.headers["X-API-Key"], "k-123");
   eq("带上 actor peer", calls[0].init.headers["X-OpenViking-Actor-Peer"], "mbp-hanako");
+}
+
+{
+  // ---- 没有身份就不冒充：peer 为 null / 空串时干脆不发这个头 ----
+  const unbound = mockFetch();
+  await createClient({ serverUrl: "http://h:1", apiKey: "k", peer: null, fetchImpl: unbound.fetchImpl }).health();
+  eq(
+    "peer 为 null 时不发身份头",
+    "X-OpenViking-Actor-Peer" in unbound.calls[0].init.headers,
+    false,
+  );
+
+  const blank = mockFetch();
+  await createClient({ serverUrl: "http://h:1", apiKey: "k", peer: "  ", fetchImpl: blank.fetchImpl }).health();
+  eq(
+    "peer 为空白串时也不发身份头",
+    "X-OpenViking-Actor-Peer" in blank.calls[0].init.headers,
+    false,
+  );
+  eq("无身份时其他头照旧", blank.calls[0].init.headers["X-API-Key"], "k");
 }
 
 {
@@ -189,7 +223,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const { calls, runtimeFetch } = mockRuntimeFetch({
     result: { status: "ok", result: { rendered: "一条记忆" } },
   });
-  const transport = createRuntimeTransport({ runtimeFetch, runtimeId: "rt-7", timeoutMs: 1800 });
+  const transport = createRuntimeTransport({ runtimeFetch, token: "tk-test", runtimeId: "rt-7", timeoutMs: 1800 });
   const client = createClient({
     serverUrl: "http://192.168.50.142:8000/",
     apiKey: "secret-key",
@@ -204,6 +238,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("runtimeId 到位", calls[0].runtimeId, "rt-7");
   eq("代理路径是 /fetch", calls[0].path, "/fetch");
   eq("代理用 POST", calls[0].init.method, "POST");
+  eq("代理请求头带 x-ov-token", calls[0].init.headers["x-ov-token"], "tk-test");
   eq("代理请求体是 JSON 字符串", typeof calls[0].init.body, "string");
 
   const envelope = JSON.parse(calls[0].init.body);
@@ -235,7 +270,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const client = createClient({
     serverUrl: "http://h:1",
     apiKey: "k",
-    send: createRuntimeTransport({ runtimeFetch, runtimeId: "rt-1" }).sendJson,
+    send: createRuntimeTransport({ runtimeFetch, token: "tk-test", runtimeId: "rt-1" }).sendJson,
   });
   let caught = null;
   try {
@@ -261,7 +296,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   try {
     await createRuntimeTransport({
       runtimeFetch: unauthorized,
-      runtimeId: "rt-1",
+      token: "tk-test", runtimeId: "rt-1",
       logger: { warn: (message) => warnings.push(message) },
     }).sendJson("http://h:1/health", { headers: { "X-API-Key": "secret-key" } });
   } catch (error) {
@@ -282,7 +317,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   };
   caught = null;
   try {
-    await createRuntimeTransport({ runtimeFetch: bridgeBroken, runtimeId: "rt-1" }).sendJson(
+    await createRuntimeTransport({ runtimeFetch: bridgeBroken, token: "tk-test", runtimeId: "rt-1" }).sendJson(
       "http://h:1/health",
       {},
     );
@@ -297,7 +332,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
   caught = null;
   try {
-    await createRuntimeTransport({ runtimeFetch: timeout, runtimeId: "rt-1" }).sendJson(
+    await createRuntimeTransport({ runtimeFetch: timeout, token: "tk-test", runtimeId: "rt-1" }).sendJson(
       "http://h:1/health",
       {},
     );
@@ -310,13 +345,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 {
   // ---- 降级：没有运行时就用 ctx.network.fetch ----
   resetRuntimeTransport();
-  const { calls, fetchImpl } = mockFetch({ body: { status: "ok", result: { healthy: true } } });
+  const { calls, fetchImpl } = mockFetch({
+    body: { status: "ok", healthy: true, version: "v0.4.16" },
+  });
   const fallback = transportFor({ network: { fetch: fetchImpl } });
   eq("没有运行时回落到 direct", fallback.mode, "direct");
   eq("direct 带 fetchImpl", typeof fallback.fetchImpl, "function");
 
   const client = createClient({ serverUrl: "http://h:1", apiKey: "k", ...fallback });
-  eq("direct 路径仍能拿到 result", await client.health(), { healthy: true });
+  eq("direct 路径仍能拿到 health", (await client.health())?.version, "v0.4.16");
   eq("direct 路径走的是原 fetch", calls.length, 1);
 
   eq("两条都不可用时是 down", transportFor({}).mode, "down");
@@ -338,14 +375,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     network: { fetch: async () => { throw new Error("不该联网"); } },
   };
   registerStatusRoutes(app, ctx);
-  const invoke = () => handlers["/status"]({ json: (body, status) => ({ body, status }) });
+  const invoke = (query = {}) =>
+    handlers["/status"]({
+      json: (body, status) => ({ body, status }),
+      req: { query: (key) => query[key] ?? "" },
+    });
 
   resetRuntimeTransport();
   const direct = await invoke();
   eq("没有运行时时 /status 报 direct", direct.body.transport, "direct");
   eq("总闸关着时 reach 仍是 idle", direct.body.reach, "idle");
 
-  setRuntimeTransport({ send: async () => ({ status: 200, ok: true, data: {} }), runtimeId: "rt-9" });
+  setRuntimeTransport({ send: async () => ({ status: 200, ok: true, data: {} }), token: "tk-test", runtimeId: "rt-9" });
   const viaRuntime = await invoke();
   eq("运行时就绪时 /status 报 runtime", viaRuntime.body.transport, "runtime");
 
@@ -353,6 +394,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const down = await invoke();
   eq("没有 ctx.network 时是 down", transportFor({}).mode, "down");
   check("降级后 direct 仍可用", down.body.transport === "direct");
+
+  // ---- peer 与 peerSource：拿不到就用 null，不拿别的会话顶上 ----
+  const noSession = await invoke();
+  eq("无会话时 peer 为 null", noSession.body.peer, null);
+  eq("无会话时来源是 unbound", noSession.body.peerSource, "unbound");
+
+  patchSession(dir, "sess-peer", { agentDir: "agent-z" });
+  const withSession = await invoke({ session: "sess-peer" });
+  eq("?session= 时 peer 跟着会话走", withSession.body.peer, "openhanako-agent-z");
+  eq("?session= 时来源是 session", withSession.body.peerSource, "session");
+
+  const unknown = await invoke({ session: "sess-missing" });
+  eq("未记过身份的会话给 null", unknown.body.peer, null);
+  eq("未记过身份的会话不借用别会话", unknown.body.peerSource, "unbound");
+
+  // 合并时 /status 也能看到“其实是哪个助手”。
+  registerStatusRoutes(app, {
+    ...ctx,
+    config: { get: async (key) => ({ mergeMemory: true })[key] },
+  });
+  const mergedStatus = await invoke({ session: "sess-peer" });
+  eq("合并时 /status 的来源是 merged", mergedStatus.body.peerSource, "merged");
+  eq("合并时 /status 也带出助手名", mergedStatus.body.peerAgentDir, "agent-z");
 
   resetRuntimeTransport();
   fs.rmSync(dir, { recursive: true, force: true });
@@ -400,10 +464,88 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 {
   const p = "/Users/u/.hanako/agents/agent-muewpt9i/sessions/2026-10-19T02-41.jsonl";
   eq("从会话路径取 agentDir", agentDirFromSessionPath(p), "agent-muewpt9i");
-  eq("无前缀", resolvePeer({ peerPrefix: "" }, p), "agent-muewpt9i");
-  eq("有前缀", resolvePeer({ peerPrefix: "mbp" }, p), "mbp-agent-muewpt9i");
-  eq("合并记忆", resolvePeer({ peerPrefix: "mbp", mergeMemory: true }, p), "mbp-openhanako");
-  eq("路径不明时退回合并名", resolvePeer({}, null), "openhanako");
+  eq(
+    "Windows 反斜杠路径也认",
+    agentDirFromSessionPath("C:\\Users\\u\\.hanako\\agents\\agent-w\\sessions\\a.jsonl"),
+    "agent-w",
+  );
+  eq("无前缀", resolvePeer({ peerPrefix: "" }, p), "openhanako-agent-muewpt9i");
+  eq("有前缀", resolvePeer({ peerPrefix: "mbp" }, p), "mbp-openhanako-agent-muewpt9i");
+  eq("合并记忆", resolvePeer({ peerPrefix: "mbp", mergeMemory: true }, p), "mbp-openhanako-merged");
+  eq("未绑定时不冒充产品名", resolvePeer({}, null), null);
+  eq("有前缀但不知助手也不冒充", resolvePeer({ peerPrefix: "mbp" }, null), null);
+  eq("composePeer 空 agentDir 返回 null", composePeer({}, ""), null);
+  check(
+    "合并永远不等于未绑定",
+    resolvePeer({ mergeMemory: true }, null) !== composePeer({ peerPrefix: "" }, ""),
+  );
+  eq("未绑定不是产品名", resolvePeer({ mergeMemory: false }, null) === "openhanako", false);
+  eq("不同助手不撞名", composePeer({}, "blueflower") !== composePeer({}, "hanako"), true);
+  eq("归一化后为空的 agentDir 也算未绑定", composePeer({}, "主力机"), null);
+
+  // ---- 路径片段校验：不是单一目录名就当场拒绝 ----
+  eq("拒绝 . 段", agentDirFromSessionPath("/a/agents/./sessions/x.jsonl"), "");
+  eq("拒绝 .. 段", agentDirFromSessionPath("/a/agents/../sessions/x.jsonl"), "");
+  eq("拒绝空段", agentDirFromSessionPath("/a/agents//sessions/x.jsonl"), "");
+  eq("没有 agents/sessions 结构就当未绑定", agentDirFromSessionPath("/a/agents/x/other/x.jsonl"), "");
+
+  // ---- 子会话：.../agents/<dir>/subagent-sessions/direct/<file>.jsonl ----
+  const sub = "/home/u/.hanako/agents/blueflower/subagent-sessions/direct/a.jsonl";
+  eq("子会话也解析出 agentDir", agentDirFromSessionPath(sub), "blueflower");
+  eq(
+    "子会话 Windows 反斜杠路径也认",
+    agentDirFromSessionPath("C:\\Users\\u\\.hanako\\agents\\blueflower\\subagent-sessions\\direct\\a.jsonl"),
+    "blueflower",
+  );
+  eq(
+    "子会话结构对但目录名是 .. 仍然拒绝",
+    agentDirFromSessionPath("/a/agents/../subagent-sessions/direct/x.jsonl"),
+    "",
+  );
+  eq("会话根后面没有内容就拒绝", agentDirFromSessionPath("/a/agents/x/sessions/"), "");
+  eq("子会话在端到端上算绑定", resolvePeer({}, sub), "openhanako-blueflower");
+
+  // ---- 门牌前缀归一化：非法字符不能进 HTTP 头 ----
+  eq("中文前缀归一到空", normalizePrefix("主力机"), "");
+  eq("空格 + 大写归一化", normalizePrefix(" My MBP "), "my-mbp");
+  eq("去尾部连字符", normalizePrefix("mbp-"), "mbp");
+  eq(
+    "非法前缀不会拼出非法头值",
+    composePeer({ peerPrefix: "主力机" }, "blueflower"),
+    "openhanako-blueflower",
+  );
+
+  // ---- peerAgentDir：合并把“是哪个助手”盖住了，得能单独看到 ----
+  eq("绑定时也带归一化后的助手名", describePeer({}, "agent-z").peerAgentDir, "agent-z");
+  const mergedDescribed = describePeer({ mergeMemory: true }, "BlueFlower");
+  eq("合并时来源仍是 merged", mergedDescribed.peerSource, "merged");
+  eq("合并时仍能看到是哪个助手", mergedDescribed.peerAgentDir, "blueflower");
+  const noAgentDescribed = describePeer({ mergeMemory: true }, "");
+  check(
+    "没有助手名时干脆不给这个键",
+    Object.prototype.hasOwnProperty.call(noAgentDescribed, "peerAgentDir") === false,
+    JSON.stringify(noAgentDescribed),
+  );
+
+  // ---- peerSource：三种形态必须可区分 ----
+  eq("绑定来源", peerForSession({}, "ps-none", p).peerSource, "session");
+  eq("合并来源", peerForSession({ mergeMemory: true }, "ps-none", p).peerSource, "merged");
+  eq("未绑定来源", peerForSession({}, "ps-none", null).peerSource, "unbound");
+  eq("未绑定时 peer 为 null", peerForSession({}, "ps-none", null).peer, null);
+  eq(
+    "合并未绑定时也能给出身份",
+    peerForSession({ mergeMemory: true }, "ps-none", null).peer,
+    "openhanako-merged",
+  );
+
+  // ---- active peer 按会话存：不写空值，sessionPath 缺失不写 ----
+  eq("没 peer 时不写", noteActivePeer("act-a", null), null);
+  eq("没 peer 时读不到", readActivePeer("act-a"), null);
+  noteActivePeer("act-a", "openhanako-blueflower");
+  eq("按会话读回", readActivePeer("act-a"), "openhanako-blueflower");
+  eq("不会串到别的会话", readActivePeer("act-b"), null);
+  peerForSession({ mergeMemory: true }, "act-c", null);
+  eq("sessionPath 缺失时不记 active peer", readActivePeer("act-c"), null);
 }
 
 // ================= settings =================
@@ -561,6 +703,39 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("原因里提到 Server 地址", noUrl.reason.includes("Server 地址"), noUrl.reason);
 }
 
+{
+  // ---- 身份：技能工具必须跟会话走，且只认宿主给的会话路径 ----
+  const { calls, fetchImpl } = mockFetch({ body: { status: "ok", result: { results: [] } } });
+  const sdk = {
+    config: { get: async (key) => ({ enabled: true, apiKey: "k", serverUrl: "http://h:1" })[key] },
+    network: { fetch: fetchImpl },
+    logger: { info() {}, warn() {} },
+  };
+  const sessionPath = "/Users/u/.hanako/agents/agent-z/sessions/x.jsonl";
+  const hasPeerHeader = (index) => "X-OpenViking-Actor-Peer" in calls[index].init.headers;
+  const peerHeader = (index) => calls[index].init.headers["X-OpenViking-Actor-Peer"];
+
+  await skillFindTool(sdk).execute({ query: "抽表格", context: { sessionPath } });
+  eq("技能工具用 context 里的会话路径算身份", peerHeader(0), "openhanako-agent-z");
+
+  await skillFindTool(sdk).execute({ query: "抽表格" });
+  check("拿不到会话路径时不发身份头", hasPeerHeader(1) === false);
+
+  await skillLoadTool(sdk, { sessionPath }).execute({ name: "pdf-table" });
+  eq("options.sessionPath 字符串兜底", peerHeader(2), "openhanako-agent-z");
+
+  await skillFindTool(sdk, { sessionPath: () => sessionPath }).execute({ query: "抽表格" });
+  eq("options.sessionPath 函数兜底", peerHeader(3), "openhanako-agent-z");
+
+  await skillFindTool(sdk, {
+    sessionPath: "/Users/u/.hanako/agents/agent-other/sessions/y.jsonl",
+  }).execute({ query: "抽表格", context: { sessionPath } });
+  eq("context 优先于 options", peerHeader(4), "openhanako-agent-z");
+
+  await skillFindTool(sdk).execute({ query: "抽表格", sessionPath });
+  check("模型自报的 args.sessionPath 不被采纳", hasPeerHeader(5) === false);
+}
+
 // ================= state/session =================
 {
   const dir = path.join(import.meta.dirname, ".tmp-session");
@@ -606,6 +781,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   markClosed(dir, "sess-c", "test");
   check("shutdown 打了关闭标记", Boolean(readSession(dir, "sess-c").closedAt));
 
+  // 回填身份只补 agentDir：不能把已关闭的会话重新打开。
+  patchSession(dir, "sess-c", { agentDir: "agent-c" });
+  eq("补 agentDir 真的写进去了", readSession(dir, "sess-c").agentDir, "agent-c");
+  check("补 agentDir 不清关闭标记", Boolean(readSession(dir, "sess-c").closedAt));
+  eq("补 agentDir 不动关闭原因", readSession(dir, "sess-c").closeReason, "test");
+  patchSession(dir, "sess-c", { agentDir: "   " });
+  eq("空 agentDir 不覆盖已有身份", readSession(dir, "sess-c").agentDir, "agent-c");
+
   touchSession(dir, "sess-c");
   eq("重开同一会话清掉关闭标记", readSession(dir, "sess-c").closedAt, null);
 
@@ -619,6 +802,157 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   listSessions(dir);
   check("过期会话被清掉", !fs.existsSync(staleFile));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= routes: conn =================
+{
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const store = {};
+  const writes = [];
+  const ctx = {
+    config: {
+      get: async (key) => store[key],
+      set: async (key, value) => {
+        writes.push([key, value]);
+        store[key] = value;
+      },
+    },
+  };
+  registerConnRoutes(app, ctx);
+  const post = (body) =>
+    handlers["POST /conn"]({
+      req: { json: async () => body },
+      json: (payload, status) => ({ body: payload, status }),
+    });
+
+  const chinese = await post({ peerPrefix: "主力机" });
+  eq("中文前缀被拒", chinese.status, 400);
+  check(
+    "拒绝原因讲清可用字符",
+    String(chinese.body.error).includes("字母、数字和连字符"),
+    chinese.body.error,
+  );
+  eq("被拒不落库", writes.length, 0);
+
+  const tooLong = await post({ peerPrefix: "a".repeat(33) });
+  eq("超长前缀被拒", tooLong.status, 400);
+  eq("超长也不落库", writes.length, 0);
+
+  // 同一次提交里的其他字段也不能先一步落库。
+  const mixed = await post({ serverUrl: "http://h:9", peerPrefix: "主力机", apiKey: "k" });
+  eq("一处不合法就整单被拒", mixed.status, 400);
+  eq("同单其他字段也不落库", writes.length, 0);
+  eq("serverUrl 确实没写", store.serverUrl, undefined);
+
+  const normalized = await post({ peerPrefix: " My MBP " });
+  eq("归一化后再落库", normalized.body.peerPrefix, "my-mbp");
+  eq("落库的是归一化后的值", store.peerPrefix, "my-mbp");
+
+  const trailing = await post({ peerPrefix: "mbp-" });
+  eq("尾部连字符去掉", trailing.body.peerPrefix, "mbp");
+
+  const cleared = await post({ peerPrefix: "" });
+  eq("空串表示清除前缀", cleared.body.peerPrefix, "");
+  eq("清除也落库", store.peerPrefix, "");
+
+  // ---- 存量脏前缀：未变化就放行，改成另一个脏值则整单拒 ----
+  const getConn = () => handlers["GET /conn"]({ json: (payload, status) => ({ body: payload, status }) });
+
+  store.peerPrefix = "主力机";
+  writes.length = 0;
+
+  const keepDirty = await post({ serverUrl: "http://h:7", peerPrefix: "主力机" });
+  eq("未变化的脏前缀不阻断整单", keepDirty.status, 200);
+  eq("同一单里的 serverUrl 照常落库", store.serverUrl, "http://h:7");
+  eq("脏前缀原样留着", store.peerPrefix, "主力机");
+  check(
+    "未变化的前缀没有被写回",
+    !writes.some(([key]) => key === "peerPrefix"),
+    JSON.stringify(writes),
+  );
+  check(
+    "applied 不声称改了前缀",
+    !keepDirty.body.applied.includes("peerPrefix"),
+    JSON.stringify(keepDirty.body.applied),
+  );
+
+  writes.length = 0;
+  const dirtyToDirty = await post({ peerPrefix: "主力机2" });
+  eq("改成另一个脏值仍被拒", dirtyToDirty.status, 400);
+  eq("被拒时零写入", writes.length, 0);
+  eq("脏前缀没被改掉", store.peerPrefix, "主力机");
+
+  const dirtyGet = await getConn();
+  eq("脏前缀在 GET 里可见为不合法", dirtyGet.body.peerPrefixValid, false);
+
+  store.peerPrefix = "mbp";
+  eq("正常前缀算合法", (await getConn()).body.peerPrefixValid, true);
+
+  store.peerPrefix = "";
+  eq("空前缀算合法", (await getConn()).body.peerPrefixValid, true);
+}
+
+// ================= routes: session =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-route-peer");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const ctxWith = (values) => ({
+    dataDir: dir,
+    config: { get: async (key) => values[key] },
+    network: { fetch: async () => { throw new Error("不该联网"); } },
+  });
+  const getSession = (sid) =>
+    handlers["GET /session/:sid"]({
+      req: { param: () => sid },
+      json: (payload, status) => ({ body: payload, status }),
+    });
+
+  registerSessionRoutes(app, ctxWith({}));
+  patchSession(dir, "s-bound", { agentDir: "agent-x" });
+
+  const bound = await getSession("s-bound");
+  eq("有 agentDir 时 peer 是绑定的", bound.body.peer, "openhanako-agent-x");
+  eq("有 agentDir 时来源是 session", bound.body.peerSource, "session");
+
+  const unbound = await getSession("s-unbound");
+  eq("没 agentDir 时 peer 为 null", unbound.body.peer, null);
+  eq("没 agentDir 时来源是 unbound", unbound.body.peerSource, "unbound");
+
+  // mergeMemory 打开时，就算没有 agentDir 也能给出身份，但来源必须是 merged。
+  registerSessionRoutes(app, ctxWith({ mergeMemory: true }));
+  const merged = await getSession("s-unbound");
+  eq("合并时 peer 带 -merged", merged.body.peer, "openhanako-merged");
+  eq("合并时来源是 merged", merged.body.peerSource, "merged");
+
+  // 带前缀时合并身份也带前缀。
+  registerSessionRoutes(app, ctxWith({ mergeMemory: true, peerPrefix: "mbp" }));
+  const prefixed = await getSession("s-unbound");
+  eq("带前缀的合并身份", prefixed.body.peer, "mbp-openhanako-merged");
+
+  // 合并把“是哪个助手”盖住了，但接口仍能把助手名单独带出来。
+  registerSessionRoutes(app, ctxWith({ mergeMemory: true }));
+  const mergedBound = await getSession("s-bound");
+  eq("合并时来源仍是 merged", mergedBound.body.peerSource, "merged");
+  eq("合并时也能看到助手是谁", mergedBound.body.peerAgentDir, "agent-x");
+  const mergedUnknown = await getSession("s-unbound");
+  check(
+    "合并但不知道助手时响应里不出现 peerAgentDir",
+    Object.prototype.hasOwnProperty.call(mergedUnknown.body, "peerAgentDir") === false,
+    JSON.stringify(mergedUnknown.body),
+  );
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -673,7 +1007,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("默认跨门牌召回", reqBody.peer_scope, "all");
   eq("预算取 DESIGN 上限", reqBody.max_tokens, MEMORY_MAX_TOKENS);
   eq("查询是剥掉注入后的文本", reqBody.query, "我记得是周三？");
-  eq("召回请求带 actor peer", calls[0].init.headers["X-OpenViking-Actor-Peer"], "agent-x");
+  eq("召回请求带会话自己的 peer", calls[0].init.headers["X-OpenViking-Actor-Peer"], "openhanako-agent-x");
 
   const again = await handler({ payload: first.payload, session });
   eq("第二次同文本返回 undefined", again, undefined);

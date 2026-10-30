@@ -87,6 +87,9 @@ function sanitizeOverride(key, value) {
 /**
  * 改一个会话的状态。patch.overrides 里值为 null 表示"撤销覆盖，回到全局"。
  * 其余字段（recall/capture）是累加与游标，由链路自己写。
+ *
+ * agentDir 只补不改新：用于给早于本功能建立的会话回填身份，
+ * 刻意不碰 closedAt / closeReason——补一条旧数据不该把已关闭的会话重新打开。
  */
 export function patchSession(dataDir, sessionId, patch = {}) {
   const state = readSession(dataDir, sessionId);
@@ -109,12 +112,18 @@ export function patchSession(dataDir, sessionId, patch = {}) {
     state.capture = { ...state.capture, ...patch.capture };
   }
 
+  // 只认非空字符串：空 agentDir 等于"没解析出来"，不该覆盖掉已有的身份。
+  if (typeof patch.agentDir === "string") {
+    const dir = patch.agentDir.trim();
+    if (dir) state.agentDir = dir;
+  }
+
   state.updatedAt = new Date().toISOString();
   return writeSession(dataDir, sessionId, state);
 }
 
 /** 会话开始：确保有一份状态文件。重开同一个会话时清掉关闭标记。 */
-export function touchSession(dataDir, sessionId) {
+export function touchSession(dataDir, sessionId, agentDir) {
   if (!sessionId) return null;
   const state = readSession(dataDir, sessionId);
   const now = new Date().toISOString();
@@ -122,6 +131,10 @@ export function touchSession(dataDir, sessionId) {
   state.updatedAt = now;
   state.closedAt = null;
   state.closeReason = null;
+  // 会话归哪个助手管，记在状态里：面板和小卡拿不到会话对象，
+  // 但必须能说出“这一段属于哪个 peer”。
+  const dir = String(agentDir || "").trim();
+  if (dir) state.agentDir = dir;
   return writeSession(dataDir, sessionId, state);
 }
 

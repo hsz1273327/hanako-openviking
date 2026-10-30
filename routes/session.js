@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readConnection, readSwitches } from "../src/ov/settings.js";
-import { resolvePeer } from "../src/ov/identity.js";
+import { describePeer } from "../src/ov/identity.js";
 import {
   OVERRIDE_KEYS,
   effective,
@@ -63,6 +63,10 @@ export default function registerSessionRoutes(app, ctx) {
     const state = readSession(dataDir, sessionId);
     const base = await readSwitches(ctx);
     const conn = await readConnection(ctx);
+    // peer 跟着会话所属的助手走，不是跟着“打开面板的那只手”走。
+    // 拿不到身份时 peer 为 null、peerSource 为 "unbound"，不拿别的会话顶上。
+    // readSession 不会抛（内部吞异常、恒返回一份状态），所以这里不需要异常分支。
+    const { peer, peerSource, peerAgentDir } = describePeer(conn, state.agentDir);
 
     return c.json(
       {
@@ -70,7 +74,10 @@ export default function registerSessionRoutes(app, ctx) {
         state,
         effective: effective({ ...base, recallPeerScope: conn.recallPeerScope }, state),
         overridable: OVERRIDE_KEYS,
-        peer: resolvePeer(conn, null),
+        peer,
+        peerSource,
+        // 合并记忆把“其实是哪个助手”盖住了；拿得到就单独带出去，拿不到就不出现这个键。
+        ...(peerAgentDir ? { peerAgentDir } : {}),
         probe: probeStats(dataDir, sessionId),
       },
       200,

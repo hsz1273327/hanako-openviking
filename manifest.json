@@ -52,7 +52,7 @@
           "peerPrefix": {
             "type": "string",
             "title": "门牌前缀",
-            "description": "区分机器，例如 mbp / desktop。留空则 peer 就是助手目录名。",
+            "description": "区分机器的门牌前缀，例如 mbp / desktop。只允许小写字母、数字和连字符（大写自动转小写，其他字符折叠成 -；折叠后为空则拒绝保存），最长 32 个字符。留空则 peer 为 openhanako-助手目录名。",
             "default": ""
           },
           "mergeMemory": {

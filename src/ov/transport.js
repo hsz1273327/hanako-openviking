@@ -39,6 +39,7 @@ function messageOf(error) {
 export function createRuntimeTransport({
   runtimeFetch,
   runtimeId,
+  token,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxBytes = DEFAULT_MAX_BYTES,
   logger,
@@ -48,6 +49,11 @@ export function createRuntimeTransport({
   }
   if (typeof runtimeId !== "string" || !runtimeId) {
     throw new TypeError("createRuntimeTransport: runtimeId 必填");
+  }
+  // token 与受管进程 argv 里那份必须一致，否则每个请求都是 403。
+  // 这里宁可启动就抛错，也不要让链路带着一个永远对不上的头跑到线上。
+  if (typeof token !== "string" || !token) {
+    throw new TypeError("createRuntimeTransport: token 必填");
   }
 
   const defaultTimeout = clampTimeout(timeoutMs, DEFAULT_TIMEOUT_MS);
@@ -77,7 +83,7 @@ export function createRuntimeTransport({
     try {
       response = await runtimeFetch(runtimeId, PROXY_EXCHANGE_PATH, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-ov-token": token },
         body: JSON.stringify(envelope),
         timeoutMs: bridgeTimeout,
       });

@@ -10,12 +10,12 @@ html, body {
 
 .ov {
   display: grid;
-  gap: 6px;
-  padding: 10px 12px 11px;
+  gap: 8px;
+  padding: 12px 13px 13px;
   min-width: 0;
 }
 
-.row {
+.head {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -27,81 +27,186 @@ html, body {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgba(128, 128, 128, 0.45);
+  background: rgba(128, 128, 128, 0.4);
 }
-.dot.ok { background: #6f8f68; }
+.dot.ok { background: #6f8f68; box-shadow: 0 0 0 3px rgba(111, 143, 104, 0.15); }
 .dot.down { background: #c2554b; }
 
-.state {
-  font-weight: 600;
+.title {
+  font-weight: 620;
+  font-size: 13px;
   letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.peer {
+.pill {
   margin-left: auto;
-  font-size: 11px;
-  opacity: 0.65;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 55%;
-}
-
-.meta { gap: 10px; }
-
-.meta-item {
-  font-size: 11px;
-  opacity: 0.6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chips { gap: 5px; flex-wrap: wrap; }
-
-.chip {
-  font: inherit;
-  font-size: 10.5px;
+  flex: none;
+  font-size: 10px;
   line-height: 1;
-  padding: 4px 8px;
+  padding: 3px 7px;
   border-radius: 999px;
   border: 1px solid rgba(128, 128, 128, 0.26);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+.pill.on {
+  border-color: rgba(111, 143, 104, 0.5);
+  background: rgba(111, 143, 104, 0.12);
+  color: #5d7d56;
+  opacity: 1;
+}
+.pill.off { opacity: 0.55; }
+
+.sub {
+  margin: -3px 0 0;
+  font-size: 10.5px;
+  opacity: 0.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sub:empty { display: none; }
+
+/* 这一段对话的 peer：会话级身份，不跟着机器走 */
+.ident {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-top: -2px;
+}
+.ident-label {
+  flex: none;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  opacity: 0.4;
+}
+.ident-value {
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  opacity: 0.75;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.rows {
+  display: grid;
+  gap: 1px;
+  margin-top: 2px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(128, 128, 128, 0.16);
+  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  min-width: 0;
+}
+
+.row-label {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.row-note {
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  margin-left: auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px dashed rgba(128, 128, 128, 0.32);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.55;
+  white-space: nowrap;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.row-note:hover { opacity: 0.85; }
+
+.row-note.over {
+  border-style: solid;
+  border-color: rgba(111, 143, 104, 0.5);
+  background: rgba(111, 143, 104, 0.1);
+  color: #5d7d56;
+  opacity: 1;
+}
+
+/* 窄栏里的分段控件：比整页的小一号，待在手边 */
+.seg {
+  flex: none;
+  display: inline-flex;
+  padding: 1.5px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.26);
+  background: rgba(128, 128, 128, 0.05);
+}
+.seg button {
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
   color: inherit;
   opacity: 0.55;
-  white-space: nowrap;
   cursor: pointer;
+  white-space: nowrap;
 }
-.chip:hover { opacity: 0.85; }
-
-/* 跟随全局：虚线，说明这一项的值不属于这个会话 */
-.chip.follow { border-style: dashed; }
-
-/* 会话覆盖：实线高亮，说明这一项被这段对话单独改过 */
-.chip.over {
-  border-style: solid;
-  border-color: rgba(111, 143, 104, 0.7);
-}
-
-.chip.on {
+.seg button[aria-pressed="true"] {
+  background: rgba(128, 128, 128, 0.18);
   opacity: 1;
-  border-color: rgba(111, 143, 104, 0.55);
-  background: rgba(111, 143, 104, 0.12);
-  color: #5d7d56;
 }
-.chip.on.follow { border-color: rgba(111, 143, 104, 0.35); }
+
+.switch {
+  flex: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.32);
+  background: rgba(128, 128, 128, 0.16);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, opacity 0.18s;
+}
+.switch .knob {
+  position: absolute;
+  top: 2.5px;
+  left: 2.5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #f6f6f6;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.18s cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+.switch[aria-checked="true"] { background: #6f8f68; border-color: #6f8f68; }
+.switch[aria-checked="true"] .knob { transform: translateX(16px); }
+.switch:disabled { opacity: 0.4; cursor: default; }
+
+.stats {
+  margin: 0;
+  font-size: 10.5px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
 
 .hint {
   margin: 0;
   font-size: 10.5px;
-  line-height: 1.4;
-  opacity: 0.55;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.45;
+  opacity: 0.5;
 }
-.hint:empty { display: none; }
 .hint.warn { color: #b8564d; opacity: 0.9; }
+.hint:empty { display: none; }

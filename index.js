@@ -11,11 +11,15 @@ import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { createRuntimeTransport, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
-import { resolvePeer } from "./src/ov/identity.js";
+import {
+  agentDirFromSessionPath,
+  peerForSession,
+  resolvePeer,
+} from "./src/ov/identity.js";
 import { createRecallHandler } from "./src/memory/recall.js";
 import { createProbe } from "./src/probe.js";
 import { skillFindTool, skillLoadTool } from "./src/skills/tools.js";
-import { markClosed, touchSession } from "./src/state/session.js";
+import { markClosed, patchSession, readSession, touchSession } from "./src/state/session.js";
 
 export const name = "hanako-openviking";
 
@@ -53,6 +57,7 @@ async function startManagedRuntime(sdk) {
     const transport = createRuntimeTransport({
       runtimeFetch: sdk.runtime.fetch.bind(sdk.runtime),
       runtimeId,
+      token,
       timeoutMs: 1500,
       logger: sdk.logger,
     });
@@ -119,7 +124,11 @@ export default defineApp(async (sdk) => {
     const sessionId = invocation?.session?.sessionId;
     if (!sessionId) return;
     try {
-      touchSession(sdk.dataDir, sessionId);
+      touchSession(
+        sdk.dataDir,
+        sessionId,
+        agentDirFromSessionPath(invocation?.session?.sessionPath),
+      );
     } catch (error) {
       sdk.logger.warn(`openviking session-start state failed: ${error?.message || error}`);
     }
@@ -143,6 +152,23 @@ export default defineApp(async (sdk) => {
   });
 
   await sdk.hooks.onDecision("provider/before-request", async (invocation) => {
+    // peer 是会话级的：谁在说话就按谁的 sessionId 记，面板读同一份，显示和注入不会对不上。
+    // 解析不出身份时这里什么也不写（peer 为 null），不会用“上一个”顶上。
+    try {
+      const conn = await readConnection(sdk);
+      const sessionPath = invocation?.session?.sessionPath;
+      const sessionId = invocation?.session?.sessionId;
+      peerForSession(conn, sessionId, sessionPath);
+      // 早于本功能建立的会话没记过 agentDir，顺手补上，面板带 session 查询时也能说准。
+      // 只补 agentDir：不能走 touchSession，那会把 closedAt 清掉，等于重开一个已关闭的会话。
+      const agentDir = agentDirFromSessionPath(sessionPath);
+      if (sessionId && agentDir) {
+        const st = readSession(sdk.dataDir, sessionId);
+        if (st.agentDir !== agentDir) patchSession(sdk.dataDir, sessionId, { agentDir });
+      }
+    } catch {
+      /* 记不下来不影响本轮 */
+    }
     // 探针在前：只读、只写日志，返回值恒为 undefined。
     if (await probeOn()) await probe("provider/before-request", invocation);
     // 召回在后：成功返回 { payload }，其余一律 undefined。两者互不干扰。

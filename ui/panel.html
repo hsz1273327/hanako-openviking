@@ -7,64 +7,101 @@
   <link rel="stylesheet" href="./assets/panel.css">
 </head>
 <body>
-  <!-- 整页：把"这台机器在一个共享中枢里是什么身份、通不通、在不在记"摊开。
-       只读。改开关仍然回设置页——一个表面只承担一件事，权限边界才清楚。 -->
+  <!-- 整页控制台：这台机器在一个共享中枢里是什么身份、通不通、在不在记，
+       以及所有能当场改的开关。改了就生效，不用回设置页。 -->
   <main class="page" data-hana-app-ui>
-    <header class="bar">
-      <div class="bar-main">
+    <header class="top">
+      <div class="ident">
         <span id="dot" class="dot idle" aria-hidden="true"></span>
-        <h1 class="title">OpenViking</h1>
-        <span id="badge" class="badge">未启用</span>
+        <div class="ident-text">
+          <div class="ident-line">
+            <h1 class="title">OpenViking</h1>
+            <span id="statePill" class="pill">未启用</span>
+          </div>
+          <p id="subLine" class="sub">—</p>
+        </div>
       </div>
-      <div class="bar-side">
-        <span id="peerLine" class="peer"></span>
-        <button id="refresh" class="btn" type="button">刷新</button>
+      <div class="top-actions">
+        <button id="testBtn" class="btn" type="button">测试连接</button>
+        <button id="refreshBtn" class="btn ghost" type="button">刷新</button>
       </div>
     </header>
 
-    <section class="grid">
-      <article class="block">
-        <h2 class="block-title">中枢</h2>
-        <dl class="kv">
-          <dt>地址</dt><dd id="server">—</dd>
-          <dt>API Key</dt><dd id="keyState">—</dd>
-          <dt>版本</dt><dd id="version">—</dd>
-          <dt>往返</dt><dd id="latency">—</dd>
-        </dl>
+    <section id="masterCard" class="master">
+      <div class="master-copy">
+        <h2 class="master-title">总闸</h2>
+        <p id="masterHint" class="master-hint">关着等于没装。打开之后，下面这些开关才有意义。</p>
+      </div>
+      <button id="swEnabled" class="switch" type="button" role="switch" aria-checked="false" aria-label="总闸">
+        <span class="knob"></span>
+      </button>
+    </section>
+
+    <section id="toggleGrid" class="toggles">
+      <div class="toggle" data-key="skillRouting">
+        <div class="toggle-copy">
+          <b>技能路由</b>
+          <span>把共享技能交给助手按需调用</span>
+        </div>
+        <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
+      </div>
+      <div class="toggle" data-key="probe">
+        <div class="toggle-copy">
+          <b>探针</b>
+          <span>把钩子事实记进日志</span>
+        </div>
+        <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
+      </div>
+    </section>
+
+    <p class="scoped-note">
+      记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
+    </p>
+
+    <section class="cols">
+      <article class="card">
+        <h2 class="card-title">中枢</h2>
+        <div class="field">
+          <label for="serverUrl">地址</label>
+          <input id="serverUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8000">
+        </div>
+        <div class="field">
+          <label for="apiKey">API Key</label>
+          <input id="apiKey" type="text" autocomplete="off" spellcheck="false" placeholder="未填写">
+        </div>
+        <div class="facts">
+          <div class="fact"><span>往返</span><b id="latency">—</b></div>
+          <div class="fact"><span>版本</span><b id="version">—</b></div>
+          <div class="fact"><span>出口</span><b id="transport">—</b></div>
+        </div>
         <ul id="checks" class="checks"></ul>
-        <p id="reachError" class="note warn" hidden></p>
+        <p id="reachError" class="err" hidden></p>
+        <p id="saveHint" class="save-hint"></p>
       </article>
 
-      <article class="block">
-        <h2 class="block-title">身份</h2>
-        <dl class="kv">
-          <dt>peer</dt><dd id="peer">—</dd>
-          <dt>召回范围</dt><dd id="scope">—</dd>
-          <dt>超时</dt><dd id="timeout">—</dd>
-          <dt>注入预算</dt><dd id="budget">—</dd>
-        </dl>
-        <p class="note">peer 决定"这条记忆算谁的"。同机不同助手各自一个门牌；合并记忆打开时折成一个。</p>
+      <article class="card">
+        <h2 class="card-title">身份</h2>
+        <div class="field">
+          <label for="peerPrefix">门牌前缀</label>
+          <input id="peerPrefix" type="text" spellcheck="false" placeholder="可留空">
+          <span class="field-hint">这一段对话算谁的，看右侧卡里的 peer。</span>
+        </div>
+        <div class="field pair">
+          <label for="timeoutMs">超时（ms）</label>
+          <label for="budgetTokens">注入预算（token）</label>
+          <input id="timeoutMs" type="number" min="200" max="30000" step="100">
+          <input id="budgetTokens" type="number" min="200" max="32000" step="100">
+        </div>
       </article>
+    </section>
 
-      <article class="block">
-        <h2 class="block-title">全局开关</h2>
-        <ul class="toggles">
-          <li><span id="swEnabled" class="chip">总闸</span><em>关着等于没装</em></li>
-          <li><span id="swReadOnly" class="chip">只读</span><em>只召回不写</em></li>
-          <li><span id="swProbe" class="chip">探针</span><em>记事实</em></li>
-          <li><span id="swMemory" class="chip">记忆召回</span><em>每轮注入</em></li>
-          <li><span id="swCapture" class="chip">写回</span><em>轮次结束</em></li>
-          <li><span id="swSkill" class="chip">技能路由</span><em>子会话</em></li>
-        </ul>
-        <p id="swNote" class="note"></p>
-        <p class="note">这些都存在这台机器上，改一次全局生效；单个会话的状态看右侧小卡。</p>
-      </article>
-
-      <article class="block wide">
-        <h2 class="block-title">探针 / 注入日志</h2>
-        <div id="logSummary" class="chips"></div>
-        <pre id="logBody" class="log">（还没有记录）</pre>
-      </article>
+    <section class="card logs">
+      <header class="logs-head">
+        <h2 class="card-title">日志</h2>
+        <div id="logChips" class="chips"></div>
+        <button id="logToggle" class="btn ghost sm" type="button">展开</button>
+      </header>
+      <pre id="logBody" class="log" hidden>（还没有记录）</pre>
     </section>
 
     <footer id="foot" class="foot"></footer>

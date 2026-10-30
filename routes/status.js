@@ -8,9 +8,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readConnection, readSwitches } from "../src/ov/settings.js";
-import { resolvePeer } from "../src/ov/identity.js";
+import { describePeer } from "../src/ov/identity.js";
 import { createClient } from "../src/ov/client.js";
 import { transportFor } from "../src/ov/transport.js";
+import { readSession } from "../src/state/session.js";
 
 const LOG_TAIL = 24;
 
@@ -53,6 +54,19 @@ export default function registerStatusRoutes(app, ctx) {
     const probeLines = readTail(path.join(dir, "probe.log"));
     const transport = transportFor(ctx);
 
+    // 面板可以带上当前会话，就能说准这一段属于哪个助手。
+    // 不带会话时，只有 mergeMemory 能单独给出身份；拿不到就给 null，
+    // 不用“最近一个”或别的会话顶上——那会把 A 会话的身份显示到 B 会话头上。
+    const sidRaw = typeof c.req?.query === "function" ? c.req.query("session") : "";
+    const sid = typeof sidRaw === "string" ? sidRaw.trim() : "";
+    let described = describePeer(conn, "");
+    if (sid) {
+      // 不包 try/catch：readSession（src/state/session.js）是全函数，内部自己吞掉所有
+      // 异常并恒定返回一份状态，永远不会抛。跨不过去的是“文件坏了”，不是“抛了”；
+      // 那种情况在这里和“从没记过”看到的是同一种东西（空 agentDir），不需要异常分支。
+      described = describePeer(conn, readSession(dir, sid).agentDir);
+    }
+
     const report = {
       enabled: sw.enabled,
       readOnly: sw.readOnly,
@@ -68,8 +82,12 @@ export default function registerStatusRoutes(app, ctx) {
       probeLog: summarizeLog(probeLines),
       // 当前出口：runtime（受管代理）/ direct（ctx.network）/ down（两条都不可用）。
       transport: transport.mode,
-      // peer 纯本地推导，不联网。未启用时也应该知道"我是谁"。
-      peer: resolvePeer(conn, null),
+      // peer 是会话级的：这一段对话属于哪个助手，就用哪个门牌。
+      // 没有身份时是 null：服务端会看到“未绑定”，界面也有话可说。
+      peer: described.peer,
+      peerSource: described.peerSource,
+      // 合并记忆把“其实是哪个助手”盖住了；拿得到就单独带出去，拿不到就不出现这个键。
+      ...(described.peerAgentDir ? { peerAgentDir: described.peerAgentDir } : {}),
     };
 
     if (!sw.enabled || !conn.serverUrl || !conn.apiKey) {
@@ -102,7 +120,6 @@ export default function registerStatusRoutes(app, ctx) {
       report.readyError = String(error?.message || error);
     }
 
-    report.peer = resolvePeer(conn, null);
     return c.json(report, 200);
   });
 
