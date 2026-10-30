@@ -3,7 +3,8 @@
 // GET 只读，不触发召回、不写回。错误与 /status 同一套约定：HTTP 200，
 // 成功失败都放在 body 里，面板才能照常把其余部分画出来。
 //
-// POST 是唯一写入口：只改 excludedPeers 这一个配置项，写完返回与 GET 相同的形状。
+// POST 是唯一写入口：只改 excludedPeers 这一个配置项。写完不读中枢——
+// 写成功了就是成功了，不能因为同一刻 listPeers 不可达而把界面回滚成"没改成"。
 //
 // 未启用 / 缺地址 / 缺 key 时一律不联网：返回空列表并说明原因，
 // 不要拿一次必然失败的请求去换一个"读不到"。
@@ -19,9 +20,9 @@ import { createClient } from "../src/ov/client.js";
 import { transportFor } from "../src/ov/transport.js";
 
 const PEER_NAME_MAX = 64;
-// POST 收的是"新值"：只认小写，避免同一台机器出现 Hermes / hermes 两份名单。
-// 读旧配置时 parseExcludedPeers 会把大写折成小写，那是兼容存量，不是新写入的许可。
-const PEER_NAME_RE = /^[a-z0-9._-]+$/;
+// POST 收的是"新值"：大小写原样保留。中枢目录名大小写敏感，折成小写会让
+// 大写 peer 永远匹配不上排除名单，等于它无法被排除。
+const PEER_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
  * 本机 peer 的开头。前缀先按身份规则归一化——
@@ -123,6 +124,8 @@ export default function registerPeersRoutes(app, ctx) {
       return c.json({ ok: false, error: `保存排除名单失败：${String(error?.message || error)}` }, 500);
     }
 
-    return c.json(await peerPayload(ctx), 200);
+    // 只回写进去的那份名单，不回读中枢：读一次多一个失败点，
+    // 而写已经落库了。前端按这份数组重算本地标记，下次 refresh 再读列表。
+    return c.json({ ok: true, excluded: checked.list }, 200);
   });
 }

@@ -236,7 +236,14 @@ async function togglePeerExclusion(name) {
       excluded: next.filter((peer) => peer?.excluded).map((peer) => peer.name),
     });
     if (!out || out.ok === false) throw new Error(out?.error || "写入失败");
-    renderPeers(out);
+    // 写路径不回读列表：按服务端实际存下的名单重算本地标记（大小写敏感），
+    // 不重新渲染 peers 数组，下一次 refresh() 才去读 /peers。
+    const saved = Array.isArray(out.excluded) ? out.excluded : [];
+    peerCache = peerCache.map((peer) => ({
+      ...peer,
+      excluded: saved.includes(peer?.name),
+    }));
+    renderPeers({ ok: true, peers: peerCache });
     flash("排除名单已更新");
   } catch (error) {
     renderPeers({ ok: true, peers: before }); // 失败回滚到点击前

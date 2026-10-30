@@ -581,7 +581,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         serverUrl: "http://h:1",
         apiKey: "k",
         peerPrefix: "desktop",
-        // 存量配置带大写与空格：读的时候折成小写，标记要跟着对上。
+        // 存量配置带大写与空格：按大小写原样保留，只有精确同名才算排除。
         excludedPeers: " hermes , DSH-desktop ,, hermes ",
       },
       listedFetch.fetchImpl,
@@ -604,7 +604,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("GET 的 excluded 标记与配置一致", listed.body.peers.map((p) => p.excluded), [
     false,
     true,
-    true,
+    false,
   ]);
 
   // ---- POST 非法项：整单 400，config.set 一次都不调 ----
@@ -613,7 +613,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["不是数组", { excluded: "hermes" }],
     ["空串项", { excluded: [""] }],
     ["路径穿越", { excluded: ["../etc"] }],
-    ["新写入不接受大写", { excluded: ["Hermes"] }],
     ["非字符串项", { excluded: [1] }],
     ["超长项", { excluded: ["a".repeat(65)] }],
     ["超过 50 项", { excluded: Array.from({ length: 51 }, (_, i) => `p${i}`) }],
@@ -627,17 +626,88 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq(`POST 非法项（${label}）不写配置`, writes.length, before);
   }
 
-  // ---- POST 合法：写入逗号串，返回与 GET 同形 ----
+  // ---- POST 合法：写入逗号串，返回实际存下的名单（不读中枢） ----
   const saved = await invokePost({ excluded: ["hermes", "dsh-desktop"] });
   eq("POST 合法项写入逗号串", writes.at(-1), ["excludedPeers", "hermes,dsh-desktop"]);
   eq("POST 返回 ok", saved.body.ok, true);
-  eq("POST 返回带排除标记", saved.body.peers.map((p) => p.excluded), [false, true, true]);
-  const afterSave = await invokeGet();
-  eq("POST 与 GET 返回同形", saved.body, afterSave.body);
+  eq("POST 返回存下的名单", saved.body.excluded, ["hermes", "dsh-desktop"]);
+  check("POST 返回体不带 peers 数组", !("peers" in saved.body), JSON.stringify(saved.body));
 
   const cleared = await invokePost({ excluded: [] });
   eq("空数组清空名单", writes.at(-1), ["excludedPeers", ""]);
-  eq("清空后不再排除", cleared.body.peers.map((p) => p.excluded), [false, false, false]);
+  eq("清空后返回空名单", cleared.body.excluded, []);
+
+  // ---- 写路径不读列表：中枢不可达时 POST 仍成功，且不返回 peers ----
+  const downWrites = [];
+  registerPeersRoutes(
+    app,
+    ctxWith(
+      { enabled: true, serverUrl: "http://h:1", apiKey: "k" },
+      async () => {
+        throw new Error("ETIMEDOUT");
+      },
+      downWrites,
+    ),
+  );
+  const downPost = await invokePost({ excluded: ["Hermes"] });
+  eq("中枢不可达时 POST HTTP 200", downPost.status, 200);
+  eq("中枢不可达时 POST ok", downPost.body.ok, true);
+  eq("中枢不可达时 POST 仍写配置", downWrites.at(-1), ["excludedPeers", "Hermes"]);
+  eq("中枢不可达时 POST 返回存下的名单", downPost.body.excluded, ["Hermes"]);
+  check(
+    "中枢不可达时 POST 不带 peers 数组",
+    !("peers" in downPost.body),
+    JSON.stringify(downPost.body),
+  );
+  const downGet = await invokeGet();
+  eq("中枢不可达时 GET 仍如实报错", downGet.body.ok, false);
+
+  // 传输层整个不可用（没有出口）同样不影响写。
+  const noExitWrites = [];
+  const noExit = ctxWith(
+    { enabled: true, serverUrl: "http://h:1", apiKey: "k" },
+    undefined,
+    noExitWrites,
+  );
+  delete noExit.network;
+  registerPeersRoutes(app, noExit);
+  const noExitPost = await invokePost({ excluded: ["hermes"] });
+  eq("无网络出口时 POST ok", noExitPost.body.ok, true);
+  eq("无网络出口时 POST 仍写配置", noExitWrites.at(-1), ["excludedPeers", "hermes"]);
+
+  // ---- 大小写按中枢原样名匹配：POST Hermes -> GET 认出 Hermes ----
+  const caseWrites = [];
+  const caseFetch = mockFetch({
+    body: {
+      status: "ok",
+      result: [
+        "viking://user/default/peers/Hermes",
+        "viking://user/default/peers/hermes",
+      ],
+    },
+  });
+  registerPeersRoutes(
+    app,
+    ctxWith(
+      { enabled: true, serverUrl: "http://h:1", apiKey: "k" },
+      caseFetch.fetchImpl,
+      caseWrites,
+    ),
+  );
+  const mixed = await invokePost({ excluded: ["Hermes"] });
+  eq("POST 大写 peer HTTP 200", mixed.status, 200);
+  eq("POST 大写 peer 写入原样", caseWrites.at(-1), ["excludedPeers", "Hermes"]);
+  eq("POST 大写 peer 返回原样名单", mixed.body.excluded, ["Hermes"]);
+  const mixedGet = await invokeGet();
+  eq("GET 按原样名命中大写 peer", mixedGet.body.peers.map((p) => p.excluded), [
+    true,
+    false,
+  ]);
+  eq(
+    "POST 重复项按大小写精确去重",
+    (await invokePost({ excluded: ["Hermes", "hermes", "Hermes"] })).body.excluded,
+    ["Hermes", "hermes"],
+  );
 
   // ---- 空前缀：openhanako- 开头就算本机 ----
   const noPrefixFetch = mockFetch({
@@ -812,14 +882,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const trimmed = await readConnection(sdkWith({ serverUrl: "http://x:9///" }));
   eq("配置里的尾斜杠也去掉", trimmed.serverUrl, "http://x:9");
 
-  // ---- 排除名单：逗号切、trim、小写、去空、去重 ----
+  // ---- 排除名单：逗号切、trim、去空、按大小写精确去重 ----
   eq(
     "排除名单解析",
     await readExcludedPeers(
       sdkWith({ excludedPeers: " hermes , DSH-desktop ,, hermes " }),
     ),
-    ["hermes", "dsh-desktop"],
+    ["hermes", "DSH-desktop"],
   );
+  eq("大小写不同的名字不合并", parseExcludedPeers("hermes,Hermes"), ["hermes", "Hermes"]);
+  eq("空格与空项处理后保持原样大小写", parseExcludedPeers(" Hermes ,, hermes "), [
+    "Hermes",
+    "hermes",
+  ]);
   eq("排除名单缺省为空数组", await readExcludedPeers(sdkWith({})), []);
   eq(
     "非法条目整条忽略",
@@ -1481,7 +1556,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "排除名单转成 exclude_uris",
     JSON.parse(all.calls[0].init.body).exclude_uris,
-    ["viking://user/default/peers/hermes", "viking://user/default/peers/dsh-desktop"],
+    ["viking://user/default/peers/hermes", "viking://user/default/peers/DSH-desktop"],
   );
 
   const self = mockFetch({ body: { status: "ok", result: { rendered: "本机记忆" } } });
