@@ -12,6 +12,7 @@ import {
 } from "../src/ov/transport.js";
 import { normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
 import registerStatusRoutes from "../routes/status.js";
+import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
 import {
@@ -24,7 +25,13 @@ import {
   noteActivePeer,
   readActivePeer,
 } from "../src/ov/identity.js";
-import { readConnection, readSwitches, DEFAULTS } from "../src/ov/settings.js";
+import {
+  readConnection,
+  readExcludedPeers,
+  readSwitches,
+  parseExcludedPeers,
+  DEFAULTS,
+} from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
 import {
   stripInjected,
@@ -51,8 +58,11 @@ import {
   listSessions,
   touchSession,
   markClosed,
+  sessionKeyOf,
   OVERRIDE_KEYS,
 } from "../src/state/session.js";
+// 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
+import { sessionKeyOf as uiSessionKeyOf } from "../ui/assets/session-key.js";
 
 let passed = 0;
 const failures = [];
@@ -170,6 +180,37 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
 }
 
 {
+  // ---- 排除项：非空数组才带 exclude_uris，空 / 未传都不带这个键 ----
+  const { calls, fetchImpl } = mockFetch();
+  const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
+  const hermes = "viking://user/default/peers/hermes";
+
+  await client.recall("跨门牌", { peerScope: "all", excludeUris: [hermes] });
+  eq("recall 带 exclude_uris", JSON.parse(calls[0].init.body).exclude_uris, [hermes]);
+
+  await client.recall("跨门牌", { peerScope: "all", excludeUris: [] });
+  eq(
+    "空 excludeUris 不带这个键",
+    "exclude_uris" in JSON.parse(calls[1].init.body),
+    false,
+  );
+
+  await client.recall("跨门牌", { peerScope: "all" });
+  eq(
+    "未传 excludeUris 不带这个键",
+    "exclude_uris" in JSON.parse(calls[2].init.body),
+    false,
+  );
+
+  await client.recall("跨门牌", { peerScope: "all", excludeUris: ["", "  "] });
+  eq(
+    "全空字符串也不带这个键",
+    "exclude_uris" in JSON.parse(calls[3].init.body),
+    false,
+  );
+}
+
+{
   const { calls, fetchImpl } = mockFetch();
   const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
 
@@ -197,6 +238,35 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   }
   check("错误封装会抛", caught !== null);
   check("抛出里带 code", caught?.includes("NOT_FOUND"), caught);
+}
+
+{
+  // ---- peer 目录：只留最后一段名字 ----
+  const { calls, fetchImpl } = mockFetch({
+    body: {
+      status: "ok",
+      result: [
+        "viking://user/default/peers/dsh-desktop",
+        "viking://user/default/peers/hermes",
+      ],
+    },
+  });
+  const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
+  eq("listPeers 只留目录名", await client.listPeers(), ["dsh-desktop", "hermes"]);
+  eq(
+    "listPeers 走 fs/ls",
+    calls[0].url,
+    "http://h:1/api/v1/fs/ls?uri=viking://user/default/peers&simple=true",
+  );
+  eq("listPeers 走 GET", calls[0].init.method, "GET");
+
+  const empty = mockFetch({ body: { status: "ok", result: [] } });
+  const emptyClient = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl: empty.fetchImpl });
+  eq("listPeers 空目录给空数组", await emptyClient.listPeers(), []);
+
+  const oddShape = mockFetch({ body: { status: "ok", result: { entries: [] } } });
+  const oddClient = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl: oddShape.fetchImpl });
+  eq("listPeers 形状不认识给空数组", await oddClient.listPeers(), []);
 }
 
 // ================= 受管运行时传输 =================
@@ -381,6 +451,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       req: { query: (key) => query[key] ?? "" },
     });
 
+  // 会话 key 现在是 uuid 形态（收紧后有形状检查），fixture 跟着改成真 uuid。
+  const SESSION_KEY = "01a1585b-86d2-7c64-b8ac-edbe7099d0a1";
+  const MISSING_KEY = "01a1585b-86d2-7c64-b8ac-edbe7099d0a2";
+
   resetRuntimeTransport();
   const direct = await invoke();
   eq("没有运行时时 /status 报 direct", direct.body.transport, "direct");
@@ -400,26 +474,202 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("无会话时 peer 为 null", noSession.body.peer, null);
   eq("无会话时来源是 unbound", noSession.body.peerSource, "unbound");
 
-  patchSession(dir, "sess-peer", { agentDir: "agent-z" });
-  const withSession = await invoke({ session: "sess-peer" });
+  patchSession(dir, SESSION_KEY, { agentDir: "agent-z" });
+  const withSession = await invoke({ session: SESSION_KEY });
   eq("?session= 时 peer 跟着会话走", withSession.body.peer, "openhanako-agent-z");
   eq("?session= 时来源是 session", withSession.body.peerSource, "session");
 
-  const unknown = await invoke({ session: "sess-missing" });
+  const unknown = await invoke({ session: MISSING_KEY });
   eq("未记过身份的会话给 null", unknown.body.peer, null);
   eq("未记过身份的会话不借用别会话", unknown.body.peerSource, "unbound");
+
+  // ---- 会话 key 统一：路径能定位到会话，sess_… 稳定 id 只看作"没带会话" ----
+  const byPath = await invoke({
+    session: `/Users/u/.hanako/agents/agent-z/sessions/2026-10-20T08-09-15-730Z_${SESSION_KEY}.jsonl`,
+  });
+  eq("?session= 接受会话路径", byPath.body.peer, "openhanako-agent-z");
+  eq("?session= 接路径时来源是 session", byPath.body.peerSource, "session");
+
+  const stableId = await invoke({ session: "sess_0mvgejpps_97df7c693a452f408c2c" });
+  eq("sess_ 形式的会话给 null", stableId.body.peer, null);
+  eq("sess_ 形式的会话来源是 unbound", stableId.body.peerSource, "unbound");
+  eq(
+    "sess_ 形式不造状态文件",
+    fs.existsSync(path.join(dir, "sessions", "sess_0mvgejpps_97df7c693a452f408c2c.json")),
+    false,
+  );
 
   // 合并时 /status 也能看到“其实是哪个助手”。
   registerStatusRoutes(app, {
     ...ctx,
     config: { get: async (key) => ({ mergeMemory: true })[key] },
   });
-  const mergedStatus = await invoke({ session: "sess-peer" });
+  const mergedStatus = await invoke({ session: SESSION_KEY });
   eq("合并时 /status 的来源是 merged", mergedStatus.body.peerSource, "merged");
   eq("合并时 /status 也带出助手名", mergedStatus.body.peerAgentDir, "agent-z");
 
   resetRuntimeTransport();
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= routes: peers =================
+{
+  const handlers = { get: {}, post: {} };
+  const app = {
+    get: (route, handler) => { handlers.get[route] = handler; },
+    post: (route, handler) => { handlers.post[route] = handler; },
+  };
+  const reply = (body, status) => ({ body, status });
+  const invokeGet = () => handlers.get["/peers"]({ json: reply });
+  const invokePost = (payload) =>
+    handlers.post["/peers"]({ json: reply, req: { json: async () => payload } });
+
+  // 配置 mock：set 记下写入，get 读回写后的值，这样 POST 返回的投影能反映真实状态。
+  function ctxWith(values = {}, fetchImpl, writeLog = []) {
+    const store = { ...values };
+    return {
+      config: {
+        get: async (key) => store[key],
+        set: async (key, value) => {
+          writeLog.push([key, value]);
+          store[key] = value;
+        },
+      },
+      network: {
+        fetch: fetchImpl || (async () => {
+          throw new Error("不该联网");
+        }),
+      },
+    };
+  }
+
+  resetRuntimeTransport();
+
+  // ---- 总闸关着：不联网，空列表 + disabled ----
+  let calls = 0;
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: false, serverUrl: "http://h:1", apiKey: "k" }, async () => {
+      calls += 1;
+      throw new Error("不该联网");
+    }),
+  );
+  const off = await invokeGet();
+  eq("总闸关时不联网", calls, 0);
+  eq("总闸关时 ok 仍为 true", off.body.ok, true);
+  eq("总闸关时 peers 为空", off.body.peers, []);
+  eq("总闸关时 reason 是 disabled", off.body.reason, "disabled");
+  eq("总闸关时 HTTP 200", off.status, 200);
+
+  // ---- 正常：按本机前缀标 self，excluded 与配置一致 ----
+  const listedFetch = mockFetch({
+    body: {
+      status: "ok",
+      result: [
+        "viking://user/default/peers/desktop-openhanako-blueflower",
+        "viking://user/default/peers/hermes",
+        "viking://user/default/peers/dsh-desktop",
+      ],
+    },
+  });
+  const writes = [];
+  registerPeersRoutes(
+    app,
+    ctxWith(
+      {
+        enabled: true,
+        serverUrl: "http://h:1",
+        apiKey: "k",
+        peerPrefix: "desktop",
+        // 存量配置带大写与空格：读的时候折成小写，标记要跟着对上。
+        excludedPeers: " hermes , DSH-desktop ,, hermes ",
+      },
+      listedFetch.fetchImpl,
+      writes,
+    ),
+  );
+  const listed = await invokeGet();
+  eq("正常时 ok", listed.body.ok, true);
+  eq("正常时 HTTP 200", listed.status, 200);
+  eq("自己的 peer 标 self", listed.body.peers[0], {
+    name: "desktop-openhanako-blueflower",
+    self: true,
+    excluded: false,
+  });
+  eq("别的 peer 不标 self", listed.body.peers[1], {
+    name: "hermes",
+    self: false,
+    excluded: true,
+  });
+  eq("GET 的 excluded 标记与配置一致", listed.body.peers.map((p) => p.excluded), [
+    false,
+    true,
+    true,
+  ]);
+
+  // ---- POST 非法项：整单 400，config.set 一次都不调 ----
+  const invalidCases = [
+    ["缺 excluded", {}],
+    ["不是数组", { excluded: "hermes" }],
+    ["空串项", { excluded: [""] }],
+    ["路径穿越", { excluded: ["../etc"] }],
+    ["新写入不接受大写", { excluded: ["Hermes"] }],
+    ["非字符串项", { excluded: [1] }],
+    ["超长项", { excluded: ["a".repeat(65)] }],
+    ["超过 50 项", { excluded: Array.from({ length: 51 }, (_, i) => `p${i}`) }],
+  ];
+  for (const [label, payload] of invalidCases) {
+    const before = writes.length;
+    const bad = await invokePost(payload);
+    eq(`POST 非法项（${label}）HTTP 400`, bad.status, 400);
+    eq(`POST 非法项（${label}）ok false`, bad.body.ok, false);
+    check(`POST 非法项（${label}）给中文错误`, /[\u4e00-\u9fa5]/.test(bad.body.error || ""), bad.body.error);
+    eq(`POST 非法项（${label}）不写配置`, writes.length, before);
+  }
+
+  // ---- POST 合法：写入逗号串，返回与 GET 同形 ----
+  const saved = await invokePost({ excluded: ["hermes", "dsh-desktop"] });
+  eq("POST 合法项写入逗号串", writes.at(-1), ["excludedPeers", "hermes,dsh-desktop"]);
+  eq("POST 返回 ok", saved.body.ok, true);
+  eq("POST 返回带排除标记", saved.body.peers.map((p) => p.excluded), [false, true, true]);
+  const afterSave = await invokeGet();
+  eq("POST 与 GET 返回同形", saved.body, afterSave.body);
+
+  const cleared = await invokePost({ excluded: [] });
+  eq("空数组清空名单", writes.at(-1), ["excludedPeers", ""]);
+  eq("清空后不再排除", cleared.body.peers.map((p) => p.excluded), [false, false, false]);
+
+  // ---- 空前缀：openhanako- 开头就算本机 ----
+  const noPrefixFetch = mockFetch({
+    body: { status: "ok", result: ["viking://user/default/peers/openhanako-hanako"] },
+  });
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, noPrefixFetch.fetchImpl),
+  );
+  const noPrefix = await invokeGet();
+  eq("空前缀按 openhanako- 认本机", noPrefix.body.peers[0].self, true);
+
+  // ---- 传输失败：不抛，错误原文进 body ----
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, async () => {
+      throw new Error("ETIMEDOUT");
+    }),
+  );
+  let threw = null;
+  let failed;
+  try {
+    failed = await invokeGet();
+  } catch (error) {
+    threw = error;
+  }
+  eq("传输失败不抛", threw, null);
+  eq("传输失败 ok 为 false", failed.body.ok, false);
+  check("传输失败带错误原文", failed.body.error.includes("ETIMEDOUT"), failed.body.error);
+  eq("传输失败 HTTP 200", failed.status, 200);
+
+  resetRuntimeTransport();
 }
 
 {
@@ -561,6 +811,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const trimmed = await readConnection(sdkWith({ serverUrl: "http://x:9///" }));
   eq("配置里的尾斜杠也去掉", trimmed.serverUrl, "http://x:9");
+
+  // ---- 排除名单：逗号切、trim、小写、去空、去重 ----
+  eq(
+    "排除名单解析",
+    await readExcludedPeers(
+      sdkWith({ excludedPeers: " hermes , DSH-desktop ,, hermes " }),
+    ),
+    ["hermes", "dsh-desktop"],
+  );
+  eq("排除名单缺省为空数组", await readExcludedPeers(sdkWith({})), []);
+  eq(
+    "非法条目整条忽略",
+    parseExcludedPeers("hermes,../etc,bad name,ok_peer,.hidden"),
+    ["hermes", "ok_peer", ".hidden"],
+  );
+  eq("排除名单最多 50 项", parseExcludedPeers(Array.from({ length: 60 }, (_, i) => `p${i}`).join(",")).length, 50);
 }
 
 // ================= probe =================
@@ -806,6 +1072,96 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ================= 会话 key：路径 / key / 稳定 id =================
+// 一个 key 从哪来、往哪去，只看这个函数。三种输入对不上，就会出现
+// "卡片读一份、开关写另一份"。
+{
+  eq(
+    "sessionKeyOf: 路径取文件名里的 uuid",
+    sessionKeyOf("/a/agents/blueflower/sessions/2026-01-01T00-00-00-000Z_01a1585b-86d2.jsonl"),
+    "01a1585b-86d2",
+  );
+  eq("sessionKeyOf: 已经是 key 就原样", sessionKeyOf("01a1585b-86d2"), "01a1585b-86d2");
+  eq(
+    "sessionKeyOf: sess_ 稳定 id 映射不到",
+    sessionKeyOf("sess_0mvgejpps_97df7c693a452f408c2c"),
+    "",
+  );
+  eq("sessionKeyOf: 空串", sessionKeyOf(""), "");
+  eq("sessionKeyOf: 非字符串", sessionKeyOf(null), "");
+  eq(
+    "sessionKeyOf: 反斜杠路径也认",
+    sessionKeyOf("C:\\a\\agents\\x\\sessions\\2026-01-01T00-00-00-000Z_01a1585b-86d2.jsonl"),
+    "01a1585b-86d2",
+  );
+  // 时间戳剥离按“最后一个 _ 之后”取，不去猜时区形态：宿主换成 +08-00 也能剥对。
+  eq(
+    "sessionKeyOf: 带 +08-00 时区的时间戳也剥得掉",
+    sessionKeyOf("/a/agents/x/sessions/2026-01-01T00-00-00-000+08-00_01a1585b-86d2.jsonl"),
+    "01a1585b-86d2",
+  );
+  // 形状检查收紧后的预期变化：abc-123 / abc-9 不是 uuid 形态（没有第二个短段），
+  // 因此不再被当成 key。这是故意接受的收紧，不是回归；为了让它继续过而放宽正则
+  // 等于把造文件的洞留着。
+  eq(
+    "sessionKeyOf: 非 uuid 形态的路径不再当 key",
+    sessionKeyOf("/a/agents/x/sessions/abc-123.jsonl"),
+    "",
+  );
+  eq(
+    "sessionKeyOf: 任意字符串不造 key",
+    sessionKeyOf("foo"),
+    "",
+  );
+  // 这条是本次收紧要堵的原始症状：以前 basename 是 passwd，会在 sessions 里建文件。
+  eq("sessionKeyOf: 路径穿越不落地", sessionKeyOf("../../etc/passwd"), "");
+  eq(
+    "sessionKeyOf: 子会话路径同样取 basename",
+    sessionKeyOf("/a/agents/x/subagent-sessions/direct/01a1585b-86d2-7c64-b8ac-edbe7099d0a1.jsonl"),
+    "01a1585b-86d2-7c64-b8ac-edbe7099d0a1",
+  );
+
+  // 前端 sessionKeyOf(active) 吃整个 getActive() 快照：key 取 sessionPath，不吃 sessionId。
+  const active = {
+    sessionId: "sess_0mvgejpps_97df7c693a452f408c2c",
+    sessionPath: "/Users/u/.hanako/agents/blueflower/sessions/2026-10-20T08-09-15-730Z_01a1585b-86d2-7c64-b8ac-edbe7099d0a1.jsonl",
+    title: "一段对话",
+    agentId: "blueflower",
+  };
+  eq("前端与后端算出同一个 key", uiSessionKeyOf(active), sessionKeyOf(active.sessionPath));
+  eq("前端 key 落地形态", uiSessionKeyOf(active), "01a1585b-86d2-7c64-b8ac-edbe7099d0a1");
+  eq("前端拿不到 sessionPath 时不编 key", uiSessionKeyOf({ sessionId: "sess_x" }), "");
+  eq("前端 null 快照不炸", uiSessionKeyOf(null), "");
+  // 前端与后端必须是同一条规则：非 uuid 形态一致给空串。
+  eq("前端与后端对 foo 一致", uiSessionKeyOf({ sessionPath: "foo" }), "");
+  eq("前端与后端对路径穿越一致", uiSessionKeyOf({ sessionPath: "../../etc/passwd" }), "");
+  eq(
+    "前端 +08-00 形态与后端剥出同一个 key",
+    uiSessionKeyOf({
+      sessionPath: "/a/agents/x/sessions/2026-01-01T00-00-00-000+08-00_01a1585b-86d2.jsonl",
+    }),
+    sessionKeyOf("/a/agents/x/sessions/2026-01-01T00-00-00-000+08-00_01a1585b-86d2.jsonl"),
+  );
+
+  // hook 侧不用改：invocation.session.sessionId 就是路径里的 uuid。这条断言锁住
+  // "换 key 规则不会让 agentDir 的写入落到另一份文件上"。
+  const hookDir = path.join(import.meta.dirname, ".tmp-key-agree");
+  fs.rmSync(hookDir, { recursive: true, force: true });
+  const hookSessionId = "01a1585b-86d2-7c64-b8ac-edbe7099d0a1";
+  touchSession(hookDir, hookSessionId, agentDirFromSessionPath(active.sessionPath));
+  eq(
+    "hook 写入的身份能被路径查询读到",
+    readSession(hookDir, sessionKeyOf(active.sessionPath)).agentDir,
+    "blueflower",
+  );
+  eq(
+    "状态文件名就是 hook 的 sessionId",
+    fs.readdirSync(path.join(hookDir, "sessions")),
+    [`${hookSessionId}.json`],
+  );
+  fs.rmSync(hookDir, { recursive: true, force: true });
+}
+
 // ================= routes: conn =================
 {
   const handlers = {};
@@ -919,39 +1275,116 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       req: { param: () => sid },
       json: (payload, status) => ({ body: payload, status }),
     });
+  const postSession = (sid, body) =>
+    handlers["POST /session/:sid"]({
+      req: { param: () => sid, json: async () => body },
+      json: (payload, status) => ({ body: payload, status }),
+    });
 
   registerSessionRoutes(app, ctxWith({}));
-  patchSession(dir, "s-bound", { agentDir: "agent-x" });
+  // 会话 key 现在是 uuid 形态（收紧后有形状检查），fixture 跟着改成真 uuid。
+  const BOUND_KEY = "01a1585b-86d2-7c64-b8ac-edbe7099d0a1";
+  const UNBOUND_KEY = "01a1585b-86d2-7c64-b8ac-edbe7099d0a2";
+  patchSession(dir, BOUND_KEY, { agentDir: "agent-x" });
 
-  const bound = await getSession("s-bound");
+  const bound = await getSession(BOUND_KEY);
   eq("有 agentDir 时 peer 是绑定的", bound.body.peer, "openhanako-agent-x");
   eq("有 agentDir 时来源是 session", bound.body.peerSource, "session");
 
-  const unbound = await getSession("s-unbound");
+  const unbound = await getSession(UNBOUND_KEY);
   eq("没 agentDir 时 peer 为 null", unbound.body.peer, null);
   eq("没 agentDir 时来源是 unbound", unbound.body.peerSource, "unbound");
 
   // mergeMemory 打开时，就算没有 agentDir 也能给出身份，但来源必须是 merged。
   registerSessionRoutes(app, ctxWith({ mergeMemory: true }));
-  const merged = await getSession("s-unbound");
+  const merged = await getSession(UNBOUND_KEY);
   eq("合并时 peer 带 -merged", merged.body.peer, "openhanako-merged");
   eq("合并时来源是 merged", merged.body.peerSource, "merged");
 
   // 带前缀时合并身份也带前缀。
   registerSessionRoutes(app, ctxWith({ mergeMemory: true, peerPrefix: "mbp" }));
-  const prefixed = await getSession("s-unbound");
+  const prefixed = await getSession(UNBOUND_KEY);
   eq("带前缀的合并身份", prefixed.body.peer, "mbp-openhanako-merged");
 
   // 合并把“是哪个助手”盖住了，但接口仍能把助手名单独带出来。
   registerSessionRoutes(app, ctxWith({ mergeMemory: true }));
-  const mergedBound = await getSession("s-bound");
+  const mergedBound = await getSession(BOUND_KEY);
   eq("合并时来源仍是 merged", mergedBound.body.peerSource, "merged");
   eq("合并时也能看到助手是谁", mergedBound.body.peerAgentDir, "agent-x");
-  const mergedUnknown = await getSession("s-unbound");
+  const mergedUnknown = await getSession(UNBOUND_KEY);
   check(
     "合并但不知道助手时响应里不出现 peerAgentDir",
     Object.prototype.hasOwnProperty.call(mergedUnknown.body, "peerAgentDir") === false,
     JSON.stringify(mergedUnknown.body),
+  );
+
+  // ---- 会话 key 统一：路径与 key 指向同一份状态；sess_… 不许造文件 ----
+  registerSessionRoutes(app, ctxWith({}));
+  const byPath = await getSession(
+    `/Users/u/.hanako/agents/agent-x/sessions/2026-10-20T08-09-15-730Z_${BOUND_KEY}.jsonl`,
+  );
+  eq("路径查询映射到同一个 key", byPath.body.sessionId, BOUND_KEY);
+  eq("路径查询仍能说出会话身份", byPath.body.peer, "openhanako-agent-x");
+
+  const filesBefore = fs.readdirSync(path.join(dir, "sessions")).sort();
+  check("先有会话状态文件", filesBefore.includes(`${BOUND_KEY}.json`));
+
+  const bogusRead = await getSession("sess_0mvgejpps_97df7c693a452f408c2c");
+  eq("sess_ 形式的读取回 ok:false", bogusRead.body.ok, false);
+  eq("sess_ 形式的读取给明确原因", bogusRead.body.error, "unknown session key");
+  eq("sess_ 形式的读取是 400", bogusRead.status, 400);
+  eq("sess_ 形式的读取报未绑定", bogusRead.body.peerSource, "unbound");
+  eq(
+    "sess_ 形式的读取不建文件",
+    fs.readdirSync(path.join(dir, "sessions")).sort(),
+    filesBefore,
+  );
+
+  const bogusWrite = await postSession("sess_0mvgejpps_97df7c693a452f408c2c", {
+    overrides: { autoRecall: false },
+  });
+  eq("sess_ 形式的写入被拒", bogusWrite.body.ok, false);
+  eq("被拒时给明确原因", bogusWrite.body.error, "unknown session key");
+  eq("被拒状态码是 400", bogusWrite.status, 400);
+  eq(
+    "被拒时不建状态文件",
+    fs.readdirSync(path.join(dir, "sessions")).sort(),
+    filesBefore,
+  );
+
+  // 形状不对的任意字符串同样不消费：400 + ok:false，且目录列表一个字节不变。
+  const fooRead = await getSession("foo");
+  eq("非 uuid 形态的读取回 ok:false", fooRead.body.ok, false);
+  eq("非 uuid 形态的读取是 400", fooRead.status, 400);
+  eq("非 uuid 形态的读取给明确原因", fooRead.body.error, "unknown session key");
+  eq(
+    "非 uuid 形态的读取不建文件",
+    fs.readdirSync(path.join(dir, "sessions")).sort(),
+    filesBefore,
+  );
+
+  const fooWrite = await postSession("foo", { overrides: { autoRecall: false } });
+  eq("非 uuid 形态的写入被拒", fooWrite.body.ok, false);
+  eq("非 uuid 形态的写入是 400", fooWrite.status, 400);
+  eq("非 uuid 形态的写入给明确原因", fooWrite.body.error, "unknown session key");
+  eq(
+    "非 uuid 形态的写入不建文件",
+    fs.readdirSync(path.join(dir, "sessions")).sort(),
+    filesBefore,
+  );
+
+  // 路径形式的写入必须落到同一个 key 上，不能另起一份。
+  const filesBeforePathWrite = fs.readdirSync(path.join(dir, "sessions")).sort();
+  const pathWrite = await postSession(
+    `/Users/u/.hanako/agents/agent-x/sessions/2026-10-20T08-09-15-730Z_${BOUND_KEY}.jsonl`,
+    { overrides: { autoCapture: false } },
+  );
+  eq("路径写入落到同一个 key", pathWrite.body.sessionId, BOUND_KEY);
+  eq("路径写入写的是同一份状态", readSession(dir, BOUND_KEY).overrides.autoCapture, false);
+  eq(
+    "路径写入没有多出一份文件",
+    fs.readdirSync(path.join(dir, "sessions")).sort(),
+    filesBeforePathWrite,
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -1022,6 +1455,62 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("召回轮次记了两次", state.recall.turns, 2);
   check("注入 token 累加", state.recall.injectedTokens > 0);
   check("记了最后召回时间", typeof state.recall.lastAt === "string");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 排除名单：配置里的名字转成 exclude_uris，只对 all 范围生效 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-exclude");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    recallPeerScope: "all",
+    excludedPeers: " hermes , DSH-desktop ,, hermes ",
+  };
+  const all = mockFetch({ body: { status: "ok", result: { rendered: "跨门牌的记忆" } } });
+  const allHandler = createRecallHandler(
+    recallSdk({ values, fetchImpl: all.fetchImpl, dataDir: dir }),
+  );
+  await allHandler({
+    payload: { messages: [{ role: "user", content: "别的机器说过什么" }] },
+    session: { sessionId: "exclude-all" },
+  });
+  eq(
+    "排除名单转成 exclude_uris",
+    JSON.parse(all.calls[0].init.body).exclude_uris,
+    ["viking://user/default/peers/hermes", "viking://user/default/peers/dsh-desktop"],
+  );
+
+  const self = mockFetch({ body: { status: "ok", result: { rendered: "本机记忆" } } });
+  const selfHandler = createRecallHandler(
+    recallSdk({ values: { ...values, recallPeerScope: "self" }, fetchImpl: self.fetchImpl, dataDir: dir }),
+  );
+  await selfHandler({
+    payload: { messages: [{ role: "user", content: "只看本机" }] },
+    session: { sessionId: "exclude-self" },
+  });
+  eq(
+    "self 范围不带 exclude_uris",
+    "exclude_uris" in JSON.parse(self.calls[0].init.body),
+    false,
+  );
+
+  const none = mockFetch({ body: { status: "ok", result: { rendered: "全部记忆" } } });
+  const noneHandler = createRecallHandler(
+    recallSdk({ values: { ...values, excludedPeers: "" }, fetchImpl: none.fetchImpl, dataDir: dir }),
+  );
+  await noneHandler({
+    payload: { messages: [{ role: "user", content: "没有排除项" }] },
+    session: { sessionId: "exclude-none" },
+  });
+  eq(
+    "名单为空时不带 exclude_uris",
+    "exclude_uris" in JSON.parse(none.calls[0].init.body),
+    false,
+  );
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

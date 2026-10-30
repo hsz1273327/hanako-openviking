@@ -3,8 +3,10 @@
 // 为什么必须按会话存：记忆讲的是"这段对话里发生了什么"。开关、召回次数、写回游标
 // 都属于这一段的上下文。把会话级的开关写进全局配置，等于在一个房间关灯、整栋楼都黑。
 //
-// 存储形态：<dataDir>/sessions/<safeId>.json，一会话一文件。
+// 存储形态：<dataDir>/sessions/<sessionKey>.json，一会话一文件。
 // 单文件 Map 省事，但并发写会把别人的记录冲掉；一文件一写入，坏也坏一个。
+//
+// sessionKey 的规则见下方的 sessionKeyOf：路由必须先过它，认不出来的 key 不落盘。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -22,6 +24,49 @@ export const OVERRIDE_KEYS = Object.freeze([
 ]);
 
 const BOOLEAN_KEYS = new Set(["autoRecall", "autoCapture", "readOnly", "skillRouting", "probe"]);
+
+// key 的形状：宿主会话文件里的 uuid 是小写，所以正则不带 i 标志。
+// 形状不对的一律当“认不出来”：readSession 会给任何字符串回一份空状态，而写路径
+// 会直接建文件——不挡住 ../etc/passwd、foo 这类输入，sessions 目录就成了垃圾桶。
+const KEY_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}/;
+
+/** 文件名里最后一个 `_` 之后的段落；没有 `_` 时就是整个名字。 */
+function stripStamp(name) {
+  return name.slice(name.lastIndexOf("_") + 1);
+}
+
+/**
+ * 会话 key：把"宿主给的会话定位器"收敛成"状态文件的文件名"。
+ *
+ * 三种输入：
+ *   <会话路径>.jsonl  取 basename、去扩展名、去创建时间前缀 → 01a1585b-86d2-...
+ *   已经是一个 key    原样返回（仍要过 uuid 形状检查）
+ *   sess_… 稳定 id    映射不到任何文件 → ""
+ *   其它字符串        形状不对 → ""，不造文件
+ *
+ * 为什么要有这道门：宿主的会话文件名是 <时间戳>_<uuid>.jsonl，hook 里的
+ * session.sessionId 就是那个 uuid，状态文件也按 uuid 命名；而前端
+ * hana.sessions.getActive().sessionId 给的是 sess_… 这种稳定 id。两者不是一回事。
+ * 不在这里收口，sess_… 会被当成新会话名，为每段对话造出一份永远不会被读到的状态文件。
+ */
+export function sessionKeyOf(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  // 两个方向的分隔符都认（宿主的会话路径在 Windows 上是反斜杠）。
+  // 已经是一个 key 时，这一行只是把它原样带回来。
+  const base = trimmed.split(/[/\\]/).filter(Boolean).pop() || "";
+  const name = base.replace(/\.jsonl$/i, "").replace(/\.json$/i, "");
+  if (!name || name === "." || name === "..") return "";
+  if (name.startsWith("sess_")) return "";
+  // 文件名前缀是会话创建时间（2026-10-20T08-09-15-730Z_，也可能带 +08-00 之类
+  // 的时区形态）；key 不带它，hook 的 sessionId 也不带。按“最后一个 _ 之后”剥，
+  // 不去猜时间戳长什么样：宿主换一种写法，这里也不会静默分叉。
+  const key = stripStamp(name);
+  if (!key || key.startsWith("sess_")) return "";
+  if (!KEY_SHAPE.test(key)) return "";
+  return key;
+}
 
 function dirOf(dataDir) {
   return path.join(dataDir || ".", "sessions");

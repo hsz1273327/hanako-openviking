@@ -101,8 +101,13 @@ export function createClient({
     ready: () => call("/ready", { method: "GET" }, "raw"),
 
     // 记忆召回。mode="context" 返回服务端已按 token 预算组装好的上下文块。
-    recall: (query, opts = {}) =>
-      call("/api/v1/search/search", {
+    // exclude_uris 只在确实有排除项时出现：空数组 / 未传都不带这个键，
+    // 让请求体保持与旧版逐字节一致。
+    recall: (query, opts = {}) => {
+      const excludeUris = Array.isArray(opts.excludeUris)
+        ? opts.excludeUris.filter((uri) => typeof uri === "string" && uri.trim())
+        : [];
+      return call("/api/v1/search/search", {
         method: "POST",
         body: JSON.stringify({
           query,
@@ -110,8 +115,10 @@ export function createClient({
           peer_scope: wirePeerScope(opts.peerScope),
           max_tokens: opts.maxTokens ?? 2000,
           score_threshold: opts.scoreThreshold ?? 0.35,
+          ...(excludeUris.length ? { exclude_uris: excludeUris } : {}),
         }),
-      }),
+      });
+    },
 
     // 技能检索。返回按包分组的命中，含 name/description/root_uri/skill_md_uri。
     findSkills: (query, opts = {}) =>
@@ -136,6 +143,24 @@ export function createClient({
       return call(`/api/v1/skills/${encodeURIComponent(skillName)}${q ? `?${q}` : ""}`, {
         method: "GET",
       });
+    },
+
+    // 中枢里已有的 peer 目录。simple=true 只要目录名，不要每条的元数据。
+    // 返回的 URI 形如 viking://user/default/peers/hermes，这里只留最后一段。
+    // 顺序原样保留；非数组 / 非字符串条目直接跳过，界面只负责怎么摆。
+    listPeers: async () => {
+      const result = await call(
+        "/api/v1/fs/ls?uri=viking://user/default/peers&simple=true",
+        { method: "GET" },
+      );
+      if (!Array.isArray(result)) return [];
+      const names = [];
+      for (const entry of result) {
+        if (typeof entry !== "string") continue;
+        const name = entry.replace(/\/+$/, "").split("/").pop();
+        if (name) names.push(name);
+      }
+      return names;
     },
 
     // 会话：创建 -> 追加消息 -> 提交（提交时抽取长期记忆）。

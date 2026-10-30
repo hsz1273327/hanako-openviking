@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
-import { readConnection, readSwitches } from "../ov/settings.js";
+import { readConnection, readExcludedPeers, readSwitches } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
 import {
   MEMORY_TAG_CLOSE,
@@ -231,6 +231,12 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
+    // 排除名单只对跨门牌（all）有意义：actor 范围本来就不含别人，
+    // 多带这个键只会让请求体多一个不必要的字段。
+    const excludedPeers =
+      live.recallPeerScope === "all" ? await readExcludedPeers(sdk) : [];
+    const excludeUris = excludedPeers.map((name) => `viking://user/default/peers/${name}`);
+
     const budget = recallBudget(conn);
     const client = createClient({
       ...conn,
@@ -243,6 +249,7 @@ export function createRecallHandler(sdk, options = {}) {
       result = await client.recall(query, {
         peerScope: live.recallPeerScope,
         maxTokens: budget,
+        excludeUris,
       });
     } catch (error) {
       log(sdk, "info", `skip: request failed (session=${sessionId}) ${reasonOf(error)}`);

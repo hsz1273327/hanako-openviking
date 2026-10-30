@@ -385,6 +385,53 @@ html, body {
   opacity: 1;
 }
 
+/* ---------- 中枢里的 peer ---------- */
+
+.peer-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  min-height: 17px;
+  opacity: 0.85;
+}
+.peer-list.empty {
+  opacity: 0.45;
+}
+
+.peer-chip {
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 128, 128, 0.24);
+  background: rgba(128, 128, 128, 0.04);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.peer-chip.self {
+  border-color: rgba(111, 143, 104, 0.55);
+  color: #5d7d56;
+}
+.peer-chip.tappable {
+  cursor: pointer;
+}
+.peer-chip.tappable:hover,
+.peer-chip.tappable:focus-visible {
+  border-color: rgba(128, 128, 128, 0.5);
+  background: rgba(128, 128, 128, 0.1);
+  outline: none;
+}
+.peer-chip.excluded {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.peer-chip.more {
+  opacity: 0.6;
+}
+
 .err {
   margin: 10px 0 0;
   font-size: 11.5px;

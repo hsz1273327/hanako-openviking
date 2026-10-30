@@ -6,6 +6,7 @@
 // 这样"改一下"和"取消改动"是两件不同的事，不用靠连点猜。
 
 import { hana } from "./sdk.js";
+import { sessionKeyOf } from "./session-key.js";
 
 const REFRESH_MS = 8000;
 const BOOL_KEYS = ["autoRecall", "autoCapture", "readOnly"];
@@ -19,7 +20,9 @@ const el = {
   hint: document.getElementById("hint"),
 };
 
-let sessionId = null;
+let sessionKey = null;
+// 会话归属（宿主断言的 agentId）。拿不到时为空串，显示时回退到后端解析出的 peer。
+let sessionOwner = "";
 let model = null;
 let globalStatus = null;
 
@@ -77,21 +80,28 @@ function paint(data, status) {
   el.pill.textContent = enabled ? "全局开" : "全局关";
   el.pill.className = `pill ${enabled ? "on" : "off"}`;
 
-  // 没有身份就不显示一个像样的名字：写清为什么没有，而不是拿别的会话顶上。
-  if (!data.peer) {
+  // 会话归属优先用 getActive() 给的 agentId——那是宿主断言的身份，不用解析路径猜。
+  // 拿不到（老宿主、没授权）才回退到后端按状态文件解析出的 peer。
+  const owner = sessionOwner || data.peer || "";
+  if (!owner) {
     el.peer.textContent = "未绑定助手";
     el.peer.title =
       data.peerSource === "merged"
         ? "合并记忆已开启，但这一段没拿到会话身份。"
         : "拿不到会话路径，无法确定这一段属于哪个助手。";
+  } else if (sessionOwner) {
+    el.peer.textContent = sessionOwner;
+    el.peer.title = data.peer
+      ? `会话归属 ${sessionOwner}；对外门牌 ${data.peer}`
+      : `会话归属 ${sessionOwner}`;
   } else {
-    el.peer.textContent = data.peer;
+    el.peer.textContent = owner;
     el.peer.title =
       data.peerSource === "merged"
         ? data.peerAgentDir
-          ? `${data.peer}（合并记忆已开启；本会话助手：${data.peerAgentDir}）`
-          : `${data.peer}（合并记忆已开启，本机所有助手共用一个身份）`
-        : data.peer;
+          ? `${owner}（合并记忆已开启；本会话助手：${data.peerAgentDir}）`
+          : `${owner}（合并记忆已开启，本机所有助手共用一个身份）`
+        : owner;
   }
 
   const recall = data.state?.recall || {};
@@ -120,20 +130,30 @@ function paint(data, status) {
 async function resolveSession() {
   try {
     const active = await hana.sessions.getActive();
-    sessionId = active?.sessionId || active?.id || active?.session?.sessionId || null;
-    const title = active?.title || active?.session?.title || "";
-    el.title.textContent = title || (sessionId ? shortId(sessionId) : "无活动会话");
-    el.title.title = title || sessionId || "";
+    // 会话 key 用 sessionPath 的 basename（去扩展名、去时间戳），与后端、与 hook 的
+    // sessionId、与 <dataDir>/sessions/<key>.json 是同一个值。
+    // getActive().sessionId 是 sess_… 形式的稳定 id，映射不到任何状态文件。
+    // 拿不到 sessionPath 就是“没有活动会话”：不给 sessionId 留后门，那条老路
+    // 正是“编一个查不到也写不进的 key”的源头。
+    sessionKey = sessionKeyOf(active) || null;
+    sessionOwner = typeof active?.agentId === "string" ? active.agentId.trim() : "";
+    const title = active?.title || "";
+    el.title.textContent = title || (sessionKey ? shortId(sessionKey) : "无活动会话");
+    el.title.title = title || sessionKey || "";
   } catch {
-    sessionId = null;
+    // 未授权、或不在主聊天窗口：没有可指向的会话。这里不再拿 sessionId 去查——
+    // 那个 id 指不到状态文件，查出来是空记录，开关写进去也不会生效。
+    sessionKey = null;
+    sessionOwner = "";
     el.title.textContent = "无活动会话";
+    el.title.title = "";
   }
 }
 
 async function fetchStatus() {
-  if (!sessionId) return null;
+  if (!sessionKey) return null;
   try {
-    const res = await hana.api.fetch(`/status?session=${encodeURIComponent(sessionId)}`);
+    const res = await hana.api.fetch(`/status?session=${encodeURIComponent(sessionKey)}`);
     return await res.json();
   } catch {
     return null;
@@ -141,9 +161,9 @@ async function fetchStatus() {
 }
 
 async function refresh() {
-  if (!sessionId) {
+  if (!sessionKey) {
     await resolveSession();
-    if (!sessionId) {
+    if (!sessionKey) {
       setHint("先打开一个对话，这张卡才会跟会话绑定。", false);
       el.stats.textContent = "—";
       el.pill.textContent = "—";
@@ -155,9 +175,15 @@ async function refresh() {
   try {
     const [status, res] = await Promise.all([
       fetchStatus(),
-      hana.api.fetch(`/session/${encodeURIComponent(sessionId)}`),
+      hana.api.fetch(`/session/${encodeURIComponent(sessionKey)}`),
     ]);
     const data = await res.json();
+    // 后端认不出这个 key 时回 ok:false：不画一份不存在的状态，说清为什么。
+    if (data.ok === false) {
+      setHint("这个会话对不上任何状态（unknown session key），先重新选一次会话。", true);
+      el.stats.textContent = "—";
+      return;
+    }
     paint(data, status);
   } catch (error) {
     setHint(String(error?.message || error), true);
@@ -165,9 +191,9 @@ async function refresh() {
 }
 
 async function write(overrides) {
-  if (!sessionId) return;
+  if (!sessionKey) return;
   try {
-    const res = await hana.api.fetch(`/session/${encodeURIComponent(sessionId)}`, {
+    const res = await hana.api.fetch(`/session/${encodeURIComponent(sessionKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ overrides }),
@@ -240,7 +266,8 @@ document.addEventListener("visibilitychange", () => {
 
 try {
   hana.sessions.onActiveChanged(() => {
-    sessionId = null;
+    sessionKey = null;
+    sessionOwner = "";
     model = null;
     refresh();
   });

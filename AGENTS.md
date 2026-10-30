@@ -60,6 +60,7 @@ sed -n '起,止p' APPS.md
 - 宿主的 `/config`、`/config-schema` 这两个 GET 会回显明文密钥。自己的配置端点必须换名（本仓库用 `/conn`）。
 - `tools.pre-execute` 一类的决策钩子里，返回 `undefined` 表示不干预。探针只写日志，不许改返回值。
 - 打开卡片必须零副作用：`/status`、`/session/:sid` 全是只读路由，不触发召回、不写回。
+- `sessionPath` 按宿主 APPS.md（`~/.hanako/artifacts/server/<version>/APPS.md`）第 1008 行是"查询结果中的当前定位器，不是身份"。我们拿它的 basename（去扩展名、去创建时间前缀、校验 uuid 形状）当状态文件 key，依据是 hook 的 `invocation.session.sessionId` 与文件名里的 uuid 同值（已实测）。**这是有意识的取舍**：一旦会话文件被移动、重建，或宿主改变命名规则，旧状态文件会静默失联，不会报错。改动 key 规则时必须同时改前端 `ui/assets/session-key.js` 与后端 `src/state/session.js` 两处，并成对补断言。
 
 ## 本地开发循环
 

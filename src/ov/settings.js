@@ -17,7 +17,34 @@ export const DEFAULTS = {
   injectBudgetTokens: 2500,
   skillRouting: true,
   probe: false,
+  excludedPeers: "",
 };
+
+/** 排除名单的单项形状：小写字母、数字、点、下划线、连字符。 */
+const EXCLUDED_PEER_RE = /^[a-z0-9._-]{1,64}$/;
+
+/** 配置里最多记多少个 peer。与 POST /peers 的上限保持一致。 */
+export const EXCLUDED_PEERS_MAX = 50;
+
+/**
+ * 把配置里的逗号串解析成 peer 名数组。
+ *
+ * 按逗号切、trim、转小写、去空、去重；形状不对的条目整条丢掉（不剪字符，
+ * 否则 `../etc` 会被悄悄变成 `etc`，比忽略更难排查）。顺序按首次出现保留。
+ */
+export function parseExcludedPeers(raw) {
+  const text = typeof raw === "string" ? raw : "";
+  const out = [];
+  const seen = new Set();
+  for (const part of text.split(",")) {
+    const name = part.trim().toLowerCase();
+    if (!name || !EXCLUDED_PEER_RE.test(name) || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= EXCLUDED_PEERS_MAX) break;
+  }
+  return out;
+}
 
 async function read(sdk, key) {
   try {
@@ -37,6 +64,10 @@ export async function readSwitches(sdk) {
     skillRouting: await read(sdk, "skillRouting"),
     probe: await read(sdk, "probe"),
   };
+}
+
+export async function readExcludedPeers(sdk) {
+  return parseExcludedPeers(await read(sdk, "excludedPeers"));
 }
 
 export async function readConnection(sdk) {

@@ -6,17 +6,26 @@
 //   GET  /controls  六个开关 + 召回范围 + 超时 + 预算
 //   POST /controls  改上面这组
 //   POST /conn      改连接三字段（地址 / key / 门牌前缀）
+//   GET  /peers     中枢里的 peer + 是否排除
+//   POST /peers     改排除名单
 //
 // 写操作一律乐观更新，失败回滚并提示。开关不是装饰。
 
 import { hana } from "./sdk.js";
+import { sessionKeyOf } from "./session-key.js";
 
 const $ = (id) => document.getElementById(id);
 
 const SWITCH_KEYS = ["skillRouting", "probe"];
 
+// 中枢里 peer 多的时候只铺一屏：剩下的用一个 +N 概括，完整名单进 title。
+const PEER_VISIBLE = 8;
+
 let controls = null;
 let logOpen = false;
+// 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
+let peerCache = [];
+let peerWritePending = false;
 
 async function jsonGet(path) {
   const res = await hana.api.fetch(path);
@@ -136,6 +145,107 @@ function renderStatus(data, latencyMs) {
   }
 }
 
+function paintPeerChip(chip, peer) {
+  const excluded = Boolean(peer?.excluded) && !peer?.self;
+  chip.classList.toggle("excluded", excluded);
+  if (peer?.self) {
+    chip.title = "本机";
+  } else if (excluded) {
+    chip.title = "已排除，不参与召回，点击恢复";
+  } else {
+    chip.title = "点击排除，之后召回不再包含它的记忆";
+  }
+}
+
+function renderPeers(payload) {
+  const box = $("peerList");
+  const hint = $("peerHint");
+  if (!box) return;
+  box.textContent = "";
+  box.title = "";
+  box.classList.remove("empty");
+  if (hint) hint.hidden = true;
+
+  // null（请求本身失败）和 ok:false（服务端读不到）都是同一种结果。
+  if (!payload || payload.ok === false) {
+    peerCache = [];
+    box.textContent = "读不到 peer 列表";
+    box.title = String(payload?.error || "");
+    box.classList.add("empty");
+    return;
+  }
+
+  const peers = Array.isArray(payload.peers) ? payload.peers : [];
+  peerCache = peers;
+  if (!peers.length) {
+    box.textContent = "中枢里还没有别的 peer";
+    box.classList.add("empty");
+    return;
+  }
+
+  // 全是自己的 peer 时没有可排除的对象：保持原来的纯展示，不出现可点的胶囊。
+  if (hint) hint.hidden = !peers.some((peer) => peer && !peer.self);
+
+  for (const peer of peers.slice(0, PEER_VISIBLE)) {
+    const chip = document.createElement("span");
+    chip.className = "peer-chip";
+    chip.textContent = peer?.name || "";
+    if (peer?.self) {
+      chip.classList.add("self");
+    } else if (peer?.name) {
+      chip.classList.add("tappable");
+      chip.setAttribute("role", "button");
+      chip.tabIndex = 0;
+      const toggle = () => togglePeerExclusion(peer.name);
+      chip.addEventListener("click", toggle);
+      chip.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggle();
+        }
+      });
+    }
+    paintPeerChip(chip, peer);
+    box.appendChild(chip);
+  }
+
+  if (peers.length > PEER_VISIBLE) {
+    const hidden = peers.slice(PEER_VISIBLE);
+    const more = document.createElement("span");
+    more.className = "peer-chip more";
+    more.textContent = `+${hidden.length}`;
+    more.title = hidden.map((peer) => peer?.name).filter(Boolean).join("、");
+    box.appendChild(more);
+  }
+}
+
+async function togglePeerExclusion(name) {
+  if (peerWritePending) return;
+  const before = peerCache;
+  const current = before.find((peer) => peer?.name === name);
+  if (!current || current.self) return;
+
+  const next = before.map((peer) =>
+    peer?.name === name ? { ...peer, excluded: !peer.excluded } : peer,
+  );
+
+  peerWritePending = true;
+  renderPeers({ ok: true, peers: next }); // 乐观：先让胶囊变成目标状态
+  try {
+    const out = await jsonPost("/peers", {
+      excluded: next.filter((peer) => peer?.excluded).map((peer) => peer.name),
+    });
+    if (!out || out.ok === false) throw new Error(out?.error || "写入失败");
+    renderPeers(out);
+    flash("排除名单已更新");
+  } catch (error) {
+    renderPeers({ ok: true, peers: before }); // 失败回滚到点击前
+    flash(String(error?.message || error), true);
+  } finally {
+    peerWritePending = false;
+  }
+}
+
 function renderProbe(payload) {
   const lines = payload?.lines || [];
   const counts = {};
@@ -187,10 +297,12 @@ function applyConnection(conn) {
   else $("peerPrefix").title = "";
 }
 
-async function currentSessionId() {
+async function currentSessionKey() {
   try {
     const active = await hana.sessions.getActive();
-    return active?.sessionId || active?.id || active?.session?.sessionId || null;
+    // 与卡片同一套规则：/status 只认状态文件的 key，sess_… 形式的稳定 id 映射不到。
+    // 只吃 sessionPath，不拿 sessionId 当保底——那个 id 指不到任何文件。
+    return sessionKeyOf(active) || null;
   } catch {
     return null;
   }
@@ -200,15 +312,18 @@ async function refresh(opts = {}) {
   const started = performance.now();
   $("refreshBtn").disabled = true;
   try {
-    const sid = await currentSessionId();
+    const sid = await currentSessionKey();
     const statusPath = sid ? `/status?session=${encodeURIComponent(sid)}` : "/status";
-    const [status, probe, ctrl, conn] = await Promise.all([
+    const [status, probe, ctrl, conn, peers] = await Promise.all([
       jsonGet(statusPath),
       jsonGet("/probe").catch(() => ({ lines: [] })),
       jsonGet("/controls").catch(() => null),
       jsonGet("/conn").catch(() => null),
+      // peer 列表是锦上添花：读不到也不能把整页状态拖下水。
+      jsonGet("/peers").catch(() => null),
     ]);
     renderStatus(status, Math.round(performance.now() - started));
+    renderPeers(peers);
     renderProbe(probe);
     if (ctrl) applyControls(ctrl);
     applyConnection(conn);

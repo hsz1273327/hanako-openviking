@@ -13,6 +13,7 @@
     "app/hooks.observe",
     "app/tools.expose-to-model",
     "app/resources.read",
+    "app/sessions.read",
     "app/runtime.execute",
     "app/runtime.native",
     "app/runtime.network"
@@ -85,6 +86,12 @@
             "description": "all 跨门牌召回（别的机器、Hermes 写的也能看到），self 只看本机。",
             "default": "all",
             "enum": ["all", "self"]
+          },
+          "excludedPeers": {
+            "type": "string",
+            "title": "排除的 peer",
+            "description": "逗号分隔的 peer 名。列在这里的笔记不会参与召回，界面上可以点选。",
+            "default": ""
           },
           "requestTimeoutMs": {
             "type": "integer",

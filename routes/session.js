@@ -13,10 +13,17 @@ import {
   listSessions,
   patchSession,
   readSession,
+  sessionKeyOf,
 } from "../src/state/session.js";
 
 function dataDirOf(ctx) {
   return ctx?.dataDir || ctx?.sdk?.dataDir || ".";
+}
+
+// 认不出来的 key 一律当"没有这段会话"：既不读也不写。
+// 只回一个错不够——前端要知道这是"没绑定"，不是"服务挂了"，所以照常带 peer 字段。
+function unknownSession(c) {
+  return c.json({ ok: false, error: "unknown session key", peer: null, peerSource: "unbound" }, 400);
 }
 
 function probeStats(dataDir, sessionId) {
@@ -58,7 +65,11 @@ export default function registerSessionRoutes(app, ctx) {
   });
 
   app.get("/session/:sid", async (c) => {
-    const sessionId = c.req.param("sid");
+    // 会话 key 统一收口：宿主给的可能是会话路径，也可能是 sess_… 形式的稳定 id。
+    // 认不出来就到此为止——readSession 会给任何字符串回一份空状态，而下面的
+    // write 路径更会直接建文件，sess_… 会留下一地孤儿。
+    const sessionId = sessionKeyOf(c.req.param("sid"));
+    if (!sessionId) return unknownSession(c);
     const dataDir = dataDirOf(ctx);
     const state = readSession(dataDir, sessionId);
     const base = await readSwitches(ctx);
@@ -85,7 +96,8 @@ export default function registerSessionRoutes(app, ctx) {
   });
 
   app.post("/session/:sid", async (c) => {
-    const sessionId = c.req.param("sid");
+    const sessionId = sessionKeyOf(c.req.param("sid"));
+    if (!sessionId) return unknownSession(c);
     let body = {};
     try {
       body = await c.req.json();

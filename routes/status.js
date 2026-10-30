@@ -11,7 +11,7 @@ import { readConnection, readSwitches } from "../src/ov/settings.js";
 import { describePeer } from "../src/ov/identity.js";
 import { createClient } from "../src/ov/client.js";
 import { transportFor } from "../src/ov/transport.js";
-import { readSession } from "../src/state/session.js";
+import { readSession, sessionKeyOf } from "../src/state/session.js";
 
 const LOG_TAIL = 24;
 
@@ -58,7 +58,9 @@ export default function registerStatusRoutes(app, ctx) {
     // 不带会话时，只有 mergeMemory 能单独给出身份；拿不到就给 null，
     // 不用“最近一个”或别的会话顶上——那会把 A 会话的身份显示到 B 会话头上。
     const sidRaw = typeof c.req?.query === "function" ? c.req.query("session") : "";
-    const sid = typeof sidRaw === "string" ? sidRaw.trim() : "";
+    // 会话 key 统一收口：路径取文件名里的 uuid，sess_… 形式的稳定 id 映射不到状态文件。
+    // 映射不出来就当"没带会话"——不能拿它去 readSession，那会给这类 id 建一个空文件。
+    const sid = sessionKeyOf(typeof sidRaw === "string" ? sidRaw : "");
     let described = describePeer(conn, "");
     if (sid) {
       // 不包 try/catch：readSession（src/state/session.js）是全函数，内部自己吞掉所有
