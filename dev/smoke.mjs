@@ -2372,36 +2372,126 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("含指代词的短句照常召回", Boolean(recalled?.payload));
   eq("含指代词的短句发了请求", recallMock.calls.length, 1);
 
-  // queryMode=context：补上上文后不再算“孤立短指令”，照常召回。
-  const ctxMock = mockFetch({ body: { status: "ok", result: { rendered: "上下文召回" } } });
-  const ctxHandler = createRecallHandler(
-    recallSdk({
-      values: {
-        enabled: true,
-        apiKey: "k",
-        serverUrl: "http://h:1",
-        recallGate: "rules",
-        queryMode: "context",
+  // ---- gate 只看最后一条用户原话：recallGate 与 queryMode 解耦 ----
+  // 判据看的是“这句话需不需要查记忆”，拼接结果只决定“用什么去查”。
+  const gateHistory = [
+    { role: "user", content: "先把上周那版设计文档里的接口清单整理出来给我看看" },
+    { role: "assistant", content: "好" },
+    { role: "user", content: "再把它按模块拆成三份，每份不超过一页" },
+  ];
+  const joinedGate = `${gateHistory[0].content}\n${gateHistory[2].content}\n把这个删了`;
+
+  // 用例 1：rules + context + 短指令 + 长历史 -> 跳过，不发请求。
+  {
+    const m = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+    const h = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          recallGate: "rules",
+          queryMode: "context",
+        },
+        fetchImpl: m.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const r = await h({
+      payload: {
+        messages: [...gateHistory, { role: "user", content: "重启一下服务" }],
       },
-      fetchImpl: ctxMock.fetchImpl,
-      dataDir: dir,
-    }),
-  );
-  await ctxHandler({
-    payload: {
-      messages: [
-        { role: "user", content: "上次说交稿" },
-        { role: "user", content: "运行测试" },
-      ],
-    },
-    session: { sessionId: "gate-context" },
-  });
-  eq("context 模式带上文后照常召回", ctxMock.calls.length, 1);
-  eq(
-    "context 查询含上一条",
-    JSON.parse(ctxMock.calls[0].init.body).query,
-    "上次说交稿\n运行测试",
-  );
+      session: { sessionId: "gate-matrix-skip" },
+    });
+    check("用例1 rules+context+短指令：跳过时不干预", r === undefined);
+    eq("用例1 rules+context+短指令：请求数 0", m.calls.length, 0);
+  }
+
+  // 用例 2：rules + context + 带指代词 -> 不跳过，查询是拼接结果。
+  {
+    const m = mockFetch({ body: { status: "ok", result: { rendered: "上下文召回" } } });
+    const h = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          recallGate: "rules",
+          queryMode: "context",
+        },
+        fetchImpl: m.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const r = await h({
+      payload: {
+        messages: [...gateHistory, { role: "user", content: "把这个删了" }],
+      },
+      session: { sessionId: "gate-matrix-recall" },
+    });
+    check("用例2 rules+context+指代词：照常召回", Boolean(r?.payload));
+    eq("用例2 rules+context+指代词：请求数 1", m.calls.length, 1);
+    eq(
+      "用例2 发出的查询是拼接结果",
+      JSON.parse(m.calls[0].init.body).query,
+      joinedGate,
+    );
+  }
+
+  // 用例 3：rules + last + 短指令 + 无历史 -> 跳过。
+  {
+    const m = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+    const h = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          recallGate: "rules",
+          queryMode: "last",
+        },
+        fetchImpl: m.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const r = await h({
+      payload: { messages: [{ role: "user", content: "重启一下服务" }] },
+      session: { sessionId: "gate-matrix-last-skip" },
+    });
+    check("用例3 rules+last+短指令：跳过时不干预", r === undefined);
+    eq("用例3 rules+last+短指令：请求数 0", m.calls.length, 0);
+  }
+
+  // 用例 4：off + context + 短指令 + 有历史 -> 不跳过。
+  {
+    const m = mockFetch({ body: { status: "ok", result: { rendered: "关闭判断后照常召回" } } });
+    const h = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          recallGate: "off",
+          queryMode: "context",
+        },
+        fetchImpl: m.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const r = await h({
+      payload: {
+        messages: [...gateHistory, { role: "user", content: "重启一下服务" }],
+      },
+      session: { sessionId: "gate-matrix-off-ctx" },
+    });
+    check("用例4 off+context+短指令：照常召回", Boolean(r?.payload));
+    eq("用例4 off+context+短指令：请求数 1", m.calls.length, 1);
+    eq(
+      "用例4 发出的查询是拼接结果",
+      JSON.parse(m.calls[0].init.body).query,
+      `${gateHistory[0].content}\n${gateHistory[2].content}\n重启一下服务`,
+    );
+  }
 
   // 默认 off：同样的短指令照常召回，行为不比现在更差。
   const offMock = mockFetch({ body: { status: "ok", result: { rendered: "关闭判断后照常召回" } } });

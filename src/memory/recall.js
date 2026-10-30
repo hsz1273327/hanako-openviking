@@ -293,15 +293,16 @@ export function createRecallHandler(sdk, options = {}) {
     }
 
     // 召回判断：只跳过极短的纯操作指令，且在发请求之前。
-    // 用实际要发出去的查询文本判断：context 模式补了上文之后，句子不再“孤立”，自然会更倾向召回。
-    const query = recallQuery(payload, switches.queryMode);
-    if (shouldSkipRecall(query, switches.recallGate)) {
-      log(sdk, "info", `gate: skipped (session=${sessionId} chars=${charLength(query)})`);
+    // 判据看最后一条用户原话，不看拼接后的查询：gate 回答的是“这句话需不需要查记忆”，
+    // queryMode 回答的是“用什么去查”，两件事分开。若用拼接结果判断，context 模式
+    // 一旦有历史就必然超 8 字，rules 会被整个抵消掉。
+    if (shouldSkipRecall(lastText, switches.recallGate)) {
+      log(sdk, "info", `gate: skipped (session=${sessionId} chars=${charLength(lastText)})`);
       if (switches.probe && typeof options.probe === "function") {
         try {
           await options.probe("recall/gate-skip", {
             session,
-            query,
+            query: lastText,
             reason: "short-operation-command",
           });
         } catch {
@@ -310,6 +311,9 @@ export function createRecallHandler(sdk, options = {}) {
       }
       return undefined;
     }
+
+    // 用什么去查：与上面的判断无关，按 queryMode 取。
+    const query = recallQuery(payload, switches.queryMode);
 
     // 排除名单只对跨门牌（all）有意义：actor 范围本来就不含别人，
     // 多带这个键只会让请求体多一个不必要的字段。
