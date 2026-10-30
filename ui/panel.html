@@ -74,10 +74,10 @@
           <div class="fact"><span>版本</span><b id="version">—</b></div>
           <div class="fact"><span>出口</span><b id="transport">—</b></div>
         </div>
-        <!-- 五个检查项平时不占地方：正常时只有一行「服务端就绪 5/5」，
-             点开才看明细。有红项时默认展开。 -->
+        <!-- 五个检查项平时不占地方：全绿时只有一行静态文字「服务端就绪 5/5」，
+             有问题才在下面平铺列出不对的那几项。不可点、不折叠。 -->
         <div id="checksBlock" class="checks-block" hidden>
-          <button id="checksSummary" class="checks-summary" type="button" aria-expanded="false">服务端检查项</button>
+          <div id="checksSummary" class="checks-summary"></div>
           <ul id="checks" class="checks" hidden></ul>
         </div>
         <p id="reachError" class="err" hidden></p>

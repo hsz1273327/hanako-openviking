@@ -687,33 +687,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const green = uiSummarizeChecks(allOk);
   eq("五项全好写 5/5", green.text, "服务端就绪 5/5");
   eq("五项全好是绿档", green.tone, "ok");
-  eq("五项全好默认收起", green.open, false);
-  eq("五项全好没有待办项", green.problems, []);
+  eq("五项全好没有问题项（全绿不列明细）", green.problems, []);
   eq("五项全好计数 5/5", [green.ok, green.total], [5, 5]);
 
-  // 只差 ollama：不写成「不正常」，写清哪一项没配。
+  // 只差 ollama：摘要只说比例，项名交给下面那份问题列表。
   const oneMissing = allOk.map((check) =>
     check.name === "ollama" ? { ...check, status: "not_configured" } : check,
   );
   const lenient = uiSummarizeChecks(oneMissing);
-  eq("缺一项写 4/5 并带上项名与状态词", lenient.text, "服务端 4/5 就绪 · ollama 未配置");
+  eq("缺一项写 4/5，不把项名重复进摘要行", lenient.text, "服务端 4/5 就绪");
+  eq("摘要行里不出现项名", lenient.text.includes("ollama"), false);
   eq("只是没配是灰档不是红档", lenient.tone, "muted");
-  eq("只是没配不自动展开", lenient.open, false);
   eq("缺一项仍数出 4", [lenient.ok, lenient.total], [4, 5]);
   eq("待办项带名字与状态词", lenient.problems, [
     { name: "ollama", status: "not_configured", label: "未配置" },
   ]);
 
-  // 有 error：措辞用「异常」而不是蛇形枚举，并且默认摊开。
+  // 有 error：措辞用「异常」而不是蛇形枚举。
   const broken = allOk.map((check) =>
     check.name === "ollama" ? { ...check, status: "error" } : check,
   );
   const red = uiSummarizeChecks(broken);
-  eq("error 写成「异常」", red.text, "服务端 4/5 就绪 · ollama 异常");
+  eq("error 写进问题项而不是摘要行", red.text, "服务端 4/5 就绪");
   eq("有 error 是红档", red.tone, "bad");
-  eq("有红项时默认展开", red.open, true);
+  eq("error 的项名为 ollama 且念「异常」", red.problems, [
+    { name: "ollama", status: "error", label: "异常" },
+  ]);
 
-  // 两项不对：都点名，别只报第一个。
+  // 两项不对：两项都列，ok 项不出现。
   const twoBad = allOk.map((check) =>
     check.name === "vectordb"
       ? { ...check, status: "down" }
@@ -721,10 +722,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ? { ...check, status: "not_configured" }
         : check,
   );
+  const twoBadSummary = uiSummarizeChecks(twoBad);
+  eq("多项不对时摘要只报比例", twoBadSummary.text, "服务端 3/5 就绪");
+  eq("只列不对的那两项，顺序跟服务端一致", twoBadSummary.problems, [
+    { name: "vectordb", status: "down", label: "异常" },
+    { name: "ollama", status: "not_configured", label: "未配置" },
+  ]);
+  eq("ok 项不进问题列表", twoBadSummary.problems.some((p) => p.status === "ok"), false);
   eq(
-    "多项不对时逐项点名",
-    uiSummarizeChecks(twoBad).text,
-    "服务端 3/5 就绪 · vectordb 异常、ollama 未配置",
+    "问题列表条数 = 总数 − ok 数",
+    twoBadSummary.problems.length,
+    twoBadSummary.total - twoBadSummary.ok,
   );
 
   // 分母只数顶层：agfs 的 details 是脚注，不该把 5/5 变成 7/7。
@@ -742,12 +750,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const nestedSummary = uiSummarizeChecks(nested);
   eq("details 不参与分母", [nestedSummary.ok, nestedSummary.total], [2, 2]);
   eq("details 里的 down 不改父项措辞", nestedSummary.text, "服务端就绪 2/2");
-  eq("details 里的 down 不触发自动展开", nestedSummary.open, false);
+  eq("details 里的 down 不进问题列表", nestedSummary.problems, []);
+  eq("details 里的 down 不把档位拖红", nestedSummary.tone, "ok");
 
   // 没读到检查项（未启用 / ready 挂了）：有话说，但不假装 0/0 是好消息。
   const empty = uiSummarizeChecks([]);
   eq("空 checks 不写成 0/0", empty.text, "服务端检查项未知");
-  eq("空 checks 默认收起", empty.open, false);
+  eq("空 checks 没有问题项", empty.problems, []);
   eq("非数组也当空处理", uiSummarizeChecks(undefined).text, "服务端检查项未知");
 
   // 状态词映射：除了 ok，全念中文；认不出来的状态念「异常」。
@@ -796,7 +805,40 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     checksRule?.body || "",
   );
   check("摘要行的规则在", summaryRule !== null);
-  check("摘要行可点", /cursor\s*:\s*pointer/.test(summaryRule?.body || ""));
+
+  // 全绿时只是一行静态文字：不是按钮、不可点、没有箭头。
+  const summaryTag = html.slice(0, summaryIdx).lastIndexOf("<");
+  const summaryLine = html.slice(summaryTag, html.indexOf(">", summaryIdx) + 1);
+  check("摘要行不是 button", summaryLine.includes("<button") === false, summaryLine);
+  check("摘要行没有 aria-expanded", html.includes("aria-expanded") === false);
+  check("摘要行不可点", /cursor\s*:\s*pointer/.test(summaryRule?.body || "") === false,
+    summaryRule?.body || "");
+  check("摘要行没有箭头伪元素", css.includes(".checks-summary::before") === false);
+  check("箭头字符已经不在了", css.includes("▸") === false && css.includes("▾") === false);
+  check("折叠状态的 open 类不再用", css.includes(".checks-summary.open") === false);
+  const statusRule = ruleFor(".checks li .check-status");
+  check("状态词规则在", statusRule !== null);
+  check(
+    "状态词不叠 opacity（父项 li 已经半透，再乘一层就看不见了）",
+    /opacity/.test(statusRule?.body || "") === false,
+    statusRule?.body || "",
+  );
+  check("状态词前有分隔点", /content\s*:\s*"·\\20"|content\s*:\s*"·\s/.test(
+    ruleFor(".checks li .check-status::before")?.body || "",
+  ));
+
+  // hidden 的兜底：display:grid / flex 不能再把 hidden 顶掉。
+  const hiddenRule = ruleFor(".page [hidden]");
+  check("hidden 兜底规则在", hiddenRule !== null);
+  check(
+    "hidden 兜底是 display:none !important",
+    /display\s*:\s*none\s*!important/.test(hiddenRule?.body || ""),
+    hiddenRule?.body || "",
+  );
+  check(
+    "hidden 兜底在 .checks 之前（先定规矩）",
+    (hiddenRule?.index ?? Infinity) < (checksRule?.index ?? -1),
+  );
 }
 
 // ================= routes: peers =================
@@ -1245,9 +1287,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 }
 
 {
-  // ---- 嵌套 checker：muted 父项的 opacity 不该再被乘一次 ----
-  // smoke 没有 DOM、没有 CSS 引擎，只能静态守规则：去掉注释后按选择器找规则，
-  // 并确认它在 `.checks li.muted {` 之后（级联顺序）。删掉这条规则就会红。
+  // ---- hidden 与 display 的相克 ----
+  // `[hidden]` 的 `display:none` 来自 UA 样式表，优先级最低；元素自己写一条
+  // `display: grid` 就能把它顶掉，于是「隐藏」的列表照旧占位。
+  // 现在统一用一条 `.page [hidden] { display:none !important }` 兑底，
+  // 并发验两个前提：.checks 确实是 display:grid（所以当初会被顶掉），
+  // 且兑底规则的取值不会被后面的规则反向覆盖。
   const css = fs
     .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.css"), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "");
@@ -1258,19 +1303,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const end = css.indexOf("}", open);
     return { index, body: css.slice(open + 1, end) };
   };
-  const mutedRule = ruleFor(".checks li.muted");
-  const mutedChildRule = ruleFor(".checks li.muted > ul li");
-  check("muted 父项规则还在", mutedRule !== null);
-  check("muted 子项恢复不透明的规则在", mutedChildRule !== null);
+  const guard = ruleFor(".page [hidden]");
+  check("检查项列表确实是 display:grid（当初被顶掉的原因）",
+    /display\s*:\s*grid/.test(ruleFor(".checks")?.body || ""));
+  check("兑底规则存在", guard !== null);
+  check("兑底规则带 !important", /!important/.test(guard?.body || ""));
   check(
-    "muted 子项的 opacity 是 1",
-    /(^|;)\s*opacity\s*:\s*1\s*(;|$)/.test(mutedChildRule?.body || ""),
-    mutedChildRule?.body || "",
+    "兑底规则在 .checks 之前（不会被后写规则覆盖）",
+    (guard?.index ?? Infinity) < (ruleFor(".checks")?.index ?? -1),
   );
-  check(
-    "muted 子项规则在父项之后（级联顺序）",
-    (mutedChildRule?.index ?? -1) > (mutedRule?.index ?? Infinity),
-  );
+  // 旧的嵌套 details 样式已经随渲染方式一起删掉，不该再有死规则。
+  check("没有嵌套 details 的死规则", css.includes(".checks li > ul") === false);
 }
 
 {
