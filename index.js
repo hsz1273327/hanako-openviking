@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
+import { normalizeReady } from "./src/ov/ready.js";
 import { createRuntimeTransport, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
 import {
   agentDirFromSessionPath,
@@ -84,32 +85,7 @@ export default defineApp(async (sdk) => {
       "Report the OpenViking hub: reachability, identity (peer name) and local switches. Read-only.",
     parameters: { type: "object", properties: {} },
     execute: async (args) => {
-      const sw = await readSwitches(sdk);
-      const conn = await readConnection(sdk);
-      const peer = resolvePeer(conn, args?.context?.sessionPath ?? null);
-      const report = {
-        enabled: sw.enabled,
-        peer,
-        serverUrl: conn.serverUrl,
-        apiKeySet: Boolean(conn.apiKey),
-        timeoutMs: conn.timeoutMs,
-      };
-
-      if (sw.enabled && conn.serverUrl && conn.apiKey) {
-        const transport = transportFor(sdk);
-        if (transport.mode === "down") {
-          report.health = null;
-          report.ready = null;
-        } else {
-          const client = createClient({ ...conn, ...transport });
-          report.health = await safe(() => client.health());
-          report.ready = await safe(() => client.ready());
-        }
-      } else {
-        report.health = null;
-        report.ready = null;
-      }
-
+      const report = await buildStatusReport(sdk, args);
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
     },
   });
@@ -189,6 +165,44 @@ export default defineApp(async (sdk) => {
     `hanako-openviking loaded (enabled=${sw.enabled}, probe=${await probeOn()})`,
   );
 });
+
+/**
+ * 工具的报告体。抽成独立函数是为了能被冒烟直接调用——
+ * 「工具与 /status 的 ready.checks 形状一致」这条只能靠同一份输入过两处来验。
+ *
+ * ready 一定要过 normalizeReady：/status 用它，工具不用就成了两种形状。
+ */
+export async function buildStatusReport(sdk, args) {
+  const sw = await readSwitches(sdk);
+  const conn = await readConnection(sdk);
+  const peer = resolvePeer(conn, args?.context?.sessionPath ?? null);
+  const report = {
+    enabled: sw.enabled,
+    peer,
+    serverUrl: conn.serverUrl,
+    apiKeySet: Boolean(conn.apiKey),
+    timeoutMs: conn.timeoutMs,
+  };
+
+  if (sw.enabled && conn.serverUrl && conn.apiKey) {
+    const transport = transportFor(sdk);
+    if (transport.mode === "down") {
+      report.health = null;
+      report.ready = null;
+    } else {
+      const client = createClient({ ...conn, ...transport });
+      report.health = await safe(() => client.health());
+      // 归一化放在 safe 里面：失败路径回 { error }，与成功路径的
+      // { status, checks } 保持两种不同形状，不要把 error 包进 ready 里。
+      report.ready = await safe(async () => normalizeReady(await client.ready()));
+    }
+  } else {
+    report.health = null;
+    report.ready = null;
+  }
+
+  return report;
+}
 
 async function safe(fn) {
   try {

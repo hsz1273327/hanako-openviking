@@ -12,6 +12,9 @@ import { describePeer } from "../src/ov/identity.js";
 import { createClient } from "../src/ov/client.js";
 import { transportFor } from "../src/ov/transport.js";
 import { readSession, sessionKeyOf } from "../src/state/session.js";
+// checks 的归一化与工具（index.js 的 openviking_status）共用同一份实现，
+// 否则同一份 /ready 在两个消费者眼里会长成两种形状。
+import { normalizeReady } from "../src/ov/ready.js";
 
 const LOG_TAIL = 24;
 
@@ -116,7 +119,7 @@ export default function registerStatusRoutes(app, ctx) {
     }
 
     try {
-      report.ready = await client.ready();
+      report.ready = normalizeReady(await client.ready());
     } catch (error) {
       report.ready = null;
       report.readyError = String(error?.message || error);

@@ -17,6 +17,10 @@ export function wirePeerScope(scope) {
   return scope === "self" ? "actor" : "all";
 }
 
+/** peer 记忆树的遍历上限。node_limit 是服务端的节点总数上限，达到即截断。 */
+const TREE_NODE_LIMIT = 500;
+const TREE_LEVEL_LIMIT = 5;
+
 export function createClient({
   serverUrl,
   apiKey,
@@ -161,6 +165,35 @@ export function createClient({
         if (name) names.push(name);
       }
       return names;
+    },
+
+    // 某个 peer 的记忆条数与是否数到了上限。
+    //
+    // memories 下面不是记忆，是类别目录（cases / entities / events ...），类别里
+    // 还可能有子目录；真正的记忆是 .md 文件。所以不能数目录，也不能用 fs/ls，
+    // 要一次把子树拉平：fs/tree 的 result 是**扁平数组**（含 isDir / rel_path），
+    // 层级靠 rel_path 体现，没有嵌套结构。
+    // 形状不认识就抛，由调用方记成 null（读不到 ≠ 0 条）。
+    listPeerMemories: async (peerName) => {
+      const name = String(peerName ?? "").trim();
+      if (!name) throw new Error("peer 名为空");
+      const uri = `viking://user/default/peers/${encodeURIComponent(name)}/memories`;
+      const result = await call(
+        `/api/v1/fs/tree?uri=${uri}&output=agent&level_limit=${TREE_LEVEL_LIMIT}&node_limit=${TREE_NODE_LIMIT}`,
+        { method: "GET" },
+      );
+      if (!Array.isArray(result)) {
+        throw new Error("memories 树形状不认识");
+      }
+      // 只数 .md 文件：目录节点（isDir=true）与树自带的其它文件都不算记忆。
+      const count = result.filter(
+        (node) =>
+          node &&
+          node.isDir === false &&
+          typeof node.rel_path === "string" &&
+          node.rel_path.endsWith(".md"),
+      ).length;
+      return { count, capped: result.length >= TREE_NODE_LIMIT };
     },
 
     // 会话：创建 -> 追加消息 -> 提交（提交时抽取长期记忆）。

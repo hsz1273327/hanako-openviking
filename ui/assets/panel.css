@@ -384,51 +384,109 @@ html, body {
   color: #b8564d;
   opacity: 1;
 }
+/* not_configured / not_supported / disabled：没配有 / 不支持 / 关着，中性灰，不刺眼。
+   档位由 assets/check-tone.js 的 statusTone 决定，父项与 details 共用。 */
+.checks li.muted {
+  border-color: rgba(128, 128, 128, 0.26);
+  color: inherit;
+  opacity: 0.6;
+}
+
+/* details：父项的嵌套条目，小一号 + 缩进，颜色按同一套档位走。 */
+.checks li.has-details {
+  border-radius: 10px;
+}
+.checks li > ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-left: 1px solid rgba(128, 128, 128, 0.22);
+}
+.checks li > ul li {
+  font-size: 9.5px;
+  padding: 2px 6px;
+}
+/* 父项 muted 已经压过一次透明度，子项自己还有 .checks li 的 0.7，别再叠一层。 */
+.checks li.muted > ul li { opacity: 1; }
 
 /* ---------- 中枢里的 peer ---------- */
 
-.peer-list {
+.peer-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
+  align-items: baseline;
+  gap: 8px;
+}
+.peer-count {
+  font-size: 10.5px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一屏约 8 行（行高 ~31px + 6px 间距），再多就内部滚动。 */
+.peer-list {
+  display: grid;
+  gap: 6px;
+  max-height: 296px;
+  overflow-y: auto;
   font-size: 10.5px;
   line-height: 1.5;
   min-height: 17px;
-  opacity: 0.85;
+  padding-right: 2px;
 }
 .peer-list.empty {
   opacity: 0.45;
 }
 
-.peer-chip {
-  max-width: 100%;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
-  background: rgba(128, 128, 128, 0.04);
+/* 行框颜色 = 是否参与召回：绿框参与，灰框排除。 */
+.peer-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(111, 143, 104, 0.5);
+  background: rgba(128, 128, 128, 0.03);
+  min-width: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.peer-row.excluded {
+  border-color: rgba(128, 128, 128, 0.28);
+}
+.peer-row.tappable {
+  cursor: pointer;
+}
+.peer-row.tappable:hover,
+.peer-row.tappable:focus-visible {
+  background: rgba(128, 128, 128, 0.1);
+  outline: none;
+}
+
+/* 名字颜色 = 归属：本机正常前景色，非本机灰。 */
+.peer-name {
+  font: 12px/1.4 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: currentColor;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.peer-chip.self {
-  border-color: rgba(111, 143, 104, 0.55);
-  color: #5d7d56;
+.peer-row:not(.self) .peer-name {
+  color: rgba(128, 128, 128, 0.55);
 }
-.peer-chip.tappable {
-  cursor: pointer;
+
+.peer-meta {
+  flex: none;
+  margin-left: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
-.peer-chip.tappable:hover,
-.peer-chip.tappable:focus-visible {
-  border-color: rgba(128, 128, 128, 0.5);
-  background: rgba(128, 128, 128, 0.1);
-  outline: none;
-}
-.peer-chip.excluded {
-  opacity: 0.45;
-  text-decoration: line-through;
-}
-.peer-chip.more {
+
+/* 被排除的行整体降透明度（框本身保持灰框的色阶）。
+   这是唯一的压暗层：.peer-meta 自己不再叠 opacity，否则两层相乘 ≈ 0.36。 */
+.peer-row.excluded > * {
   opacity: 0.6;
 }
 

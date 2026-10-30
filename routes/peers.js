@@ -10,6 +10,7 @@
 // 不要拿一次必然失败的请求去换一个"读不到"。
 
 import {
+  DEFAULTS,
   EXCLUDED_PEERS_MAX,
   readConnection,
   readExcludedPeers,
@@ -32,6 +33,37 @@ const PEER_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
 function selfPrefix(conn) {
   const prefix = normalizePrefix(conn.peerPrefix);
   return prefix ? `${prefix}-openhanako-` : "openhanako-";
+}
+
+/**
+ * 数一个 peer 的记忆条数，失败 / 超时都给 { count: null, countCapped: false }。
+ *
+ * 和列表本身用同一个超时（conn.timeoutMs），所有 peer 一起跑，因此整体
+ * 耗时也就一档超时。超时用计时器竞速而不是只靠 AbortSignal：runtime 出口
+ * 的 promise 不一定理会 signal，没人接的话会一直挂着。
+ *
+ * 失败与“0 条”必须能分开：读不到时给 null，界面才敢显示「—」而不是骗人的 0。
+ * 单个 peer 读不到不影响其它 peer，也不把整单 ok 拖成 false。
+ */
+function countWithTimeout(client, name, timeoutMs) {
+  const failed = { count: null, countCapped: false };
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(failed), timeoutMs);
+    Promise.resolve()
+      .then(() => client.listPeerMemories(name))
+      .then(
+        // listPeerMemories 回 { count, capped }：capped 表示数到了 node_limit。
+        (out) => finish({ count: out?.count ?? null, countCapped: out?.capped === true }),
+        () => finish(failed),
+      );
+  });
 }
 
 /**
@@ -85,12 +117,19 @@ async function peerPayload(ctx) {
   try {
     const names = await client.listPeers();
     const prefix = selfPrefix(conn);
+    // 并行读每个 peer 的记忆条数（串行会让整体耗时随 peer 数线性增长），所有 peer 共用一档超时。
+    const timeoutMs = Math.max(1, Number(conn.timeoutMs) || DEFAULTS.requestTimeoutMs);
+    const counts = await Promise.all(
+      names.map((name) => countWithTimeout(client, name, timeoutMs)),
+    );
     return {
       ok: true,
-      peers: names.map((name) => ({
+      peers: names.map((name, index) => ({
         name,
         self: name.startsWith(prefix),
         excluded: excluded.has(name),
+        count: counts[index].count,
+        countCapped: counts[index].countCapped,
       })),
     };
   } catch (error) {

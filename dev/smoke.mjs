@@ -63,6 +63,12 @@ import {
 } from "../src/state/session.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui/assets/session-key.js";
+// checks 归一化的唯一实现：路由与工具共用，这里直接验同一份输入过两处。
+import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
+// check 状态 -> 颜色档位，前端与详情行共用。
+import { statusTone as uiStatusTone } from "../ui/assets/check-tone.js";
+// 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
+import { buildStatusReport } from "../index.js";
 
 let passed = 0;
 const failures = [];
@@ -267,6 +273,42 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
   const oddShape = mockFetch({ body: { status: "ok", result: { entries: [] } } });
   const oddClient = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl: oddShape.fetchImpl });
   eq("listPeers 形状不认识给空数组", await oddClient.listPeers(), []);
+}
+
+{
+  // ---- peer 记忆条数：fs/tree 的 result 是扁平数组，只数 .md 文件 ----
+  const node = (rel, isDir) => ({ uri: `u/${rel}`, size: isDir ? 0 : 900, isDir, modTime: "", rel_path: rel, abstract: "" });
+  const tree = [
+    node("cases", true),
+    node("entities/project", true),
+    node("events/2026", true),
+    node("cases/mem_1.md", false),
+    node("entities/project/mem_2.md", false),
+    node("events/2026/mem_3.md", false),
+    node("preferences/mem_4.md", false),
+    node("preferences/notes.txt", false),
+  ];
+  const { calls, fetchImpl } = mockFetch({ body: { status: "ok", result: tree } });
+  const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
+  eq("3 个目录 + 4 个 md + 1 个 txt -> count 是 4", (await client.listPeerMemories("hermes")).count, 4);
+  eq("没达到 node_limit 时 capped 为 false", (await client.listPeerMemories("hermes")).capped, false);
+  check("listPeerMemories 走 fs/tree", calls[0].url.startsWith("http://h:1/api/v1/fs/tree?"), calls[0].url);
+  eq("fs/tree 的 node_limit", new URL(calls[0].url).searchParams.get("node_limit"), "500");
+
+  const full = Array.from({ length: 500 }, (_, i) => node(`d${i % 10}/mem_${i}.md`, false));
+  const fullMock = mockFetch({ body: { status: "ok", result: full } });
+  const fullClient = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl: fullMock.fetchImpl });
+  eq("节点数达到 node_limit 时 capped 为 true", (await fullClient.listPeerMemories("hermes")).capped, true);
+
+  const badMock = mockFetch({ body: { status: "ok", result: { nodes: [] } } });
+  const badClient = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl: badMock.fetchImpl });
+  let treeError = null;
+  try {
+    await badClient.listPeerMemories("hermes");
+  } catch (error) {
+    treeError = error;
+  }
+  check("树形状不认识要抛（上层记 null，不猜 0）", treeError !== null);
 }
 
 // ================= 受管运行时传输 =================
@@ -512,6 +554,119 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ================= routes: /ready 归一化 =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-status-ready");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const handlers = {};
+  const app = { get: (route, handler) => { handlers[route] = handler; } };
+
+  // 用户截图里服务端的真实形态：字符串与对象混在一份 checks 里。
+  const readyBody = {
+    status: "ok",
+    healthy: true,
+    checks: {
+      agfs: {
+        status: "ok",
+        checks: { storage: "ok", index: { status: "down" } },
+      },
+      vectordb: "ok",
+      api_key_manager: "ok",
+      embedding: "ok",
+      ollama: "not_configured",
+      weird: { detail: 1 },
+    },
+  };
+  const fetchImpl = async (url) => {
+    const body = url.endsWith("/ready")
+      ? readyBody
+      : { status: "ok", healthy: true, version: "v0.4.16" };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const ctx = {
+    dataDir: dir,
+    config: {
+      get: async (key) =>
+        ({ enabled: true, serverUrl: "http://h:1", apiKey: "k" })[key],
+    },
+    network: { fetch: fetchImpl },
+  };
+
+  resetRuntimeTransport();
+  registerStatusRoutes(app, ctx);
+  const status = await handlers["/status"]({
+    json: (body, code) => ({ body, status: code }),
+    req: { query: () => "" },
+  });
+  const checks = status.body.ready?.checks;
+
+  check("/ready 的 checks 归一化成数组", Array.isArray(checks), JSON.stringify(checks));
+  eq("/ready 字符串形态读成 status", checks.find((c) => c.name === "vectordb"), {
+    name: "vectordb",
+    status: "ok",
+  });
+  eq("not_configured 原样保留（不归成坏）", checks.find((c) => c.name === "ollama"), {
+    name: "ollama",
+    status: "not_configured",
+  });
+  eq("对象形态的 status 读得对", checks.find((c) => c.name === "agfs")?.status, "ok");
+  eq("对象形态保留 details 且递归归一化", checks.find((c) => c.name === "agfs")?.details, [
+    { name: "storage", status: "ok" },
+    { name: "index", status: "down" },
+  ]);
+  eq("没写 status 的对象算 unknown", checks.find((c) => c.name === "weird"), {
+    name: "weird",
+    status: "unknown",
+  });
+  eq("checks 条数一条不少", checks.length, 6);
+  eq("/ready 其余字段原样保留", status.body.ready.status, "ok");
+  eq("ready 仍挂在 report 上", status.body.reach, "ok");
+
+  // ---- 工具与 /status 读同一份 /ready：checks 的形状必须一模一样 ----
+  // 同一份 readyBody 过两处：/status 刚从上面过完，工具用同一个 fetchImpl 重走一遍。
+  const toolReport = await buildStatusReport(
+    {
+      dataDir: dir,
+      config: { get: async (key) => ({ enabled: true, serverUrl: "http://h:1", apiKey: "k" })[key] },
+      network: { fetch: fetchImpl },
+    },
+    {},
+  );
+  eq("工具与 /status 的 ready.checks 形状一致", toolReport.ready.checks, checks);
+  eq("工具也走同一个归一化（不交服务端原始 map）", Array.isArray(toolReport.ready.checks), true);
+  eq(
+    "agfs 的 details 在工具里也是归一化后的数组",
+    toolReport.ready.checks.find((c) => c.name === "agfs")?.details,
+    [
+      { name: "storage", status: "ok" },
+      { name: "index", status: "down" },
+    ],
+  );
+  // 归一化本身：details 与父项同形状，未知值不静默消失。
+  eq("normalizeChecks 对付 undefined 给空数组", normalizeChecks(undefined), []);
+  eq("normalizeReady 对非对象原样返回", normalizeReady(null), null);
+
+  // ---- check 状态 -> 颜色档位：灰 = 不算坏，其余（含未知）都红 ----
+  eq("ok 是绿", uiStatusTone("ok"), "ok");
+  eq("not_configured 是灰", uiStatusTone("not_configured"), "muted");
+  eq("not_supported 是灰", uiStatusTone("not_supported"), "muted");
+  eq("disabled 是灰", uiStatusTone("disabled"), "muted");
+  eq("error 是红", uiStatusTone("error"), "bad");
+  eq("down 是红", uiStatusTone("down"), "bad");
+  eq("failed 是红", uiStatusTone("failed"), "bad");
+  eq("未知值是红", uiStatusTone("who_knows"), "bad");
+  eq("空值是红", uiStatusTone(undefined), "bad");
+  eq("multiwrite_sync 修完是灰不是红", uiStatusTone("not_supported"), "muted");
+
+  resetRuntimeTransport();
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ================= routes: peers =================
 {
   const handlers = { get: {}, post: {} };
@@ -595,11 +750,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     name: "desktop-openhanako-blueflower",
     self: true,
     excluded: false,
+    // listedFetch 对任何 URL 都回同一份 peer 列表（字符串数组），
+    // 树里没有 isDir === false 的 .md 节点，所以是 0 条，不是 3 条。
+    count: 0,
+    countCapped: false,
   });
   eq("别的 peer 不标 self", listed.body.peers[1], {
     name: "hermes",
     self: false,
     excluded: true,
+    count: 0,
+    countCapped: false,
   });
   eq("GET 的 excluded 标记与配置一致", listed.body.peers.map((p) => p.excluded), [
     false,
@@ -739,7 +900,245 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("传输失败带错误原文", failed.body.error.includes("ETIMEDOUT"), failed.body.error);
   eq("传输失败 HTTP 200", failed.status, 200);
 
+  // ---- count：fs/tree 拉平子树，只数 .md 文件 ----------------
+  // memories 下面是类别目录（还可能带子目录），真正的记忆是 .md 文件。
+  const peerDirs = [
+    "viking://user/default/peers/alpha",
+    "viking://user/default/peers/beta",
+  ];
+  const json = (result) =>
+    new Response(JSON.stringify({ status: "ok", result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const uriOf = (url) => new URL(url).searchParams.get("uri");
+  const memoriesUris = ["alpha", "beta"].map(
+    (name) => `viking://user/default/peers/${name}/memories`,
+  );
+  const node = (rel, isDir) => ({
+    uri: `viking://user/default/peers/x/memories/${rel}`,
+    size: isDir ? 0 : 900,
+    isDir,
+    modTime: "2026-01-01T00:00:00Z",
+    rel_path: rel,
+    abstract: "",
+  });
+  const dirNode = (rel) => node(rel, true);
+  const mdNode = (rel) => node(rel, false);
+
+  // 正常：alpha 的树是 3 个目录 + 4 个 md + 1 个非 md 文件 -> 4 条；beta 空 -> 0 条。
+  // 0 是数字，不是 null；目录与非 md 文件一律不算记忆。
+  const alphaTree = [
+    dirNode("cases"),
+    dirNode("entities"),
+    dirNode("entities/project"),
+    mdNode("cases/mem_a.md"),
+    mdNode("entities/project/mem_b.md"),
+    mdNode("events/2026/mem_c.md"),
+    mdNode("patterns/mem_d.md"),
+    node("preferences/notes.txt", false),
+  ];
+  const seen = [];
+  const seenUrls = [];
+  const okCountFetch = async (url) => {
+    const uri = uriOf(url);
+    seen.push(uri);
+    seenUrls.push(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    if (uri === memoriesUris[0]) return json(alphaTree);
+    return json([]);
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, okCountFetch),
+  );
+  const counted = await invokeGet();
+  eq("count 只数 .md 文件（3 个目录 + 4 个 md + 1 个 txt）", counted.body.peers.map((p) => p.count), [
+    4,
+    0,
+  ]);
+  eq("没达到 node_limit 时 countCapped 为 false", counted.body.peers.map((p) => p.countCapped), [
+    false,
+    false,
+  ]);
+  eq(
+    "count 读的是各 peer 的 memories 树",
+    seen.filter((uri) => uri.endsWith("/memories")).sort(),
+    memoriesUris,
+  );
+  const treeUrl = new URL(seenUrls.find((url) => url.includes("/api/v1/fs/tree")));
+  eq("count 走 fs/tree", treeUrl.pathname, "/api/v1/fs/tree");
+  eq("fs/tree 要 agent 输出", treeUrl.searchParams.get("output"), "agent");
+  eq("fs/tree 的 level_limit", treeUrl.searchParams.get("level_limit"), "5");
+  eq("fs/tree 的 node_limit", treeUrl.searchParams.get("node_limit"), "500");
+
+  // 真机基准：memories 下 6 个类别目录，记忆落在类别里（events 3 条、cases 2 条，其余类别没 md）。
+  // 形状按真机形态造，不是线上真实条数——真实条数会变，别写死具体数字如 79。
+  const sixCategoryTree = [
+    dirNode("cases"),
+    dirNode("entities"),
+    dirNode("events"),
+    dirNode("patterns"),
+    dirNode("preferences"),
+    dirNode("profile"),
+    mdNode("events/mem_a.md"),
+    mdNode("events/mem_b.md"),
+    mdNode("events/mem_c.md"),
+    mdNode("cases/mem_d.md"),
+    mdNode("cases/mem_e.md"),
+  ];
+  const baselineFetch = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    if (uri === memoriesUris[0]) return json(sixCategoryTree);
+    return json([]);
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, baselineFetch),
+  );
+  const baseline = await invokeGet();
+  eq("6 个类别目录的树 count 是 5（只数 .md）", baseline.body.peers[0].count, 5);
+  eq("6 个类别目录的树 countCapped 为 false", baseline.body.peers[0].countCapped, false);
+
+  // 节点数恰好等于 node_limit：上限从请求 URL 的 node_limit 里取，不写死 500。
+  // 目录占一半、md 占另一半，总数正好等于上限 -> capped true。
+  // 只断言 countCapped，具体条数随上限走，不写死。
+  const exactTree = (limit) => {
+    const dirs = Math.max(1, Math.floor(limit / 2));
+    const mds = Math.max(0, limit - dirs);
+    return [
+      ...Array.from({ length: dirs }, (_, i) => dirNode(`d${i}`)),
+      ...Array.from({ length: mds }, (_, i) => mdNode(`d${i % dirs}/mem_${i}.md`)),
+    ];
+  };
+  const cappedFetch = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    if (uri === memoriesUris[0]) {
+      const limit = Number(new URL(url).searchParams.get("node_limit"));
+      return json(exactTree(limit));
+    }
+    return json([]);
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, cappedFetch),
+  );
+  const capped = await invokeGet();
+  eq("节点数恰好到 node_limit 时 countCapped 为 true", capped.body.peers[0].countCapped, true);
+  eq("没到上限的 peer 仍为 false", capped.body.peers[1].countCapped, false);
+
+  // 单个失败：beta 回 500，整张列表仍然 ok，beta 的 count 是 null、capped false。
+  const partlyBroken = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    if (uri === memoriesUris[0]) return json([mdNode("cases/only-one.md")]);
+    return new Response(
+      JSON.stringify({ status: "error", error: { code: "INTERNAL", message: "boom" } }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, partlyBroken),
+  );
+  const partly = await invokeGet();
+  eq("单个读失败不拖垮整单", partly.body.ok, true);
+  eq("单个失败给 null，好的那个照常给数字", partly.body.peers.map((p) => p.count), [1, null]);
+  eq("单个失败时 countCapped 为 false", partly.body.peers.map((p) => p.countCapped), [
+    false,
+    false,
+  ]);
+
+  // 形状不认识（result 不是数组）：同样算读不到，不猜成 0。
+  const oddTree = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    if (uri === memoriesUris[0]) return json({ entries: [] });
+    return json([]);
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, oddTree),
+  );
+  const odd = await invokeGet();
+  eq("树形状不认识时 count 是 null（不猜成 0）", odd.body.peers[0].count, null);
+  eq("树形状不认识时整单仍 ok", odd.body.ok, true);
+
+  // 并行：两个 memories 请求必须同时在路上。串行时第一个会等到超时（null）。
+  let started = 0;
+  let release = () => {};
+  const bothStarted = new Promise((resolve) => { release = resolve; });
+  const barrierFetch = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    started += 1;
+    if (started >= 2) release();
+    await bothStarted;
+    return json([mdNode("cases/mem.md")]);
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith(
+      { enabled: true, serverUrl: "http://h:1", apiKey: "k", requestTimeoutMs: 400 },
+      barrierFetch,
+    ),
+  );
+  const parallel = await invokeGet();
+  eq("两个 peer 的记忆是并行读的", parallel.body.peers.map((peer) => peer.count), [1, 1]);
+
+  // 整体超时：memories 永不落（连 AbortSignal 都不理），到点全部 null、capped false。
+  const hangFetch = async (url) => {
+    const uri = uriOf(url);
+    if (uri === "viking://user/default/peers") return json(peerDirs);
+    return new Promise(() => {});
+  };
+  registerPeersRoutes(
+    app,
+    ctxWith(
+      { enabled: true, serverUrl: "http://h:1", apiKey: "k", requestTimeoutMs: 120 },
+      hangFetch,
+    ),
+  );
+  const timedOut = await invokeGet();
+  eq("整体超时时 count 是 null", timedOut.body.peers.map((peer) => peer.count), [null, null]);
+  eq("整体超时时 countCapped 为 false", timedOut.body.peers.map((p) => p.countCapped), [
+    false,
+    false,
+  ]);
+  eq("整体超时不拖垮整单", timedOut.body.ok, true);
+
   resetRuntimeTransport();
+}
+
+{
+  // ---- 嵌套 checker：muted 父项的 opacity 不该再被乘一次 ----
+  // smoke 没有 DOM、没有 CSS 引擎，只能静态守规则：去掉注释后按选择器找规则，
+  // 并确认它在 `.checks li.muted {` 之后（级联顺序）。删掉这条规则就会红。
+  const css = fs
+    .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleFor = (selector) => {
+    const index = css.indexOf(`${selector} {`);
+    if (index < 0) return null;
+    const open = css.indexOf("{", index);
+    const end = css.indexOf("}", open);
+    return { index, body: css.slice(open + 1, end) };
+  };
+  const mutedRule = ruleFor(".checks li.muted");
+  const mutedChildRule = ruleFor(".checks li.muted > ul li");
+  check("muted 父项规则还在", mutedRule !== null);
+  check("muted 子项恢复不透明的规则在", mutedChildRule !== null);
+  check(
+    "muted 子项的 opacity 是 1",
+    /(^|;)\s*opacity\s*:\s*1\s*(;|$)/.test(mutedChildRule?.body || ""),
+    mutedChildRule?.body || "",
+  );
+  check(
+    "muted 子项规则在父项之后（级联顺序）",
+    (mutedChildRule?.index ?? -1) > (mutedRule?.index ?? Infinity),
+  );
 }
 
 {

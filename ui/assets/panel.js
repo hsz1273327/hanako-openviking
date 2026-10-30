@@ -13,13 +13,15 @@
 
 import { hana } from "./sdk.js";
 import { sessionKeyOf } from "./session-key.js";
+// 状态档位（ok / muted / bad）单独一份：父项与 details 共用，测试也能直接验。
+import { statusTone } from "./check-tone.js";
 
 const $ = (id) => document.getElementById(id);
 
 const SWITCH_KEYS = ["skillRouting", "probe"];
 
-// 中枢里 peer 多的时候只铺一屏：剩下的用一个 +N 概括，完整名单进 title。
-const PEER_VISIBLE = 8;
+// 中枢里 peer 多的时候列表内部滚动，不截断、不折叠成 +N。
+// 一屏放得下 8 行（行高 + 间距），超出的部分靠 CSS 的 max-height 滚。
 
 let controls = null;
 let logOpen = false;
@@ -136,34 +138,60 @@ function renderStatus(data, latencyMs) {
 
   const checks = $("checks");
   checks.textContent = "";
-  for (const [name, value] of Object.entries(data.ready?.checks || {})) {
+  const checkList = Array.isArray(data.ready?.checks) ? data.ready.checks : [];
+  renderChecks(checks, checkList);
+}
+
+/**
+ * checks 渲染：父项一行，details 作为缩进的嵌套条目。
+ *
+ * 颜色只由 statusTone 决定，父项与 details 共用同一套映射——父项自己的档位
+ * 不因为 details 里有非 ok 项而变（agfs 整体仍是 ok）。
+ */
+function renderChecks(box, list) {
+  if (!Array.isArray(list)) return;
+  for (const check of list) {
     const li = document.createElement("li");
-    li.textContent = name;
-    li.title = value?.status || "";
-    li.classList.add(value?.status === "ok" ? "ok" : "bad");
-    checks.appendChild(li);
+    const status = String(check?.status || "");
+    li.textContent = check?.name || "";
+    li.title = status;
+    li.classList.add(statusTone(status));
+
+    const details = Array.isArray(check?.details) ? check.details : [];
+    if (details.length) {
+      // 有 details 的父项不再是胶囊：里面的列表需要展开空间。
+      li.classList.add("has-details");
+      const sub = document.createElement("ul");
+      renderChecks(sub, details);
+      li.appendChild(sub);
+    }
+
+    box.appendChild(li);
   }
 }
 
-function paintPeerChip(chip, peer) {
+function paintPeerRow(row, peer) {
   const excluded = Boolean(peer?.excluded) && !peer?.self;
-  chip.classList.toggle("excluded", excluded);
+  row.classList.toggle("self", Boolean(peer?.self));
+  row.classList.toggle("excluded", excluded);
   if (peer?.self) {
-    chip.title = "本机";
+    row.title = "本机，不参与排除";
   } else if (excluded) {
-    chip.title = "已排除，不参与召回，点击恢复";
+    row.title = "已排除，不参与召回，点击恢复";
   } else {
-    chip.title = "点击排除，之后召回不再包含它的记忆";
+    row.title = "点击排除，之后召回不再包含它的记忆";
   }
 }
 
 function renderPeers(payload) {
   const box = $("peerList");
   const hint = $("peerHint");
+  const count = $("peerCount");
   if (!box) return;
   box.textContent = "";
   box.title = "";
   box.classList.remove("empty");
+  if (count) count.textContent = "";
   if (hint) hint.hidden = true;
 
   // null（请求本身失败）和 ok:false（服务端读不到）都是同一种结果。
@@ -177,45 +205,62 @@ function renderPeers(payload) {
 
   const peers = Array.isArray(payload.peers) ? payload.peers : [];
   peerCache = peers;
+  if (count) count.textContent = `${peers.length} 个`;
+
   if (!peers.length) {
     box.textContent = "中枢里还没有别的 peer";
     box.classList.add("empty");
     return;
   }
 
-  // 全是自己的 peer 时没有可排除的对象：保持原来的纯展示，不出现可点的胶囊。
   if (hint) hint.hidden = !peers.some((peer) => peer && !peer.self);
 
-  for (const peer of peers.slice(0, PEER_VISIBLE)) {
-    const chip = document.createElement("span");
-    chip.className = "peer-chip";
-    chip.textContent = peer?.name || "";
-    if (peer?.self) {
-      chip.classList.add("self");
-    } else if (peer?.name) {
-      chip.classList.add("tappable");
-      chip.setAttribute("role", "button");
-      chip.tabIndex = 0;
+  for (const peer of peers) {
+    const row = document.createElement("div");
+    row.className = "peer-row";
+
+    const name = document.createElement("span");
+    name.className = "peer-name";
+    name.textContent = peer?.name || "";
+    row.appendChild(name);
+
+    // 一行小字：归属 · 记忆条数 · 是否参与召回。
+    // count 为 null 表示这一条没读到，显示「—」而不是骗人的 0；
+    // countCapped 表示数到了树节点上限，加个 + 说明真实可能更多。
+    // 别改成固定的「500+」：500 是 fs/tree 的节点总数上限，目录与别的文件都占
+    // 额度，md 条数一定小于 500，写死会造一个数不到的数字。
+    const items = [peer?.self ? "本机" : "外部"];
+    items.push(
+      peer?.count == null
+        ? "—"
+        : peer.countCapped === true
+          ? `${peer.count}+ 条`
+          : `${peer.count} 条`,
+    );
+    items.push(peer?.excluded && !peer?.self ? "已排除" : "参与召回");
+    const meta = document.createElement("span");
+    meta.className = "peer-meta";
+    meta.textContent = items.join(" · ");
+    row.appendChild(meta);
+
+    paintPeerRow(row, peer);
+
+    // 本机的 peer 不能排除：整行不做成可点的。
+    if (peer?.name && !peer?.self) {
+      row.classList.add("tappable");
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
       const toggle = () => togglePeerExclusion(peer.name);
-      chip.addEventListener("click", toggle);
-      chip.addEventListener("keydown", (event) => {
+      row.addEventListener("click", toggle);
+      row.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           toggle();
         }
       });
     }
-    paintPeerChip(chip, peer);
-    box.appendChild(chip);
-  }
 
-  if (peers.length > PEER_VISIBLE) {
-    const hidden = peers.slice(PEER_VISIBLE);
-    const more = document.createElement("span");
-    more.className = "peer-chip more";
-    more.textContent = `+${hidden.length}`;
-    more.title = hidden.map((peer) => peer?.name).filter(Boolean).join("、");
-    box.appendChild(more);
+    box.appendChild(row);
   }
 }
 
@@ -230,7 +275,7 @@ async function togglePeerExclusion(name) {
   );
 
   peerWritePending = true;
-  renderPeers({ ok: true, peers: next }); // 乐观：先让胶囊变成目标状态
+  renderPeers({ ok: true, peers: next }); // 乐观：先让那一行变成目标状态
   try {
     const out = await jsonPost("/peers", {
       excluded: next.filter((peer) => peer?.excluded).map((peer) => peer.name),
