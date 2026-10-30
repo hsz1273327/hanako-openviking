@@ -359,65 +359,131 @@ html, body {
   opacity: 1;
 }
 
+/* ---------- 服务端检查项 ---------- */
+
+.checks-block {
+  margin-top: 12px;
+}
+
+/* 摘要就一行，平时只有它占地方。颜色只看整体档位：全绿 = 绿，只是没配 = 灰，
+   有红项 = 红。点开才出明细。 */
+.checks-summary {
+  font: inherit;
+  font-size: 11.5px;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  background: rgba(128, 128, 128, 0.04);
+  color: inherit;
+  cursor: pointer;
+  min-width: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.checks-summary:hover { background: rgba(128, 128, 128, 0.1); }
+.checks-summary:focus-visible {
+  outline: none;
+  border-color: rgba(111, 143, 104, 0.7);
+  box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);
+}
+/* 箭头用纯文字，不引内联 svg：宿主主题变量在这里拿不到。 */
+.checks-summary::before {
+  content: "▸";
+  flex: none;
+  opacity: 0.5;
+}
+.checks-summary.open::before { content: "▾"; }
+
+.checks-summary.ok {
+  border-color: rgba(111, 143, 104, 0.4);
+  color: #5d7d56;
+}
+.checks-summary.muted {
+  color: inherit;
+  opacity: 0.72;
+}
+.checks-summary.bad {
+  border-color: rgba(194, 85, 75, 0.45);
+  color: #b8564d;
+}
+
+/* 明细：竖向一行一项。名字在左，状态词贴右边。
+   颜色档位仍由 check-tone.js 决定，父项与子项共用。 */
 .checks {
   list-style: none;
-  margin: 10px 0 0;
+  margin: 6px 0 0;
   padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  display: grid;
+  gap: 1px;
 }
 .checks li {
-  font-size: 10.5px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 3px 2px;
+  border-radius: 6px;
   opacity: 0.7;
 }
+.checks li .check-name {
+  font: 11px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.checks li .check-status {
+  flex: none;
+  margin-left: auto;
+  white-space: nowrap;
+}
 .checks li.ok {
-  border-color: rgba(111, 143, 104, 0.45);
   color: #5d7d56;
   opacity: 1;
 }
 .checks li.bad {
-  border-color: rgba(194, 85, 75, 0.45);
   color: #b8564d;
   opacity: 1;
 }
 /* not_configured / not_supported / disabled：没配有 / 不支持 / 关着，中性灰，不刺眼。
    档位由 assets/check-tone.js 的 statusTone 决定，父项与 details 共用。 */
 .checks li.muted {
-  border-color: rgba(128, 128, 128, 0.26);
   color: inherit;
   opacity: 0.6;
 }
 
-/* details：父项的嵌套条目，小一号 + 缩进，颜色按同一套档位走。 */
-.checks li.has-details {
-  border-radius: 10px;
-}
+/* 兜底：万一服务端还给了嵌套 details，也不让它把一行撑成两块。
+   现在的渲染把 details 塞进 title，这条规则只用于从前的形状。 */
 .checks li > ul {
   list-style: none;
   margin: 4px 0 0;
   padding: 0 0 0 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  display: grid;
+  gap: 2px;
   border-left: 1px solid rgba(128, 128, 128, 0.22);
 }
 .checks li > ul li {
-  font-size: 9.5px;
-  padding: 2px 6px;
+  font-size: 10px;
 }
 /* 父项 muted 已经压过一次透明度，子项自己还有 .checks li 的 0.7，别再叠一层。 */
 .checks li.muted > ul li { opacity: 1; }
 
-/* ---------- 中枢里的 peer ---------- */
+/* ---------- peer 管理（独立一栏） ---------- */
 
-.peer-head {
+.peers-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  margin-bottom: 10px;
+}
+.peers-head .card-title {
+  margin: 0;
 }
 .peer-count {
   font-size: 10.5px;

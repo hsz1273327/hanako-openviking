@@ -67,6 +67,11 @@ import { sessionKeyOf as uiSessionKeyOf } from "../ui/assets/session-key.js";
 import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
 // check 状态 -> 颜色档位，前端与详情行共用。
 import { statusTone as uiStatusTone } from "../ui/assets/check-tone.js";
+// 服务端检查项的摘要文案：面板那一行字由它造，必须能测。
+import {
+  checkStatusLabel as uiCheckStatusLabel,
+  summarizeChecks as uiSummarizeChecks,
+} from "../ui/assets/check-summary.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
 
@@ -665,6 +670,133 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   resetRuntimeTransport();
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= ui: 服务端检查项摘要 =================
+{
+  const checksOf = (statuses) =>
+    statuses.map(([name, status]) => ({ name, status }));
+  const allOk = checksOf([
+    ["agfs", "ok"],
+    ["vectordb", "ok"],
+    ["api_key_manager", "ok"],
+    ["embedding", "ok"],
+    ["ollama", "ok"],
+  ]);
+
+  const green = uiSummarizeChecks(allOk);
+  eq("五项全好写 5/5", green.text, "服务端就绪 5/5");
+  eq("五项全好是绿档", green.tone, "ok");
+  eq("五项全好默认收起", green.open, false);
+  eq("五项全好没有待办项", green.problems, []);
+  eq("五项全好计数 5/5", [green.ok, green.total], [5, 5]);
+
+  // 只差 ollama：不写成「不正常」，写清哪一项没配。
+  const oneMissing = allOk.map((check) =>
+    check.name === "ollama" ? { ...check, status: "not_configured" } : check,
+  );
+  const lenient = uiSummarizeChecks(oneMissing);
+  eq("缺一项写 4/5 并带上项名与状态词", lenient.text, "服务端 4/5 就绪 · ollama 未配置");
+  eq("只是没配是灰档不是红档", lenient.tone, "muted");
+  eq("只是没配不自动展开", lenient.open, false);
+  eq("缺一项仍数出 4", [lenient.ok, lenient.total], [4, 5]);
+  eq("待办项带名字与状态词", lenient.problems, [
+    { name: "ollama", status: "not_configured", label: "未配置" },
+  ]);
+
+  // 有 error：措辞用「异常」而不是蛇形枚举，并且默认摊开。
+  const broken = allOk.map((check) =>
+    check.name === "ollama" ? { ...check, status: "error" } : check,
+  );
+  const red = uiSummarizeChecks(broken);
+  eq("error 写成「异常」", red.text, "服务端 4/5 就绪 · ollama 异常");
+  eq("有 error 是红档", red.tone, "bad");
+  eq("有红项时默认展开", red.open, true);
+
+  // 两项不对：都点名，别只报第一个。
+  const twoBad = allOk.map((check) =>
+    check.name === "vectordb"
+      ? { ...check, status: "down" }
+      : check.name === "ollama"
+        ? { ...check, status: "not_configured" }
+        : check,
+  );
+  eq(
+    "多项不对时逐项点名",
+    uiSummarizeChecks(twoBad).text,
+    "服务端 3/5 就绪 · vectordb 异常、ollama 未配置",
+  );
+
+  // 分母只数顶层：agfs 的 details 是脚注，不该把 5/5 变成 7/7。
+  const nested = [
+    {
+      name: "agfs",
+      status: "ok",
+      details: [
+        { name: "storage", status: "ok" },
+        { name: "index", status: "down" },
+      ],
+    },
+    { name: "vectordb", status: "ok" },
+  ];
+  const nestedSummary = uiSummarizeChecks(nested);
+  eq("details 不参与分母", [nestedSummary.ok, nestedSummary.total], [2, 2]);
+  eq("details 里的 down 不改父项措辞", nestedSummary.text, "服务端就绪 2/2");
+  eq("details 里的 down 不触发自动展开", nestedSummary.open, false);
+
+  // 没读到检查项（未启用 / ready 挂了）：有话说，但不假装 0/0 是好消息。
+  const empty = uiSummarizeChecks([]);
+  eq("空 checks 不写成 0/0", empty.text, "服务端检查项未知");
+  eq("空 checks 默认收起", empty.open, false);
+  eq("非数组也当空处理", uiSummarizeChecks(undefined).text, "服务端检查项未知");
+
+  // 状态词映射：除了 ok，全念中文；认不出来的状态念「异常」。
+  eq("ok 的状态词", uiCheckStatusLabel("ok"), "就绪");
+  eq("not_configured 的状态词", uiCheckStatusLabel("not_configured"), "未配置");
+  eq("not_supported 的状态词", uiCheckStatusLabel("not_supported"), "不支持");
+  eq("disabled 的状态词", uiCheckStatusLabel("disabled"), "已禁用");
+  eq("error 的状态词", uiCheckStatusLabel("error"), "异常");
+  eq("未知状态的状态词", uiCheckStatusLabel("who_knows"), "异常");
+  eq("空状态的状态词", uiCheckStatusLabel(undefined), "异常");
+}
+
+// ================= ui: 面板结构（静态） =================
+{
+  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
+  const html = read("panel.html");
+  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const colsStart = html.indexOf('<section class="cols">');
+  const colsEnd = html.indexOf("</section>", colsStart);
+  const peerIdx = html.indexOf('id="peerList"');
+  const peerCountIdx = html.indexOf('id="peerCount"');
+  const logsIdx = html.indexOf('<section class="card logs"');
+  const summaryIdx = html.indexOf('id="checksSummary"');
+  check("两栏与日志区都找得到", colsStart > 0 && colsEnd > colsStart && logsIdx > colsEnd);
+  check("peer 列表不在中枢卡 / 两栏里", peerIdx > colsEnd, `peerIdx=${peerIdx} colsEnd=${colsEnd}`);
+  check("peer 计数也跟着搬出两栏", peerCountIdx > colsEnd);
+  check("peer 栏在两栏之后、日志之前", peerIdx < logsIdx);
+  check("摘要行留在中枢卡里", summaryIdx > colsStart && summaryIdx < colsEnd);
+  check("中枢卡里不再有 peer 列表", html.slice(colsStart, colsEnd).indexOf('id="peerList"') === -1);
+
+  const ruleFor = (selector) => {
+    const index = css.indexOf(`${selector} {`);
+    if (index < 0) return null;
+    const open = css.indexOf("{", index);
+    const end = css.indexOf("}", open);
+    return { index, body: css.slice(open + 1, end) };
+  };
+  const checksRule = ruleFor(".checks");
+  const summaryRule = ruleFor(".checks-summary");
+  check("明细列表的规则还在", checksRule !== null);
+  check(
+    "明细改成竖向一行一项（不再是横排胶囊）",
+    /display\s*:\s*grid/.test(checksRule?.body || "") &&
+      !/flex-wrap\s*:\s*wrap/.test(checksRule?.body || ""),
+    checksRule?.body || "",
+  );
+  check("摘要行的规则在", summaryRule !== null);
+  check("摘要行可点", /cursor\s*:\s*pointer/.test(summaryRule?.body || ""));
 }
 
 // ================= routes: peers =================

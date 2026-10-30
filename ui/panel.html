@@ -74,14 +74,11 @@
           <div class="fact"><span>版本</span><b id="version">—</b></div>
           <div class="fact"><span>出口</span><b id="transport">—</b></div>
         </div>
-        <ul id="checks" class="checks"></ul>
-        <div class="field">
-          <div class="peer-head">
-            <span class="label">中枢里的 peer</span>
-            <span id="peerCount" class="peer-count"></span>
-          </div>
-          <div id="peerList" class="peer-list empty">正在读取</div>
-          <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与召回，再点恢复。</p>
+        <!-- 五个检查项平时不占地方：正常时只有一行「服务端就绪 5/5」，
+             点开才看明细。有红项时默认展开。 -->
+        <div id="checksBlock" class="checks-block" hidden>
+          <button id="checksSummary" class="checks-summary" type="button" aria-expanded="false">服务端检查项</button>
+          <ul id="checks" class="checks" hidden></ul>
         </div>
         <p id="reachError" class="err" hidden></p>
         <p id="saveHint" class="save-hint"></p>
@@ -101,6 +98,16 @@
           <input id="budgetTokens" type="number" min="200" max="32000" step="100">
         </div>
       </article>
+    </section>
+
+    <!-- peer 是「中枢里还有谁」，跟「这台机器怎么连」不是一件事，单独一整行。 -->
+    <section class="card peers">
+      <header class="peers-head">
+        <h2 class="card-title">Peer 管理</h2>
+        <span id="peerCount" class="peer-count"></span>
+      </header>
+      <div id="peerList" class="peer-list empty">正在读取</div>
+      <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与召回，再点恢复。</p>
     </section>
 
     <section class="card logs">

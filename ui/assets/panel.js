@@ -15,6 +15,8 @@ import { hana } from "./sdk.js";
 import { sessionKeyOf } from "./session-key.js";
 // 状态档位（ok / muted / bad）单独一份：父项与 details 共用，测试也能直接验。
 import { statusTone } from "./check-tone.js";
+// 服务端检查项的摘要与状态词：纯函数，冒烟直接验。
+import { checkStatusLabel, summarizeChecks } from "./check-summary.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -25,6 +27,8 @@ const SWITCH_KEYS = ["skillRouting", "probe"];
 
 let controls = null;
 let logOpen = false;
+// null = 跟随默认（有红项就展开）；用户点过就按用户的来。
+let checksManualOpen = null;
 // 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
 let peerCache = [];
 let peerWritePending = false;
@@ -136,35 +140,68 @@ function renderStatus(data, latencyMs) {
   err.hidden = !message;
   err.textContent = message;
 
-  const checks = $("checks");
-  checks.textContent = "";
   const checkList = Array.isArray(data.ready?.checks) ? data.ready.checks : [];
-  renderChecks(checks, checkList);
+  renderChecks(checkList);
+}
+
+/** 把摘要行的展开/收起画出来：按钮的 aria-expanded、箭头、明细的 hidden。 */
+function paintChecksOpen(open) {
+  const btn = $("checksSummary");
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.classList.toggle("open", open);
+  $("checks").hidden = !open;
 }
 
 /**
- * checks 渲染：父项一行，details 作为缩进的嵌套条目。
+ * 服务端检查项：只有一行摘要，点开才看明细。
  *
- * 颜色只由 statusTone 决定，父项与 details 共用同一套映射——父项自己的档位
- * 不因为 details 里有非 ok 项而变（agfs 整体仍是 ok）。
+ * 五个胶囊对用户基本无用，只在排查「连上了但召回是空的」时才有价值，
+ * 所以平时只占一行。明细竖向一行一项：名字 + 状态词，颜色仍按 statusTone。
+ * agfs 的 details 只进 title，不参与布局（它们是脚注，不是指标）。
  */
-function renderChecks(box, list) {
-  if (!Array.isArray(list)) return;
+function renderChecks(list) {
+  const block = $("checksBlock");
+  const box = $("checks");
+  if (!block || !box) return;
+
+  const summary = summarizeChecks(list);
+  // 没读到检查项（未启用 / 连不上 / ready 挂了）：整块不出现，别拿「未知」占地方。
+  if (!summary.total) {
+    block.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  block.hidden = false;
+
+  const btn = $("checksSummary");
+  btn.textContent = summary.text;
+  btn.classList.remove("ok", "muted", "bad");
+  btn.classList.add(summary.tone);
+  btn.title = summary.problems.length
+    ? "服务端有检查项不完整，点开看明细"
+    : "服务端各项检查都正常，点开看明细";
+
+  paintChecksOpen(checksManualOpen === null ? summary.open : checksManualOpen);
+
+  box.textContent = "";
   for (const check of list) {
-    const li = document.createElement("li");
     const status = String(check?.status || "");
-    li.textContent = check?.name || "";
-    li.title = status;
+    const li = document.createElement("li");
     li.classList.add(statusTone(status));
 
+    const name = document.createElement("span");
+    name.className = "check-name";
+    name.textContent = check?.name || "";
+    const word = document.createElement("span");
+    word.className = "check-status";
+    word.textContent = checkStatusLabel(status);
+    li.append(name, word);
+
+    // agfs 这类父项带的子项：塞进 title，鼠标悬停才看，不撑开一行。
     const details = Array.isArray(check?.details) ? check.details : [];
-    if (details.length) {
-      // 有 details 的父项不再是胶囊：里面的列表需要展开空间。
-      li.classList.add("has-details");
-      const sub = document.createElement("ul");
-      renderChecks(sub, details);
-      li.appendChild(sub);
-    }
+    li.title = [status, ...details.map((sub) => `${sub?.name || "?"}: ${sub?.status || "?"}`)]
+      .filter(Boolean)
+      .join(" · ");
 
     box.appendChild(li);
   }
@@ -482,6 +519,12 @@ $("testBtn").addEventListener("click", async () => {
 });
 
 $("refreshBtn").addEventListener("click", () => refresh());
+
+$("checksSummary").addEventListener("click", () => {
+  const open = $("checksSummary").getAttribute("aria-expanded") === "true";
+  checksManualOpen = !open;
+  paintChecksOpen(!open);
+});
 
 $("logToggle").addEventListener("click", () => {
   logOpen = !logOpen;
