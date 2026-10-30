@@ -68,6 +68,22 @@
             "description": "每轮从 OpenViking 召回相关记忆并注入。",
             "default": true
           },
+          "recallGate": {
+            "type": "string",
+            "title": "召回判断",
+            "description": "off 不判断、永远召回；rules 只跳过极短的纯操作指令（≤8 字、无问号、无疑问词、无指代词）。",
+            "default": "off",
+            "enum": ["off", "rules"],
+            "ui": { "enumLabels": ["不判断", "规则跳过"] }
+          },
+          "queryMode": {
+            "type": "string",
+            "title": "召回查询",
+            "description": "last 只用最后一条用户文本；context 拼最近三条用户文本，总长最多 300 字符、最新一条完整。",
+            "default": "last",
+            "enum": ["last", "context"],
+            "ui": { "enumLabels": ["最后一句", "带上文"] }
+          },
           "autoCapture": {
             "type": "boolean",
             "title": "自动写回",

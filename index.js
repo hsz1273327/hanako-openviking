@@ -77,7 +77,8 @@ export default defineApp(async (sdk) => {
   const probe = createProbe({ dataDir: sdk.dataDir, logger: sdk.logger });
   const probeOn = async () => (await sdk.config.get("probe")) === true;
   // 一个进程一份去重表：before-request 按模型步触发，同一用户文本只召回一次。
-  const recall = createRecallHandler(sdk);
+  // 探针随召回处理器传入：只有 gate 跳过时才会用到，是否写由 probe 开关决定。
+  const recall = createRecallHandler(sdk, { probe });
 
   await sdk.tools.register({
     name: "openviking_status",

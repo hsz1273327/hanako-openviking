@@ -18,7 +18,28 @@ export const DEFAULTS = {
   skillRouting: true,
   probe: false,
   excludedPeers: "",
+  recallGate: "off",
+  queryMode: "last",
 };
+
+/** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令。 */
+export const RECALL_GATES = Object.freeze(["off", "rules"]);
+
+/** 召回查询：last 只用最后一句，context 拼最近几条用户文本。 */
+export const QUERY_MODES = Object.freeze(["last", "context"]);
+
+/** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
+function oneOf(raw, allowed, fallback) {
+  return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
+}
+
+export function normalizeRecallGate(raw) {
+  return oneOf(raw, RECALL_GATES, DEFAULTS.recallGate);
+}
+
+export function normalizeQueryMode(raw) {
+  return oneOf(raw, QUERY_MODES, DEFAULTS.queryMode);
+}
 
 /** 排除名单的单项形状：字母（大小写都认）、数字、点、下划线、连字符。 */
 const EXCLUDED_PEER_RE = /^[A-Za-z0-9._-]{1,64}$/;
@@ -65,6 +86,8 @@ export async function readSwitches(sdk) {
     readOnly: await read(sdk, "readOnly"),
     skillRouting: await read(sdk, "skillRouting"),
     probe: await read(sdk, "probe"),
+    recallGate: normalizeRecallGate(await read(sdk, "recallGate")),
+    queryMode: normalizeQueryMode(await read(sdk, "queryMode")),
   };
 }
 

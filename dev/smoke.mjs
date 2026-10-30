@@ -15,6 +15,7 @@ import registerStatusRoutes from "../routes/status.js";
 import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
+import registerRecallModeRoutes from "../routes/recall-mode.js";
 import {
   composePeer,
   resolvePeer,
@@ -30,15 +31,21 @@ import {
   readExcludedPeers,
   readSwitches,
   parseExcludedPeers,
+  normalizeRecallGate,
+  normalizeQueryMode,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
 import {
   stripInjected,
   lastUserText,
+  contextQuery,
+  recallQuery,
   injectMemory,
   estimateTokens,
   trimToBudget,
+  CONTEXT_MESSAGES_MAX,
+  CONTEXT_CHARS_MAX,
 } from "../src/inject/plan.js";
 import { skillFindTool, skillLoadTool } from "../src/skills/tools.js";
 import {
@@ -46,9 +53,12 @@ import {
   createRecallHandler,
   extractRecallText,
   fingerprint,
+  isShortOperationCommand,
   memoryBlock,
   resetShapeWarning,
+  shouldSkipRecall,
   DEDUP_LIMIT,
+  GATE_MAX_CHARS,
   MEMORY_MAX_TOKENS,
 } from "../src/memory/recall.js";
 import {
@@ -1476,6 +1486,53 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["hermes", "ok_peer", ".hidden"],
   );
   eq("排除名单最多 50 项", parseExcludedPeers(Array.from({ length: 60 }, (_, i) => `p${i}`).join(",")).length, 50);
+
+  // ---- 召回前两层：默认值与非法值回退 ----
+  eq("recallGate 默认 off", DEFAULTS.recallGate, "off");
+  eq("queryMode 默认 last", DEFAULTS.queryMode, "last");
+
+  const layerDefaults = await readSwitches(sdkWith({}));
+  eq("未配置时 recallGate 为 off", layerDefaults.recallGate, "off");
+  eq("未配置时 queryMode 为 last", layerDefaults.queryMode, "last");
+
+  const layerSet = await readSwitches(
+    sdkWith({ recallGate: "rules", queryMode: "context" }),
+  );
+  eq("recallGate 读到 rules", layerSet.recallGate, "rules");
+  eq("queryMode 读到 context", layerSet.queryMode, "context");
+
+  const layerBad = await readSwitches(
+    sdkWith({ recallGate: "on", queryMode: "all" }),
+  );
+  eq("非法 recallGate 回退 off", layerBad.recallGate, "off");
+  eq("非法 queryMode 回退 last", layerBad.queryMode, "last");
+  eq("null recallGate 回退 off", normalizeRecallGate(null), "off");
+  eq("数字 queryMode 回退 last", normalizeQueryMode(1), "last");
+  eq("大小写不匹配也回退", normalizeRecallGate("RULES"), "off");
+}
+
+// ================= ui: 设置页召回下拉 =================
+{
+  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
+  const html = read("settings.html");
+  const js = read("assets/settings.js");
+
+  check("召回判断下拉在设置页", html.includes('id="recallGate"'));
+  check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
+  check("召回查询下拉在设置页", html.includes('id="queryMode"'));
+  check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
+  check("下拉沿用 field 字段样式", /\.field select\s*\{/.test(html));
+  check("读设置时带上召回策略", js.includes('hana.api.fetch("/recall-mode")'));
+  check("保存时写入召回策略", js.includes('hana.api.fetch("/recall-mode", {'));
+
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+  );
+  const props = manifest.contributes.settings.schema.properties;
+  eq("manifest 里 recallGate 默认 off", props.recallGate?.default, "off");
+  eq("manifest 里 recallGate 枚举", props.recallGate?.enum, ["off", "rules"]);
+  eq("manifest 里 queryMode 默认 last", props.queryMode?.default, "last");
+  eq("manifest 里 queryMode 枚举", props.queryMode?.enum, ["last", "context"]);
 }
 
 // ================= probe =================
@@ -1497,18 +1554,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     session,
   });
 
+  await probe("recall/gate-skip", {
+    session,
+    query: "运行测试",
+    reason: "short-operation-command",
+  });
+
   const lines = fs
     .readFileSync(path.join(dir, "probe.log"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
 
-  eq("三行记录", lines.length, 3);
+  eq("四行记录", lines.length, 4);
   eq("第一个事件名", lines[0].event, "agent/before-start");
   eq("before-start 记了 prompt 长度", lines[0].shape.promptChars, 8);
   eq("同一会话第二次计数为 2", lines[2].count, 2);
   eq("payload 里数出 messages", lines[1].shape.messageCount, 2);
   eq("payload 顶层键", lines[1].shape.payloadKeys, ["system", "messages"]);
+  eq("gate 事件名", lines[3].event, "recall/gate-skip");
+  eq("gate 记了查询长度", lines[3].shape.queryChars, 4);
+  eq("gate 记了查询头部", lines[3].shape.queryHead, "运行测试");
+  eq("gate 记了原因", lines[3].shape.reason, "short-operation-command");
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -1537,6 +1604,101 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   eq("lastUserText 取最后一条用户消息", lastUserText(payloadString), "第二句");
   eq("lastUserText 会剥掉既往注入", lastUserText({ messages: [{ role: "user", content: `${block}\n\n原话` }] }), "原话");
+
+  // ---- context 查询：去重 / 3 条上限 / 300 字截断方向 / 空退回 last ----
+  eq("context 最多拼 3 条", CONTEXT_MESSAGES_MAX, 3);
+  eq("context 总长上限 300", CONTEXT_CHARS_MAX, 300);
+
+  eq(
+    "context 从旧到新用换行拼接",
+    contextQuery({
+      messages: [
+        { role: "user", content: "第一句" },
+        { role: "assistant", content: "答复" },
+        { role: "user", content: "第二句" },
+      ],
+    }),
+    "第一句\n第二句",
+  );
+
+  eq(
+    "context 丢掉相邻重复的用户文本",
+    contextQuery({
+      messages: [
+        { role: "user", content: "同一句" },
+        { role: "assistant", content: "答复" },
+        { role: "user", content: "同一句" },
+      ],
+    }),
+    "同一句",
+  );
+
+  eq(
+    "context 只取最近三条（更旧的整条丢掉）",
+    contextQuery({
+      messages: [
+        { role: "user", content: "第一句" },
+        { role: "user", content: "第二句" },
+        { role: "user", content: "第三句" },
+        { role: "user", content: "第四句" },
+      ],
+    }),
+    "第二句\n第三句\n第四句",
+  );
+
+  const oldest = `起点${"旧".repeat(398)}`;
+  const clipped = contextQuery({
+    messages: [
+      { role: "user", content: oldest },
+      { role: "user", content: "最新一句" },
+    ],
+  });
+  eq("超长时总长正好收到 300", Array.from(clipped).length, CONTEXT_CHARS_MAX);
+  check("最新一条完整保留", clipped.endsWith("\n最新一句"));
+  check("最旧一条被截掉的是开头", clipped.startsWith("旧".repeat(295)) && !clipped.includes("起点"));
+
+  eq(
+    "context 也剥掉既往注入块",
+    contextQuery({
+      messages: [
+        { role: "user", content: `${block}\n\n第一句` },
+        { role: "user", content: "第二句" },
+      ],
+    }),
+    "第一句\n第二句",
+  );
+
+  eq(
+    "没有用户文本时 context 给空串",
+    contextQuery({ messages: [{ role: "assistant", content: "嗯" }] }),
+    "",
+  );
+  eq(
+    "context 拼不出东西时退回 last（这里也是空）",
+    recallQuery({ messages: [{ role: "assistant", content: "嗯" }] }, "context"),
+    "",
+  );
+  eq(
+    "context 单条与 last 相同",
+    recallQuery({ messages: [{ role: "user", content: "只有一句" }] }, "context"),
+    "只有一句",
+  );
+  eq(
+    "last 模式只用最后一句",
+    recallQuery(
+      { messages: [{ role: "user", content: "第一句" }, { role: "user", content: "最后一句" }] },
+      "last",
+    ),
+    "最后一句",
+  );
+  eq(
+    "不认识的查询模式按 last",
+    recallQuery(
+      { messages: [{ role: "user", content: "第一句" }, { role: "user", content: "最后一句" }] },
+      "bogus",
+    ),
+    "最后一句",
+  );
 
   const injected = injectMemory(payloadString, block);
   check("injectMemory 返回新对象", injected !== null);
@@ -1903,6 +2065,61 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("空前缀算合法", (await getConn()).body.peerPrefixValid, true);
 }
 
+// ================= routes: recall-mode =================
+{
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const store = {};
+  const writes = [];
+  const ctx = {
+    config: {
+      get: async (key) => store[key],
+      set: async (key, value) => {
+        writes.push([key, value]);
+        store[key] = value;
+      },
+    },
+  };
+  registerRecallModeRoutes(app, ctx);
+  const get = () => handlers["GET /recall-mode"]({ json: (payload, status) => ({ body: payload, status }) });
+  const post = (body) =>
+    handlers["POST /recall-mode"]({
+      req: { json: async () => body },
+      json: (payload, status) => ({ body: payload, status }),
+    });
+
+  const defaults = await get();
+  eq("GET 缺省时 recallGate=off", defaults.body.recallGate, "off");
+  eq("GET 缺省时 queryMode=last", defaults.body.queryMode, "last");
+
+  store.recallGate = "bogus";
+  store.queryMode = 3;
+  const dirty = await get();
+  eq("GET 把存量非法值收敛成默认值", [dirty.body.recallGate, dirty.body.queryMode], ["off", "last"]);
+
+  const saved = await post({ recallGate: "rules", queryMode: "context" });
+  eq("合法值落库", [store.recallGate, store.queryMode], ["rules", "context"]);
+  eq("applied 列出两个键", saved.body.applied, ["recallGate", "queryMode"]);
+  eq("POST 回显当前值", [saved.body.recallGate, saved.body.queryMode], ["rules", "context"]);
+
+  writes.length = 0;
+  const bad = await post({ recallGate: "on", queryMode: "context" });
+  eq("非法值整单被拒", bad.status, 400);
+  eq("被拒时零写入", writes.length, 0);
+  eq("被拒时另一个键也没改", store.queryMode, "context");
+
+  const badType = await post({ queryMode: 1 });
+  eq("类型不对也拒", badType.status, 400);
+  eq("类型不对零写入", writes.length, 0);
+
+  const partial = await post({ queryMode: "last" });
+  eq("只提交一个键也能改", partial.status, 200);
+  eq("另一个键保持原值", store.recallGate, "rules");
+}
+
 // ================= routes: session =================
 {
   const dir = path.join(import.meta.dirname, ".tmp-route-peer");
@@ -2035,6 +2252,172 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     fs.readdirSync(path.join(dir, "sessions")).sort(),
     filesBeforePathWrite,
   );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall gate =================
+{
+  eq("gate 长度上限是 8", GATE_MAX_CHARS, 8);
+
+  // 判据 1：trim 后长度 ≤ 8
+  eq("≤8 字的纯操作指令跳过", isShortOperationCommand("运行测试"), true);
+  eq("trim 后仍按 8 字算", isShortOperationCommand("  运行测试  "), true);
+  eq("超过 8 字不跳过", isShortOperationCommand("重启开发服务器进程"), false);
+
+  // 判据 2：不含问号
+  eq("带半角问号不跳过", isShortOperationCommand("运行测试?"), false);
+  eq("带全角问号不跳过", isShortOperationCommand("运行测试？"), false);
+
+  // 判据 3：不含疑问词
+  eq("带疑问词不跳过（怎么）", isShortOperationCommand("怎么运行"), false);
+  eq("带疑问词不跳过（为什么）", isShortOperationCommand("为什么"), false);
+
+  // 判据 4：不含指代词
+  eq("带指代词不跳过（这）", isShortOperationCommand("把这个删了"), false);
+  eq("带指代词不跳过（继续）", isShortOperationCommand("继续"), false);
+
+  // 任务书里的四个举例
+  eq("运行测试 -> 跳过", shouldSkipRecall("运行测试", "rules"), true);
+  eq("把这个删了 -> 召回", shouldSkipRecall("把这个删了", "rules"), false);
+  eq("继续 -> 召回", shouldSkipRecall("继续", "rules"), false);
+  eq("那为啥不是默认开启? -> 召回", shouldSkipRecall("那为啥不是默认开启?", "rules"), false);
+
+  // off / 非法值永远不跳
+  eq("off 永远不跳过", shouldSkipRecall("运行测试", "off"), false);
+  eq("非法 gate 也不跳过", shouldSkipRecall("运行测试", "banana"), false);
+  eq("空文本不跳过", isShortOperationCommand("   "), false);
+}
+
+{
+  // ---- recallGate=rules 接入链路：跳过时不发请求，日志与探针各记一行 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-gate");
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const infos = [];
+  const probes = [];
+  const mock = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+  const sdk = recallSdk({
+    values: {
+      enabled: true,
+      apiKey: "k",
+      serverUrl: "http://h:1",
+      recallGate: "rules",
+      probe: true,
+    },
+    fetchImpl: mock.fetchImpl,
+    dataDir: dir,
+    logger: { info: (m) => infos.push(m) },
+  });
+  const handler = createRecallHandler(sdk, {
+    probe: async (event, invocation) => probes.push({ event, invocation }),
+  });
+  const session = { sessionId: "gate-skip" };
+  const payload = { messages: [{ role: "user", content: "运行测试" }] };
+
+  eq("gate 跳过时返回 undefined", await handler({ payload, session }), undefined);
+  eq("gate 跳过时不发请求", mock.calls.length, 0);
+  check(
+    "gate 跳过时日志有一行 gate: skipped",
+    infos.some((m) => m.includes("gate: skipped")),
+  );
+  eq("gate 跳过时探针记一次", probes.length, 1);
+  eq("探针事件名", probes[0].event, "recall/gate-skip");
+  eq("探针带上了查询原文", probes[0].invocation.query, "运行测试");
+  eq("探针带上了原因", probes[0].invocation.reason, "short-operation-command");
+
+  await handler({ payload, session });
+  eq(
+    "同一句第二次不再记 gate",
+    infos.filter((m) => m.includes("gate: skipped")).length,
+    1,
+  );
+  eq("同一句第二次也不再写探针", probes.length, 1);
+
+  const probesOff = [];
+  const offHandler = createRecallHandler(
+    recallSdk({
+      values: {
+        enabled: true,
+        apiKey: "k",
+        serverUrl: "http://h:1",
+        recallGate: "rules",
+        probe: false,
+      },
+      fetchImpl: mock.fetchImpl,
+      dataDir: dir,
+      logger: { info: () => {} },
+    }),
+    { probe: async () => probesOff.push(1) },
+  );
+  await offHandler({
+    payload: { messages: [{ role: "user", content: "运行测试" }] },
+    session: { sessionId: "gate-probe-off" },
+  });
+  eq("probe 开关关着时不写探针", probesOff.length, 0);
+
+  // 反例：含指代词的短句照常召回。
+  const recallMock = mockFetch({ body: { status: "ok", result: { rendered: "该召回" } } });
+  const recallHandler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", recallGate: "rules" },
+      fetchImpl: recallMock.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  const recalled = await recallHandler({
+    payload: { messages: [{ role: "user", content: "把这个删了" }] },
+    session: { sessionId: "gate-recall" },
+  });
+  check("含指代词的短句照常召回", Boolean(recalled?.payload));
+  eq("含指代词的短句发了请求", recallMock.calls.length, 1);
+
+  // queryMode=context：补上上文后不再算“孤立短指令”，照常召回。
+  const ctxMock = mockFetch({ body: { status: "ok", result: { rendered: "上下文召回" } } });
+  const ctxHandler = createRecallHandler(
+    recallSdk({
+      values: {
+        enabled: true,
+        apiKey: "k",
+        serverUrl: "http://h:1",
+        recallGate: "rules",
+        queryMode: "context",
+      },
+      fetchImpl: ctxMock.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  await ctxHandler({
+    payload: {
+      messages: [
+        { role: "user", content: "上次说交稿" },
+        { role: "user", content: "运行测试" },
+      ],
+    },
+    session: { sessionId: "gate-context" },
+  });
+  eq("context 模式带上文后照常召回", ctxMock.calls.length, 1);
+  eq(
+    "context 查询含上一条",
+    JSON.parse(ctxMock.calls[0].init.body).query,
+    "上次说交稿\n运行测试",
+  );
+
+  // 默认 off：同样的短指令照常召回，行为不比现在更差。
+  const offMock = mockFetch({ body: { status: "ok", result: { rendered: "关闭判断后照常召回" } } });
+  const offModeHandler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: offMock.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  const offRecalled = await offModeHandler({
+    payload: { messages: [{ role: "user", content: "运行测试" }] },
+    session: { sessionId: "gate-off-default" },
+  });
+  check("默认 off 时短指令照常召回", Boolean(offRecalled?.payload));
+  eq("默认 off 时发了请求", offMock.calls.length, 1);
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

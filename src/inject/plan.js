@@ -69,6 +69,78 @@ export function lastUserText(payload) {
   return stripInjected(contentText(readContent(messages[index])));
 }
 
+/** context 查询最多拼几条用户文本。 */
+export const CONTEXT_MESSAGES_MAX = 3;
+
+/** context 查询的总长上限（按字符/码点算，不按 UTF-16 码元）。 */
+export const CONTEXT_CHARS_MAX = 300;
+
+function charLength(text) {
+  return Array.from(text).length;
+}
+
+/** 从开头截断，保留尾部：最旧那条被截的是开头，最新那条保持完整。 */
+function clipStart(text, keep) {
+  if (keep <= 0) return "";
+  const chars = Array.from(text);
+  return chars.length <= keep ? text : chars.slice(chars.length - keep).join("");
+}
+
+/**
+ * 拼最近几条用户文本（从旧到新，换行分隔）。
+ *
+ * 规则：
+ *   1. 从新到旧最多取 CONTEXT_MESSAGES_MAX 条 user 消息；
+ *   2. 相邻两条文本完全相同就去重；
+ *   3. 总量超过 CONTEXT_CHARS_MAX 时从最旧一条的开头截断，最新一条保持完整；
+ *   4. 一条都没有时返回空串，由 recallQuery 退回 last 的单条行为。
+ *
+ * 最新一条自己就超过上限时同样保持完整：宁可多带一点，也不把用户刚说的话切掉。
+ */
+export function contextQuery(
+  payload,
+  { limit = CONTEXT_MESSAGES_MAX, maxChars = CONTEXT_CHARS_MAX } = {},
+) {
+  const messages = payload?.messages;
+  if (!Array.isArray(messages) || limit <= 0) return "";
+
+  const picked = [];
+  for (let i = messages.length - 1; i >= 0 && picked.length < limit; i -= 1) {
+    const role = messages[i]?.role;
+    if (role !== "user" && role !== "human") continue;
+    const text = stripInjected(contentText(readContent(messages[i]))).trim();
+    if (!text) continue;
+    // 相邻去重：此时 picked 是新到旧，比较的是“更旧的这条”与“刚收进来的那条”。
+    if (picked.length && picked[picked.length - 1] === text) continue;
+    picked.push(text);
+  }
+  if (!picked.length) return "";
+
+  const ordered = picked.reverse();
+  const joined = ordered.join("\n");
+  if (charLength(joined) <= maxChars) return joined;
+
+  // 从最新一条往前拼；装不下的那条只保留尾部，然后停手。
+  let tail = ordered[ordered.length - 1];
+  for (let i = ordered.length - 2; i >= 0; i -= 1) {
+    const candidate = `${ordered[i]}\n${tail}`;
+    if (charLength(candidate) <= maxChars) {
+      tail = candidate;
+      continue;
+    }
+    const room = maxChars - charLength(tail) - 1;
+    if (room > 0) tail = `${clipStart(ordered[i], room)}\n${tail}`;
+    break;
+  }
+  return tail;
+}
+
+/** 按配置取查询文本。context 拼不出东西时退回 last 的单条行为。 */
+export function recallQuery(payload, mode = "last") {
+  if (mode !== "context") return lastUserText(payload);
+  return contextQuery(payload) || lastUserText(payload);
+}
+
 /** 把记忆块拼到内容前面。string 与 parts 两种形态各自处理，尽量不新增 part。 */
 export function prependBlock(content, block) {
   if (typeof content === "string") return `${block}\n\n${content}`;

@@ -80,6 +80,14 @@ function shapeOf(event, invocation) {
     };
   }
 
+  if (event === "recall/gate-skip") {
+    return {
+      queryChars: len(invocation.query),
+      queryHead: head(invocation.query),
+      reason: typeof invocation.reason === "string" ? invocation.reason : null,
+    };
+  }
+
   // 事件类（agent/settled 等）：只记键名
   return { keys: Object.keys(invocation) };
 }

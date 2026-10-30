@@ -21,10 +21,68 @@ import {
   estimateTokens,
   injectMemory,
   lastUserText,
+  recallQuery,
   trimToBudget,
 } from "../inject/plan.js";
 
 const LOG_PREFIX = "openviking recall";
+
+/** 召回判断的上限：超过这个字数的文本一律召回。 */
+export const GATE_MAX_CHARS = 8;
+
+/** 疑问词：出现任一个就说明用户在问事，不能跳过。 */
+export const GATE_QUESTION_WORDS = Object.freeze([
+  "为什么",
+  "怎么",
+  "什么",
+  "哪",
+  "如何",
+  "是否",
+  "吗",
+  "呢",
+  "多少",
+  "谁",
+]);
+
+/** 指代词：出现任一个就说明这句依赖上下文，不能跳过。 */
+export const GATE_REFERENCE_WORDS = Object.freeze([
+  "这",
+  "那",
+  "它",
+  "其",
+  "刚才",
+  "上次",
+  "之前",
+  "继续",
+  "还",
+  "再",
+]);
+
+function charLength(text) {
+  return Array.from(text).length;
+}
+
+/**
+ * 极短的纯操作指令：四条全中才算。
+ *
+ * 判据刻意保守：只认“运行测试”这种说完就完、不指向任何东西的句子。
+ * 带问号、带疑问词、带指代词，或者超过 8 个字，一律召回。
+ */
+export function isShortOperationCommand(text, limit = GATE_MAX_CHARS) {
+  const query = typeof text === "string" ? text.trim() : "";
+  if (!query) return false;
+  if (charLength(query) > limit) return false;
+  if (query.includes("?") || query.includes("？")) return false;
+  if (GATE_QUESTION_WORDS.some((word) => query.includes(word))) return false;
+  if (GATE_REFERENCE_WORDS.some((word) => query.includes(word))) return false;
+  return true;
+}
+
+/** 配置是 off（或任何不认识的值）时永远不跳；只有 rules 才看判据。 */
+export function shouldSkipRecall(text, gate = "off") {
+  if (gate !== "rules") return false;
+  return isShortOperationCommand(text);
+}
 
 /** 进程内去重表容量。一个键约 100 字节，200 条足够覆盖同时活跃的几个会话。 */
 export const DEDUP_LIMIT = 200;
@@ -179,6 +237,7 @@ function bumpRecall(sdk, sessionId, tokens) {
  *   其余一切 -> undefined（钩子据此判定"不干预"）
  *
  * options.deduper 供测试注入；生产环境每次 createRecallHandler 一份进程内表。
+ * options.probe 是探针函数：只在 gate 跳过时调用一次，写入一行事实。
  */
 export function createRecallHandler(sdk, options = {}) {
   const deduper = options.deduper || createDeduper();
@@ -195,16 +254,18 @@ export function createRecallHandler(sdk, options = {}) {
     }
 
     // 干净的用户文本（既往注入已剥离）。空则本轮没有可检索的意图。
-    const query = lastUserText(payload);
-    if (!query) {
+    // 去重键用最后一句：queryMode 改成 context 后，查询文本会随历史增长，
+    // 但“这一轮用户说了什么”没变，键必须仍然稳定。
+    const lastText = lastUserText(payload);
+    if (!lastText) {
       log(sdk, "info", `skip: empty query (session=${sessionId})`);
       return undefined;
     }
 
     // 去重键最先占：后面的每一步（读配置、读会话文件、发请求）都只该为一条用户消息做一次。
     // 同一 (sessionId, 用户文本) 的后续调用直接静默返回 undefined——不读配置，也不记跳过日志。
-    // 这也是"总闸关着"时不再刷屏的原因：跳过日志排在这一步之后，一轮只可能出现一次。
-    const key = `${sessionId}\u0000${fingerprint(query)}`;
+    // 这也是“总闸关着”时不再刷屏的原因：跳过日志排在这一步之后，一轮只可能出现一次。
+    const key = `${sessionId}\u0000${fingerprint(lastText)}`;
     if (!deduper.claim(key)) return undefined;
 
     // 总闸：关着就一次配置之外的活儿都不干。
@@ -228,6 +289,25 @@ export function createRecallHandler(sdk, options = {}) {
     );
     if (!live.autoRecall) {
       log(sdk, "info", `skip: autoRecall off (session=${sessionId})`);
+      return undefined;
+    }
+
+    // 召回判断：只跳过极短的纯操作指令，且在发请求之前。
+    // 用实际要发出去的查询文本判断：context 模式补了上文之后，句子不再“孤立”，自然会更倾向召回。
+    const query = recallQuery(payload, switches.queryMode);
+    if (shouldSkipRecall(query, switches.recallGate)) {
+      log(sdk, "info", `gate: skipped (session=${sessionId} chars=${charLength(query)})`);
+      if (switches.probe && typeof options.probe === "function") {
+        try {
+          await options.probe("recall/gate-skip", {
+            session,
+            query,
+            reason: "short-operation-command",
+          });
+        } catch {
+          /* 探针写不进去不能影响本轮对话 */
+        }
+      }
       return undefined;
     }
 
