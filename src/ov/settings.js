@@ -22,6 +22,9 @@ export const DEFAULTS = {
   queryMode: "last",
   gatePrompt: "",
   gateModel: "",
+  rerank: "off",
+  rerankPrompt: "",
+  rerankModel: "",
 };
 
 /** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令，llm 让宿主模型判断。 */
@@ -30,8 +33,14 @@ export const RECALL_GATES = Object.freeze(["off", "rules", "llm"]);
 /** 召回查询：last 只用最后一句，context 拼最近几条用户文本。 */
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 
+/** 结果重排：off 原样注入，llm 让宿主模型挑出真正有用的候选。 */
+export const RERANK_MODES = Object.freeze(["off", "llm"]);
+
 /** 自定义提示词上限。超过这个长度的存量值在读取侧截断，POST 侧整单拒绝。 */
 export const GATE_PROMPT_MAX = 2000;
+
+/** 重排提示词上限，与判断提示词同一口径。 */
+export const RERANK_PROMPT_MAX = 2000;
 
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
 function oneOf(raw, allowed, fallback) {
@@ -46,10 +55,20 @@ export function normalizeQueryMode(raw) {
   return oneOf(raw, QUERY_MODES, DEFAULTS.queryMode);
 }
 
+export function normalizeRerank(raw) {
+  return oneOf(raw, RERANK_MODES, DEFAULTS.rerank);
+}
+
 /** 提示词按字符截断，不把代理对切成两半。空串表示“没有提示词，不拦截”。 */
 export function normalizeGatePrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/** 重排提示词与判断提示词同口径：空串表示“用内置默认模板”。 */
+export function normalizeRerankPrompt(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, RERANK_PROMPT_MAX).join("");
 }
 
 /** 模型标识的单项上限。与 APPS.md 里可调用模型标识的边界一致。 */
@@ -74,6 +93,9 @@ export function normalizeGateModel(raw) {
   if (/[\u0000-\u001f\u007f\s]/.test(value)) return "";
   return `${provider}/${model}`;
 }
+
+/** 重排模型与 gateModel 同形：复用同一份解析。 */
+export const normalizeRerankModel = normalizeGateModel;
 
 /** 排除名单的单项形状：字母（大小写都认）、数字、点、下划线、连字符。 */
 const EXCLUDED_PEER_RE = /^[A-Za-z0-9._-]{1,64}$/;
@@ -124,6 +146,9 @@ export async function readSwitches(sdk) {
     queryMode: normalizeQueryMode(await read(sdk, "queryMode")),
     gatePrompt: normalizeGatePrompt(await read(sdk, "gatePrompt")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
+    rerank: normalizeRerank(await read(sdk, "rerank")),
+    rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
+    rerankModel: normalizeRerankModel(await read(sdk, "rerankModel")),
   };
 }
 

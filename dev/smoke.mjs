@@ -36,7 +36,12 @@ import {
   normalizeQueryMode,
   normalizeGateModel,
   normalizeGatePrompt,
+  normalizeRerank,
+  normalizeRerankModel,
+  normalizeRerankPrompt,
   GATE_PROMPT_MAX,
+  RERANK_MODES,
+  RERANK_PROMPT_MAX,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
@@ -55,6 +60,8 @@ import { skillFindTool, skillLoadTool } from "../src/skills/tools.js";
 import {
   createDeduper,
   createRecallHandler,
+  candidateSummary,
+  extractRecallItems,
   extractRecallText,
   fingerprint,
   isShortOperationCommand,
@@ -63,12 +70,18 @@ import {
   shouldSkipRecall,
   gateAnswerRecalls,
   gatePromptOf,
+  parseRerankAnswer,
   readGateStreamText,
   renderGatePrompt,
+  renderRerankPrompt,
+  rerankPromptOf,
   DEFAULT_GATE_PROMPT,
+  DEFAULT_RERANK_PROMPT,
   GATE_MESSAGE_PLACEHOLDER,
   GATE_TIMEOUT_MS,
   GATE_MAX_TOKENS,
+  RERANK_TIMEOUT_MS,
+  RERANK_MAX_TOKENS,
   DEDUP_LIMIT,
   GATE_MAX_CHARS,
   GATE_QUESTION_WORDS,
@@ -99,13 +112,17 @@ import {
 import {
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
+  DEFAULT_RERANK_PROMPT as UI_DEFAULT_RERANK_PROMPT,
   commitLayers,
   modelOptions,
   paintGateConfig,
   paintLayers,
   paintRecallConfig,
+  paintRerankConfig,
   promptDraft,
   promptStatus,
+  rerankPromptDraft,
+  rerankPromptStatus,
 } from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
@@ -1600,6 +1617,45 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const gateBad = await readSwitches(sdkWith({ gateModel: "bogus-shape" }));
   eq("存量非法 gateModel 回退空", gateBad.gateModel, "");
   eq("未填时 gateModel 为空", (await readSwitches(sdkWith({}))).gateModel, "");
+
+  // ---- 结果重排：默认关，非法值回 off，模型标识复用 gate 的解析 ----
+  eq("rerank 默认 off", DEFAULTS.rerank, "off");
+  eq("RERANK_MODES 只有 off / llm", RERANK_MODES, ["off", "llm"]);
+  eq("未配置时 rerank 为 off", (await readSwitches(sdkWith({}))).rerank, "off");
+  eq("rerank 读到 llm", (await readSwitches(sdkWith({ rerank: "llm" }))).rerank, "llm");
+  eq("非法 rerank 回退 off", normalizeRerank("rules"), "off");
+  eq("数字 rerank 回退 off", normalizeRerank(1), "off");
+  eq("大小写不匹配也回退", normalizeRerank("LLM"), "off");
+  eq("rerankModel 空串就是默认通道", normalizeRerankModel(""), "");
+  eq("rerankModel 与 gateModel 同形", normalizeRerankModel(" p1/m1 "), "p1/m1");
+  eq("rerankModel 缺 provider 回退空", normalizeRerankModel("m1"), "");
+  eq("rerankPrompt 默认空（用内置模板）", DEFAULTS.rerankPrompt, "");
+  eq("数字 rerankPrompt 给空串", normalizeRerankPrompt(1), "");
+  eq(
+    "rerankPrompt 截断到上限",
+    Array.from(normalizeRerankPrompt("字".repeat(RERANK_PROMPT_MAX + 50))).length,
+    RERANK_PROMPT_MAX,
+  );
+
+  const rerankSet = await readSwitches(
+    sdkWith({
+      rerank: "llm",
+      rerankPrompt: "提".repeat(RERANK_PROMPT_MAX + 5),
+      rerankModel: "  deepseek/deepseek-flash  ",
+    }),
+  );
+  eq("readSwitches 读到 rerank", rerankSet.rerank, "llm");
+  eq(
+    "readSwitches 也截断重排提示词",
+    Array.from(rerankSet.rerankPrompt).length,
+    RERANK_PROMPT_MAX,
+  );
+  eq("readSwitches 读到重排模型", rerankSet.rerankModel, "deepseek/deepseek-flash");
+  eq(
+    "存量非法 rerankModel 回退空",
+    (await readSwitches(sdkWith({ rerankModel: "bogus-shape" }))).rerankModel,
+    "",
+  );
 }
 
 // ================= ui: 召回策略在主面板 =================
@@ -1608,15 +1664,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const html = read("panel.html");
   const panelJs = read("assets/panel.js");
   const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const layersJs = read("assets/recall-layers.js");
   const settingsHtml = read("settings.html");
   const settingsJs = read("assets/settings.js");
 
   const gateIdx = html.indexOf('id="recallGate"');
   const modeIdx = html.indexOf('id="queryMode"');
+  const rerankIdx = html.indexOf('id="rerank"');
   check("面板上有召回判断下拉", gateIdx > 0, `idx=${gateIdx}`);
   check("面板上有召回查询下拉", modeIdx > 0, `idx=${modeIdx}`);
+  check("面板上有结果重排下拉", rerankIdx > 0, `idx=${rerankIdx}`);
   check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
   check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
+  check("结果重排有 off / llm 选项", html.includes("结果重排") && html.includes("模型判断") &&
+    /<select id="rerank">\s*<option value="off">关<\/option>\s*<option value="llm">模型判断<\/option>/.test(html));
 
   // 位置：两栏之后、日志之前，占满整行（不在两栏里），跟 peer 名单同一栏。
   const colsStart = html.indexOf('<section class="cols">');
@@ -1639,13 +1700,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     `hub=${hubIdx} ident=${identIdx} cols=${colsStart}..${colsEnd} recall=${recallStart}`,
   );
 
-  // 同一栏：两个下拉与 peer 名单都在这个 section 里。
+  // 同一栏：三个下拉与 peer 名单都在这个 section 里。
   check(
-    "两个下拉与 peer 列表在同一个 section 内",
+    "三个下拉与 peer 列表在同一个 section 内",
     gateIdx > recallStart && gateIdx < recallEnd &&
       modeIdx > recallStart && modeIdx < recallEnd &&
+      rerankIdx > recallStart && rerankIdx < recallEnd &&
       peerIdx > recallStart && peerIdx < recallEnd,
-    `recall=${recallStart}..${recallEnd} gate=${gateIdx} mode=${modeIdx} peer=${peerIdx}`,
+    `recall=${recallStart}..${recallEnd} gate=${gateIdx} mode=${modeIdx} rerank=${rerankIdx} peer=${peerIdx}`,
   );
   check("计数也在这一栏里（仍算 peer 个数）",
     peerCountIdx > recallStart && peerCountIdx < recallEnd);
@@ -1654,13 +1716,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .match(/<h2 class="card-title">([^<]*)<\/h2>/);
   eq("这一栏的标题是「召回管理」", recallTitle?.[1], "召回管理");
   check("召回判断在前、召回查询在后", gateIdx < modeIdx);
-  // 这一栏的主栅格恰好两个下拉；llm 展开区另有自己的一个模型下拉。
+  check("结果重排排在召回查询之后", modeIdx < rerankIdx);
+  // 这一栏的主栅格恰好三个下拉；llm 判断 / 重排展开区各有一个模型下拉。
   const advancedIdx = html.indexOf('id="gateAdvanced"');
+  const rerankAdvancedIdx = html.indexOf('id="rerankAdvanced"');
   const sepAfterAdvanced = html.indexOf('<div class="recall-sep"', advancedIdx);
-  check("召回判断/查询是两个主下拉",
-    (html.slice(recallStart, advancedIdx).match(/<select /g) || []).length === 2);
-  check("llm 展开区只有一个模型下拉（不再分两层）",
-    (html.slice(advancedIdx, sepAfterAdvanced).match(/<select /g) || []).length === 1);
+  check("召回判断 / 查询 / 重排是三个主下拉",
+    (html.slice(recallStart, advancedIdx).match(/<select /g) || []).length === 3);
+  check("llm 判断展开区只有一个模型下拉（不再分两层）",
+    (html.slice(advancedIdx, rerankAdvancedIdx).match(/<select /g) || []).length === 1);
+  check("重排展开区只有一个模型下拉",
+    (html.slice(rerankAdvancedIdx, sepAfterAdvanced).match(/<select /g) || []).length === 1);
   // 上下两块之间要有一条分隔，不然读起来像一锅端。
   check("下拉与名单之间有分隔",
     /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
@@ -1699,8 +1765,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const recallRule = css.indexOf(".recall-grid {");
   check("下拉那一行有栅格", recallRule >= 0);
   check(
-    "召回那两个下拉并排（一行两列）",
-    /grid-template-columns\s*:\s*1fr 1fr/.test(css.slice(recallRule, css.indexOf("}", recallRule))),
+    "召回那三个下拉并排（一行三列）",
+    /grid-template-columns\s*:\s*1fr 1fr 1fr/.test(css.slice(recallRule, css.indexOf("}", recallRule))),
   );
   check("分隔线有样式", /\n\.recall-sep \{/.test(css));
   check("peer 名单样式还在", /\n\.peer-list \{/.test(css));
@@ -1716,6 +1782,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /for \(const id of \["recallGate", "queryMode"\]\)[\s\S]{0,160}addEventListener\("change"/.test(
       panelJs,
     ),
+  );
+  check(
+    "结果重排下拉也绑 change 即时提交",
+    /rerank"\)\.addEventListener\("change"[\s\S]{0,80}saveLayers\b/.test(panelJs),
   );
   check("面板没有为召回单设保存按钮", html.includes("recallSave") === false);
 
@@ -1769,6 +1839,55 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("新控件有样式", /\n\.gate-advanced \{/.test(css));
   check("textarea 有输入框样式", /\n\.field textarea \{/.test(css));
 
+  // ---- 结果重排：下拉、展开块、提示词与模型 ----
+  check("重排展开块存在", rerankAdvancedIdx > 0);
+  const rerankAdvancedTag = html.slice(rerankAdvancedIdx, html.indexOf(">", rerankAdvancedIdx));
+  check("重排展开块默认 hidden", /\shidden(?:\s|$)/.test(rerankAdvancedTag), rerankAdvancedTag);
+  check("重排提示词框 rows=4", /id="rerankPrompt"[^>]*rows="4"/.test(html));
+  const rerankPromptTag = /<textarea[^>]*id="rerankPrompt"[^>]*>/.exec(html)?.[0] ?? "";
+  check("重排提示词框没有 placeholder", rerankPromptTag.includes("placeholder") === false, rerankPromptTag);
+  check("重排恢复默认按钮在", /id="rerankResetPrompt"[^>]*>\s*恢复默认\s*</.test(html));
+  check("重排提示词状态位在", /id="rerankPromptStatus"/.test(html));
+  check(
+    "重排提示词框下有占位符说明",
+    html.includes("用 {{message}} 表示当前这条用户消息") &&
+      html.includes("用 {{candidates}} 表示候选清单"),
+  );
+  check(
+    "重排恢复默认走正常提交",
+    /rerankResetPrompt"\)\.addEventListener\("click"[\s\S]{0,220}saveLayers\(\)/.test(panelJs),
+  );
+  check(
+    "重排提示词框绑 input 并标记过 touched",
+    /rerankPrompt"\)\.addEventListener\("input"/.test(panelJs) &&
+      panelJs.includes("rerankPromptTouched = true"),
+  );
+  check("重排模型只有一个下拉", (html.match(/<select[^>]*id="rerankModel"/g) || []).length === 1);
+  check(
+    "重排模型下拉首项是默认",
+    /<select id="rerankModel">\s*<option value="">默认（宿主辅助模型）<\/option>/.test(html),
+  );
+  check("重排模型下拉不预设禁用", /id="rerankModel"[^>]*disabled/.test(html) === false);
+  check("重排目录读不到时留原因位", /id="rerankModelsHint"/.test(html));
+  check(
+    "重排展开区受结果重排控制",
+    panelJs.includes("paintRerankPanels") && panelJs.includes("rerankAdvanced"),
+  );
+  // 两份默认模板各只有一份：HTML 里零份，recall-layers.js 里恰好一份。
+  check("判断默认模板不在 HTML 里", html.includes(DEFAULT_GATE_PROMPT) === false);
+  check("重排默认模板不在 HTML 里", html.includes(DEFAULT_RERANK_PROMPT) === false);
+  eq(
+    "判断默认模板在 recall-layers.js 里只有一份",
+    layersJs.split(DEFAULT_GATE_PROMPT).length - 1,
+    1,
+  );
+  eq(
+    "重排默认模板在 recall-layers.js 里只有一份",
+    layersJs.split(DEFAULT_RERANK_PROMPT).length - 1,
+    1,
+  );
+  eq("两份重排默认提示词逐字一致", UI_DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_PROMPT);
+
   // 设置页只剩连接：不再有召回分组、下拉、也不再碰 /recall-mode。
   check("设置页不再有召回判断", settingsHtml.includes("recallGate") === false);
   check("设置页不再有召回查询", settingsHtml.includes("queryMode") === false);
@@ -1798,6 +1917,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("manifest 里没有 gateModelMode", props.gateModelMode, undefined);
   eq("manifest 里没有 gateProvider", props.gateProvider, undefined);
   eq("manifest 里 gatePrompt 默认空", props.gatePrompt?.default, "");
+  eq("manifest 里 rerank 默认 off", props.rerank?.default, "off");
+  eq("manifest 里 rerank 枚举", props.rerank?.enum, ["off", "llm"]);
+  eq("manifest 里 rerankPrompt 默认空", props.rerankPrompt?.default, "");
+  eq("manifest 里 rerankModel 默认空", props.rerankModel?.default, "");
   check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
 }
 
@@ -1923,12 +2046,47 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     paintGateConfig({ gateModel: "m1" }).gateModel,
     "",
   );
-  eq("完整投影包含两层与 llm 配置", paintRecallConfig({ recallGate: "llm" }), {
+  eq("完整投影包含两层、llm 与重排配置", paintRecallConfig({ recallGate: "llm" }), {
     recallGate: "llm",
     queryMode: "last",
     gatePrompt: "",
     gateModel: "",
+    rerank: "off",
+    rerankPrompt: "",
+    rerankModel: "",
   });
+
+  // ---- 重排配置的归一化与草稿 ----
+  eq(
+    "重排配置归一化非法值",
+    paintRerankConfig({
+      rerank: "on",
+      rerankPrompt: "字".repeat(RERANK_PROMPT_MAX + 10),
+      rerankModel: "  p1/m1  ",
+    }),
+    {
+      rerank: "off",
+      rerankPrompt: "字".repeat(RERANK_PROMPT_MAX),
+      rerankModel: "p1/m1",
+    },
+  );
+  eq("重排配置读到 llm", paintRerankConfig({ rerank: "llm" }).rerank, "llm");
+  eq("形状不对的重排模型标识当空", paintRerankConfig({ rerankModel: "m1" }).rerankModel, "");
+  eq("重排配置为空时草稿就是默认全文", rerankPromptDraft(""), DEFAULT_RERANK_PROMPT);
+  eq("重排配置为空且用户动过就不再填默认", rerankPromptDraft("", true), "");
+  eq("重排有自定义内容就显示自定义", rerankPromptDraft("我的重排提示词"), "我的重排提示词");
+  eq(
+    "重排内容等于默认 -> 当前为默认提示词",
+    rerankPromptStatus(DEFAULT_RERANK_PROMPT),
+    "当前为默认提示词",
+  );
+  eq("重排内容改过 -> 已修改", rerankPromptStatus("我的重排提示词"), "已修改");
+  check(
+    "重排清空 -> 已修改并提醒回默认模板",
+    rerankPromptStatus("").includes("已修改") &&
+      rerankPromptStatus("").includes("提示词为空时使用默认模板"),
+    rerankPromptStatus(""),
+  );
 
   // 模型目录 -> 选项：一步选到位，文案带 provider，值形如 provider/id。
   eq("目录选项带 provider", modelOptions([
@@ -2554,6 +2712,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const defaults = await get();
   eq("GET 缺省时 recallGate=off", defaults.body.recallGate, "off");
   eq("GET 缺省时 queryMode=last", defaults.body.queryMode, "last");
+  eq("GET 缺省时 rerank=off", defaults.body.rerank, "off");
+  eq("GET 缺省时 rerankPrompt 为空", defaults.body.rerankPrompt, "");
+  eq("GET 缺省时 rerankModel 为空", defaults.body.rerankModel, "");
 
   store.recallGate = "bogus";
   store.queryMode = 3;
@@ -2630,6 +2791,54 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const badPrompt = await post({ gatePrompt: 1 });
   eq("提示词类型不对 400", badPrompt.status, 400);
   eq("提示词类型不对零写入", writes.length, 0);
+
+  // ---- 结果重排：开关 / 提示词 / 模型三个字段 ---------
+  writes.length = 0;
+  const rerankOk = await post({
+    rerank: "llm",
+    rerankPrompt: "重排模板 {{message}} {{candidates}}",
+    rerankModel: "" ,
+  });
+  eq("重排档可写", store.rerank, "llm");
+  eq("重排提示词落库", store.rerankPrompt, "重排模板 {{message}} {{candidates}}");
+  eq("重排模型为空 = 默认通道", store.rerankModel, "");
+  eq(
+    "GET 回显重排配置",
+    [rerankOk.body.rerank, rerankOk.body.rerankPrompt, rerankOk.body.rerankModel],
+    ["llm", "重排模板 {{message}} {{candidates}}", ""],
+  );
+
+  writes.length = 0;
+  const badRerank = await post({ rerank: "rules" });
+  eq("非法 rerank 400", badRerank.status, 400);
+  eq("非法 rerank 零写入", writes.length, 0);
+  eq("被拒后旧 rerank 还在", store.rerank, "llm");
+
+  writes.length = 0;
+  const badRerankPrompt = await post({ rerankPrompt: "字".repeat(RERANK_PROMPT_MAX + 1) });
+  eq("超长重排提示词 400", badRerankPrompt.status, 400);
+  eq("超长重排提示词零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badRerankPromptType = await post({ rerankPrompt: 1 });
+  eq("重排提示词类型不对 400", badRerankPromptType.status, 400);
+  eq("重排提示词类型不对零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badRerankRef = await post({ rerankModel: "m1" });
+  eq("重排模型缺 provider 400", badRerankRef.status, 400);
+  eq("重排模型非法零写入", writes.length, 0);
+
+  writes.length = 0;
+  const rerankRef = await post({ rerankModel: "  p2/m2  " });
+  eq("重排模型标识落库", store.rerankModel, "p2/m2");
+  eq("重排模型回显也去空白", rerankRef.body.rerankModel, "p2/m2");
+
+  // 整单校验：重排字段不合法时，同一单里的合法字段也不能落库。
+  writes.length = 0;
+  const rerankMixed = await post({ rerank: "llm", rerankModel: "bad" });
+  eq("重排整单被拒", rerankMixed.status, 400);
+  eq("重排整单被拒时零写入", writes.length, 0);
 
   // 只改别的键不该被存量模型配置连坐。
   store.gateModel = "p1/m1";
@@ -3469,6 +3678,311 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       threw = error;
     }
     check("stream error 事件直接抛", String(threw?.message).includes("坏了"));
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall rerank: 纯函数 =================
+{
+  // ---- 候选条目：保留边界，extractRecallText 仍按旧规则拼回去 ----
+  eq(
+    "条目：rendered 视为单条",
+    extractRecallItems({ rendered: "渲染块", digest: "摘要", entries: [{ text: "条目" }] }),
+    [{ text: "渲染块" }],
+  );
+  eq(
+    "条目：空 rendered 让位给 digest（仍是单条）",
+    extractRecallItems({ rendered: "  ", digest: "只有摘要", entries: [{ text: "条目" }] }),
+    [{ text: "只有摘要" }],
+  );
+  eq(
+    "条目：entries 逐条保留并跳过空项",
+    extractRecallItems({ entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }] }),
+    [{ text: "第一条" }, { text: "第二条" }],
+  );
+  eq("条目：字符串也是一条", extractRecallItems("  一段记忆  "), [{ text: "一段记忆" }]);
+  eq("条目：未知形状给空数组", extractRecallItems({ total: 0 }), []);
+  eq("条目：null 给空数组", extractRecallItems(null), []);
+  eq(
+    "extractRecallText 语义未变（entries 用空行连接）",
+    extractRecallText({ entries: [{ text: "甲" }, { text: "" }, { text: "乙" }] }),
+    "甲\n\n乙",
+  );
+
+  // ---- 渲染：两个占位符、缺 candidates、空模板 ----
+  eq(
+    "渲染：两个占位符都替换",
+    renderRerankPrompt("问：{{message}}\n候选：\n{{candidates}}", "这句话", [
+      { text: "甲" },
+      { text: "乙" },
+    ]),
+    "问：这句话\n候选：\n1. 甲\n2. 乙",
+  );
+  eq(
+    "渲染：缺 candidates 接在末尾",
+    renderRerankPrompt("只问 {{message}}", "消息", ["甲"]),
+    "只问 消息\n\n1. 甲",
+  );
+  eq("渲染：空模板给空串", renderRerankPrompt("", "消息", ["甲"]), "");
+  eq(
+    "渲染：消息里的占位符不二次展开",
+    renderRerankPrompt("{{message}}|{{candidates}}", "消息里有 {{candidates}}", ["甲"]),
+    "消息里有 {{candidates}}|1. 甲",
+  );
+  eq("候选摘要取首 120 字", Array.from(candidateSummary("字".repeat(200))).length, 120);
+  eq("候选摘要压平换行", candidateSummary("第一行\n第二行"), "第一行 第二行");
+  check(
+    "默认重排模板带两个占位符",
+    DEFAULT_RERANK_PROMPT.includes("{{message}}") &&
+      DEFAULT_RERANK_PROMPT.includes("{{candidates}}"),
+  );
+  eq("空配置用默认重排模板", rerankPromptOf({ rerankPrompt: "" }), DEFAULT_RERANK_PROMPT);
+  eq("只有空白也用默认重排模板", rerankPromptOf({ rerankPrompt: "   " }), DEFAULT_RERANK_PROMPT);
+  eq("自定义重排模板原样返回", rerankPromptOf({ rerankPrompt: " 自定义 " }), "自定义");
+
+  // ---- 解析：任务书里的六种输入 + 边界 ----
+  eq("解析：1,3", parseRerankAnswer("1,3", 5), [0, 2]);
+  eq("解析：无", parseRerankAnswer("无", 5), []);
+  eq("解析：3", parseRerankAnswer("3", 5), [2]);
+  eq("解析：1,9,99", parseRerankAnswer("1,9,99", 5), [0]);
+  eq("解析：空串", parseRerankAnswer("", 5), null);
+  eq("解析：跑题（我觉得都还行）", parseRerankAnswer("我觉得都还行", 5), null);
+  eq("解析：全部超范围等同失败", parseRerankAnswer("9,99", 2), null);
+  eq("解析：重复编号去重", parseRerankAnswer("2,2,1", 3), [0, 1]);
+  eq("解析：无 + 数字不当成空数组", parseRerankAnswer("无 1", 2), [0]);
+  eq("解析：total 为 0 时没有合法编号", parseRerankAnswer("1", 0), null);
+  eq("解析：非字符串等同失败", parseRerankAnswer(null, 3), null);
+  eq("超时常量 600ms", RERANK_TIMEOUT_MS, 600);
+  eq("重排 maxTokens 32", RERANK_MAX_TOKENS, 32);
+}
+
+// ================= recall rerank: 链路 =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-recall-rerank");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    rerank: "llm",
+    probe: true,
+  };
+  const entries = [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }];
+  const bodyWith = (list) => ({ status: "ok", result: { rendered: "", digest: "", entries: list } });
+  const contentOf = (result) => result?.payload?.messages?.[0]?.content || "";
+
+  // ---- 默认关：一次模型都不调 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({ utility: () => ({ text: "1" }) });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, rerank: "off" },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "默认关时别问模型" }] },
+      session: { sessionId: "rerank-off" },
+    });
+    check("默认关时照常注入", Boolean(result?.payload));
+    eq("默认关时 utility 一次都没调", fake.calls.utility.length, 0);
+    eq("默认关时 stream 一次都没调", fake.calls.stream.length, 0);
+    check(
+      "默认关时内容全保留",
+      ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
+    );
+  }
+
+  // ---- 选中两条：只注入保留的，探针记一笔 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({ utility: () => ({ text: "1,3" }) });
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "挑出有用的两条" }] },
+      session: { sessionId: "rerank-keep-two" },
+    });
+    check("重排后仍有注入", Boolean(result?.payload));
+    check("保留第一个候选", contentOf(result).includes("第一条"));
+    check("保留第三个候选", contentOf(result).includes("第三条"));
+    check("丢掉没被选中的候选", !contentOf(result).includes("第二条"));
+    eq("rerank 走 utility 一次", fake.calls.utility.length, 1);
+    eq("rerank 不走 stream", fake.calls.stream.length, 0);
+    const req = fake.calls.utility[0];
+    eq("rerank maxTokens", req.maxTokens, RERANK_MAX_TOKENS);
+    eq("rerank temperature", req.temperature, 0);
+    eq("rerank scope app", req.scope, "app");
+    eq("rerank 只有一条 user 消息", req.messages.length, 1);
+    check(
+      "rerank 提示词带消息与编号候选",
+      req.messages[0].content.includes("挑出有用的两条") &&
+        req.messages[0].content.includes("1. 第一条") &&
+        req.messages[0].content.includes("3. 第三条"),
+    );
+    eq("rerank 探针记一次", probes.length, 1);
+    eq("rerank 探针事件名", probes[0].event, "recall/rerank");
+    eq("探针记候选数", probes[0].invocation.candidates, 3);
+    eq("探针记保留数", probes[0].invocation.kept, 2);
+    eq("正常解析不算兜底", probes[0].invocation.fallback, false);
+    check("探针记了耗时", typeof probes[0].invocation.elapsedMs === "number");
+  }
+
+  // ---- 自选模型走 stream，自定义模板生效 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
+    });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          rerankModel: "p1/m1",
+          rerankPrompt: "自定义：{{message}}\n{{candidates}}",
+        },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "自选模型重排" }] },
+      session: { sessionId: "rerank-stream" },
+    });
+    check("stream 重排后仍有注入", Boolean(result?.payload));
+    eq("自选重排走 stream", fake.calls.stream.length, 1);
+    eq("自选重排不走 utility", fake.calls.utility.length, 0);
+    const req = fake.calls.stream[0];
+    eq("重排 stream provider/model", [req.provider, req.model], ["p1", "m1"]);
+    eq("重排 stream temperature", req.temperature, 0);
+    check(
+      "自定义重排模板渲染生效",
+      req.messages[0].content.startsWith("自定义：自选模型重排") &&
+        req.messages[0].content.includes("1. 第一条"),
+    );
+  }
+
+  // ---- 候选只有 1 条：没有可挑的，不问模型 ----
+  {
+    const mock = mockFetch({ body: bodyWith([{ text: "唯一一条" }]) });
+    const fake = modelSdk({ utility: () => ({ text: "无" }) });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "只有一条候选" }] },
+      session: { sessionId: "rerank-one" },
+    });
+    check("单候选照常注入", Boolean(result?.payload));
+    eq("单候选时一次模型都没调", fake.calls.utility.length + fake.calls.stream.length, 0);
+  }
+
+  // ---- 候选 0 条：不问模型，也不注入 ----
+  {
+    const mock = mockFetch({ body: { status: "ok", result: { total: 0 } } });
+    const fake = modelSdk({ utility: () => ({ text: "1" }) });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "一条候选都没有" }] },
+      session: { sessionId: "rerank-zero" },
+    });
+    eq("零候选时不注入", result, undefined);
+    eq("零候选时一次模型都没调", fake.calls.utility.length + fake.calls.stream.length, 0);
+  }
+
+  // ---- 模型明确说“无”：本轮不注入 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({ utility: () => ({ text: "无" }) });
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "一条都用不上" }] },
+      session: { sessionId: "rerank-none" },
+    });
+    eq("模型说无时本轮不注入", result, undefined);
+    eq("模型说无时召回请求照发", mock.calls.length, 1);
+    eq("探针记保留数为 0", probes[0].invocation.kept, 0);
+    eq("模型明确说无不算兜底", probes[0].invocation.fallback, false);
+  }
+
+  // ---- 解析失败（null）：保留全部 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({ utility: () => ({ text: "我觉得都还行" }) });
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "看不懂就全留" }] },
+      session: { sessionId: "rerank-null" },
+    });
+    check("解析失败时仍有注入", Boolean(result?.payload));
+    check(
+      "解析失败时保留全部",
+      ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
+    );
+    eq("解析失败探针记兜底", probes[0].invocation.fallback, true);
+    eq("解析失败探针保留数等于候选数", probes[0].invocation.kept, 3);
+  }
+
+  // ---- 抛错 / 超时：保留全部，并撤销在途请求 ----
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({
+      utility: () => {
+        throw new Error("APP_CAPABILITY_DENIED");
+      },
+    });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "抛错也要全留" }] },
+      session: { sessionId: "rerank-throw" },
+    });
+    check("抛错时仍有注入", Boolean(result?.payload));
+    check(
+      "抛错时保留全部",
+      ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
+    );
+    eq("抛错也 cancel 一次", fake.calls.cancel.length, 1);
+  }
+
+  {
+    const mock = mockFetch({ body: bodyWith(entries) });
+    const fake = modelSdk({ utility: () => new Promise(() => {}) });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const started = Date.now();
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "超时也要全留" }] },
+      session: { sessionId: "rerank-timeout" },
+    });
+    const elapsed = Date.now() - started;
+    check("超时后仍有注入", Boolean(result?.payload));
+    check(
+      "超时后保留全部",
+      ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
+    );
+    check("超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
+    eq("超时后 cancel 一次", fake.calls.cancel.length, 1);
   }
 
   fs.rmSync(dir, { recursive: true, force: true });

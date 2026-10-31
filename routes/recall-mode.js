@@ -11,15 +11,21 @@ import {
   GATE_PROMPT_MAX,
   QUERY_MODES,
   RECALL_GATES,
+  RERANK_MODES,
+  RERANK_PROMPT_MAX,
   normalizeGateModel,
   normalizeGatePrompt,
   normalizeQueryMode,
   normalizeRecallGate,
+  normalizeRerank,
+  normalizeRerankModel,
+  normalizeRerankPrompt,
 } from "../src/ov/settings.js";
 
 const SPECS = Object.freeze({
   recallGate: RECALL_GATES,
   queryMode: QUERY_MODES,
+  rerank: RERANK_MODES,
 });
 
 /** provider/model 的边界与 APPS.md 的可调用模型标识一致：非空、无控制字符、≤128。 */
@@ -30,17 +36,17 @@ const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
  * 判断模型：空串表示用宿主辅助模型，非空必须是 `provider/model`。
  * 形状不对整单拒绝，不剪字符去硬凑。
  */
-function modelRefError(raw) {
-  if (typeof raw !== "string") return "gateModel 必须是字符串";
+function modelRefError(raw, field = "gateModel") {
+  if (typeof raw !== "string") return `${field} 必须是字符串`;
   const value = raw.trim();
   if (!value) return null;
   const cut = value.indexOf("/");
-  if (cut <= 0 || cut === value.length - 1) return "gateModel 必须形如 provider/model";
+  if (cut <= 0 || cut === value.length - 1) return `${field} 必须形如 provider/model`;
   const [provider, model] = [value.slice(0, cut), value.slice(cut + 1)];
   if (Array.from(provider).length > MODEL_FIELD_MAX || Array.from(model).length > MODEL_FIELD_MAX) {
-    return `gateModel 不合法（provider 与 model 各自最长 ${MODEL_FIELD_MAX} 字符）`;
+    return `${field} 不合法（provider 与 model 各自最长 ${MODEL_FIELD_MAX} 字符）`;
   }
-  if (CONTROL_CHARS_RE.test(value)) return "gateModel 不能含控制字符";
+  if (CONTROL_CHARS_RE.test(value)) return `${field} 不能含控制字符`;
   return null;
 }
 
@@ -50,6 +56,9 @@ async function current(ctx) {
     queryMode: normalizeQueryMode(await ctx.config.get("queryMode")),
     gatePrompt: normalizeGatePrompt(await ctx.config.get("gatePrompt")),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
+    rerank: normalizeRerank(await ctx.config.get("rerank")),
+    rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
+    rerankModel: normalizeRerankModel(await ctx.config.get("rerankModel")),
   };
 }
 
@@ -102,6 +111,25 @@ export default function registerRecallModeRoutes(app, ctx) {
       const problem = modelRefError(body.gateModel);
       if (problem) return c.json({ ok: false, error: problem }, 400);
       changes.push(["gateModel", String(body.gateModel).trim()]);
+    }
+
+    if (has(body, "rerankPrompt")) {
+      if (typeof body.rerankPrompt !== "string") {
+        return c.json({ ok: false, error: "rerankPrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.rerankPrompt).length > RERANK_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `rerankPrompt 最多 ${RERANK_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["rerankPrompt", body.rerankPrompt]);
+    }
+
+    if (has(body, "rerankModel")) {
+      const problem = modelRefError(body.rerankModel, "rerankModel");
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push(["rerankModel", String(body.rerankModel).trim()]);
     }
 
     for (const [key, value] of changes) await ctx.config.set(key, value);

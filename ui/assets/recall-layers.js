@@ -6,7 +6,9 @@
 
 export const RECALL_GATES = Object.freeze(["off", "rules", "llm"]);
 export const QUERY_MODES = Object.freeze(["last", "context"]);
+export const RERANK_MODES = Object.freeze(["off", "llm"]);
 export const GATE_PROMPT_MAX = 2000;
+export const RERANK_PROMPT_MAX = 2000;
 
 function oneOf(value, allowed, fallback) {
   return typeof value === "string" && allowed.includes(value) ? value : fallback;
@@ -31,6 +33,22 @@ export function normalizeGatePrompt(value) {
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
 }
 
+/** 与 src/ov/settings.js 的 normalizeRerank 同口径：不认识的、类型不对的一律回 off。 */
+export function normalizeRerank(value) {
+  return oneOf(value, RERANK_MODES, "off");
+}
+
+/** 与 src/ov/settings.js 的 normalizeRerankModel 同口径：空串 = 用宿主辅助模型。 */
+export function normalizeRerankModel(value) {
+  return normalizeGateModel(value);
+}
+
+/** 与 src/ov/settings.js 的 normalizeRerankPrompt 同口径：按字符截断。 */
+export function normalizeRerankPrompt(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, RERANK_PROMPT_MAX).join("");
+}
+
 /**
  * 默认提示词。与 src/memory/recall.js 里的 DEFAULT_GATE_PROMPT 逐字一致。
  *
@@ -46,6 +64,21 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 只回一个词：需要，或不需要。
 
 用户消息：{{message}}`;
+
+/**
+ * 重排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。
+ * HTML 里不嵌这段字：面板加载不了 Node 模块，只能在这里存一份，
+ * 冒烟会断言两边相等，也会断言 HTML 里没有第二份。
+ */
+export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}
+
+下面是从记忆库里查到的候选，每条一行，前面是编号：
+
+{{candidates}}
+
+挑出真正能帮助回答这个问题的候选。只回编号，用逗号分隔，例如 1,3。
+如果一条都用不上，只回两个字：无。
+不要解释。`;
 
 /**
  * textarea 里该显示什么。
@@ -68,6 +101,21 @@ export function promptStatus(text) {
   return "已修改";
 }
 
+/** 重排提示词框的草稿：配置为空时同样把默认模板整段填进去。 */
+export function rerankPromptDraft(configValue, touched = false) {
+  const value = normalizeRerankPrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_RERANK_PROMPT;
+}
+
+/** 重排提示词旁边那行小字：默认 / 已修改 / 空（回默认模板）。 */
+export function rerankPromptStatus(text) {
+  const value = normalizeRerankPrompt(text);
+  if (value === DEFAULT_RERANK_PROMPT) return "当前为默认提示词";
+  if (!value.trim()) return "已修改 · 提示词为空时使用默认模板";
+  return "已修改";
+}
+
 // 服务端回的投影 -> 下拉值。宿主回半个形状时回退默认值，别让下拉变空。
 // 判定口径与 src/ov/settings.js 的 normalizeRecallGate / normalizeQueryMode 一致。
 export function paintLayers(out) {
@@ -82,6 +130,15 @@ export function paintGateConfig(out) {
   return {
     gatePrompt: normalizeGatePrompt(out?.gatePrompt),
     gateModel: normalizeGateModel(out?.gateModel),
+  };
+}
+
+/** 重排三个字段：开关、提示词模板、模型标识。 */
+export function paintRerankConfig(out) {
+  return {
+    rerank: normalizeRerank(out?.rerank),
+    rerankPrompt: normalizeRerankPrompt(out?.rerankPrompt),
+    rerankModel: normalizeRerankModel(out?.rerankModel),
   };
 }
 
@@ -114,9 +171,9 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + llm 提示词与模型来源。 */
+/** 面板用的完整投影：判断 / 查询 + llm 提示词与模型来源 + 重排配置。 */
 export function paintRecallConfig(out) {
-  return { ...paintLayers(out), ...paintGateConfig(out) };
+  return { ...paintLayers(out), ...paintGateConfig(out), ...paintRerankConfig(out) };
 }
 
 /**

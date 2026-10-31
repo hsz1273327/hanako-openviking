@@ -122,6 +122,25 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 
 用户消息：{{message}}`;
 
+/** 重排模板里的两个占位符：当前消息，以及带编号的候选清单。 */
+export const RERANK_MESSAGE_PLACEHOLDER = "{{message}}";
+export const RERANK_CANDIDATES_PLACEHOLDER = "{{candidates}}";
+
+/**
+ * llm 重排的默认提示词模板。导出给测试与面板文案对照。
+ * 面板加载不了 App 的 Node 模块，ui/assets/recall-layers.js 里存了逐字相同的一份，
+ * 冒烟会比对两边；配置里的 rerankPrompt 为空时就用这段。
+ */
+export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}
+
+下面是从记忆库里查到的候选，每条一行，前面是编号：
+
+{{candidates}}
+
+挑出真正能帮助回答这个问题的候选。只回编号，用逗号分隔，例如 1,3。
+如果一条都用不上，只回两个字：无。
+不要解释。`;
+
 /**
  * 模板 + 消息 -> 真正要发给模型的那一段文本。
  *
@@ -142,6 +161,70 @@ export function renderGatePrompt(template, message) {
   }
   if (!body) return text;
   return `${text}\n\n${body}`;
+}
+
+/** 候选摘要：首 120 字、压平换行、去首尾空白。 */
+export function candidateSummary(text) {
+  const body = typeof text === "string" ? text : "";
+  return Array.from(body)
+    .slice(0, 120)
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 候选 -> `1. <摘要>` 每行一条。也接受纯字符串数组，方便测试直接传文本。 */
+function candidateLines(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  return list.map((candidate, index) => {
+    const text =
+      typeof candidate === "string"
+        ? candidate
+        : candidate && typeof candidate === "object"
+          ? candidate.text
+          : "";
+    return `${index + 1}. ${candidateSummary(text)}`;
+  });
+}
+
+/**
+ * 重排模板 + 消息 + 候选 -> 发给模型的那一段文本。
+ *
+ * 两个占位符各自只展开一次，而且是在原模板上单次扫描替换的：
+ * 消息或候选摘要里恰好带着 `{{message}}` / `{{candidates}}` 时，
+ * 它们只是文字，不会被二次替换。模板缺 `{{candidates}}` 时清单接在末尾，隔一空行；
+ * 模板为空返回空串，调用方据此不问模型。
+ */
+export function renderRerankPrompt(template, message, candidates) {
+  const text = typeof template === "string" ? template : "";
+  if (!text) return "";
+  const body = typeof message === "string" ? message : "";
+  const list = candidateLines(candidates).join("\n");
+  const hasCandidates = text.includes(RERANK_CANDIDATES_PLACEHOLDER);
+
+  let out = "";
+  let usedMessage = false;
+  let usedCandidates = false;
+  let index = 0;
+  while (index < text.length) {
+    if (!usedMessage && text.startsWith(RERANK_MESSAGE_PLACEHOLDER, index)) {
+      out += body;
+      usedMessage = true;
+      index += RERANK_MESSAGE_PLACEHOLDER.length;
+      continue;
+    }
+    if (!usedCandidates && text.startsWith(RERANK_CANDIDATES_PLACEHOLDER, index)) {
+      out += list;
+      usedCandidates = true;
+      index += RERANK_CANDIDATES_PLACEHOLDER.length;
+      continue;
+    }
+    out += text[index];
+    index += 1;
+  }
+
+  if (!hasCandidates && list) out = `${out}\n\n${list}`;
+  return out;
 }
 
 /** 判断最多等 600ms；超时后按「召回」处理，不能把这一轮挂在模型上。 */
@@ -168,6 +251,20 @@ export function gatePromptOf(switches) {
  */
 export function gateModelOf(switches) {
   return typeof switches?.gateModel === "string" ? switches.gateModel.trim() : "";
+}
+
+/** 重排模型与 gateModel 同形：空串表示用宿主辅助模型。 */
+export function rerankModelOf(switches) {
+  return typeof switches?.rerankModel === "string" ? switches.rerankModel.trim() : "";
+}
+
+/**
+ * 重排提示词：与 gate 相反，空串不是“不问”，而是“用内置默认模板”。
+ * rerank 本身就是 opt-in 的（默认 off），打开之后总得有个判据。
+ */
+export function rerankPromptOf(switches) {
+  const value = typeof switches?.rerankPrompt === "string" ? switches.rerankPrompt.trim() : "";
+  return value || DEFAULT_RERANK_PROMPT;
 }
 
 /** `provider/model` -> { provider, model }。按第一个斜杠切，模型 id 里允许再有斜杠。 */
@@ -323,6 +420,97 @@ export async function askGateModel(sdk, switches, text) {
   }
 }
 
+/** 重排比判断多要几个编号，但同样不能把这一轮挂在模型上。 */
+export const RERANK_TIMEOUT_MS = 600;
+
+/** 32 个 token 足够吐出几十个编号；再大只会让超时来得更早。 */
+export const RERANK_MAX_TOKENS = 32;
+
+/**
+ * 问宿主模型哪些候选真正有用。通道选择与 gate 完全一致：
+ * rerankModel 为空走 utility（宿主辅助模型），非空（provider/model）走 stream。
+ * 超时 / 抛错都抛给调用方，由调用方决定“保留全部”。
+ */
+export async function askRerankModel(sdk, switches, prompt) {
+  const models = sdk?.models;
+  if (!models) throw new Error("宿主没有提供 ctx.models");
+
+  const ref = rerankModelOf(switches);
+  const picked = ref ? parseModelRef(ref) : null;
+  if (picked && typeof models.stream !== "function") {
+    throw new Error("宿主没有提供 ctx.models.stream");
+  }
+  if (!picked && typeof models.utility !== "function") {
+    throw new Error("宿主没有提供 ctx.models.utility");
+  }
+
+  const requestId = `openviking-rerank-${randomUUID()}`;
+  const base = {
+    requestId,
+    messages: [{ role: "user", content: prompt }],
+    maxTokens: RERANK_MAX_TOKENS,
+    temperature: 0,
+  };
+
+  let work;
+  if (picked) {
+    work = Promise.resolve(
+      models.stream({ ...base, provider: picked.provider, model: picked.model }),
+    ).then(readGateStreamText);
+  } else {
+    work = Promise.resolve(models.utility({ ...base, scope: "app" })).then((result) => {
+      if (typeof result?.text !== "string") throw new Error("utility 没有返回文本");
+      return result.text;
+    });
+  }
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`TIMEOUT ${RERANK_TIMEOUT_MS}ms`)),
+      RERANK_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    return await Promise.race([work, timeout]);
+  } catch (error) {
+    try {
+      Promise.resolve(models.cancel(requestId)).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 模型回答 -> 要保留的候选下标（0 基）。
+ *
+ *   文本含「无」且完全没有数字 -> []（全都用不上）
+ *   提取 1..total 之间的整数、去重、转 0 基 -> 下标数组
+ *   什么都没提取到（包括数字全都越界）-> null（解析失败，调用方保留全部）
+ *
+ * null 与 [] 必须分开：前者是“看不懂，别删东西”，后者是“模型明确说都不要”。
+ */
+export function parseRerankAnswer(text, total) {
+  const body = typeof text === "string" ? text : "";
+  const limit = Number.isFinite(total) ? Math.floor(total) : 0;
+  if (body.includes("无") && !/\d/.test(body)) return [];
+
+  const kept = new Set();
+  for (const match of body.matchAll(/\d+/g)) {
+    const value = Number.parseInt(match[0], 10);
+    if (!Number.isFinite(value)) continue;
+    if (value < 1 || value > limit) continue;
+    kept.add(value - 1);
+  }
+  if (!kept.size) return null;
+  return [...kept].sort((a, b) => a - b);
+}
+
 /** 进程内去重表容量。一个键约 100 字节，200 条足够覆盖同时活跃的几个会话。 */
 export const DEDUP_LIMIT = 200;
 
@@ -383,32 +571,44 @@ function textOf(value) {
 }
 
 /**
- * 从召回响应里读出纯文本，只认实测过的三处，按服务端"最省事到最原始"排列：
- *   1. rendered —— mode=context 时服务端拼好的扁平 XML 块，文档称 ready to inject；
- *   2. digest   —— 摘要，可能为空串；
- *   3. entries[].text —— 原始命中条目，用空行连接。
- * 其余形状一律给空串（调用方据此 return undefined 并告警一次），不猜字段名。
+ * 从召回响应里读出候选条目，只认实测过的三处，按服务端"最省事到最原始"排列：
+ *   1. rendered —— mode=context 时服务端拼好的扁平 XML 块，视为单条；
+ *   2. digest   —— 摘要，视为单条；
+ *   3. entries[].text —— 原始命中条目，逐条保留，跳过空项。
+ * 其余形状一律给空数组（调用方据此 return undefined 并告警一次），不猜字段名。
+ *
+ * 重排必须在拼成一段文本之前做，所以这里保留条目边界；
+ * extractRecallText 只是把它按原有规则拼回去。
  */
-export function extractRecallText(value) {
-  if (typeof value === "string") return value.trim();
-  if (!value || typeof value !== "object") return "";
+export function extractRecallItems(value) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text ? [{ text }] : [];
+  }
+  if (!value || typeof value !== "object") return [];
 
   const rendered = textOf(value.rendered);
-  if (rendered) return rendered;
+  if (rendered) return [{ text: rendered }];
 
   const digest = textOf(value.digest);
-  if (digest) return digest;
+  if (digest) return [{ text: digest }];
 
   if (Array.isArray(value.entries)) {
-    const joined = value.entries
+    return value.entries
       .map((entry) => (entry && typeof entry === "object" ? textOf(entry.text) : ""))
       .filter(Boolean)
-      .join("\n\n")
-      .trim();
-    if (joined) return joined;
+      .map((text) => ({ text }));
   }
 
-  return "";
+  return [];
+}
+
+export function extractRecallText(value) {
+  const text = extractRecallItems(value)
+    .map((item) => item.text)
+    .join("\n\n")
+    .trim();
+  return text;
 }
 
 /** 只报一次：响应形状未识别 + 顶层键名，方便对着真实服务端改代码。 */
@@ -609,12 +809,69 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
-    const text = extractRecallText(result);
-    if (!text) {
+    const items = extractRecallItems(result);
+    if (!items.length) {
       warnShapeOnce(sdk, result);
       log(sdk, "info", `skip: no text in response (session=${sessionId})`);
       return undefined;
     }
+
+    // 重排必须在拼成一段文本之前做：拼完就分不清候选边界了。
+    // 默认 off，一次模型都不问；只有 llm 且候选 ≥ 2 条才值得让模型挑。
+    let kept = items;
+    if (switches.rerank === "llm" && items.length >= 2) {
+      const startedAt = Date.now();
+      let indexes = null;
+      let fallback = false;
+      try {
+        const prompt = renderRerankPrompt(rerankPromptOf(switches), lastText, items);
+        if (!prompt) {
+          // 默认模板永远非空；走到这里只可能是配置成了空且默认被意外绕过。
+          fallback = true;
+        } else {
+          const answer = await askRerankModel(sdk, switches, prompt);
+          indexes = parseRerankAnswer(answer, items.length);
+          // null 是解析失败，不是“全都不要”：看不懂就一条都不删。
+          if (indexes === null) fallback = true;
+        }
+      } catch (error) {
+        fallback = true;
+        log(
+          sdk,
+          "info",
+          `rerank: llm failed, keep all (session=${sessionId}) ${reasonOf(error)}`,
+        );
+      }
+
+      if (indexes) kept = indexes.map((index) => items[index]);
+      const elapsedMs = Date.now() - startedAt;
+
+      if (switches.probe && typeof options.probe === "function") {
+        try {
+          await options.probe("recall/rerank", {
+            session,
+            query: lastText,
+            candidates: items.length,
+            kept: kept.length,
+            fallback,
+            elapsedMs,
+          });
+        } catch {
+          /* 探针写不进去不能影响本轮对话 */
+        }
+      }
+
+      if (!kept.length) {
+        // 模型明确说“一条都用不上”（索引数组为空）：本轮不注入。
+        log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
+        return undefined;
+      }
+    }
+
+    const text = kept
+      .map((item) => item.text)
+      .join("\n\n")
+      .trim();
 
     const block = memoryBlock(text, budget);
     if (!block) {

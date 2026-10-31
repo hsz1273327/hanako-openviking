@@ -25,12 +25,16 @@ import { summarizeChecks } from "./check-summary.js";
 import {
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
+  DEFAULT_RERANK_PROMPT,
   commitLayers,
   modelOptions,
   normalizeGatePrompt,
+  normalizeRerankPrompt,
   paintRecallConfig,
   promptDraft,
   promptStatus,
+  rerankPromptDraft,
+  rerankPromptStatus,
 } from "./recall-layers.js";
 
 const $ = (id) => document.getElementById(id);
@@ -48,6 +52,7 @@ let layersPending = false;
 let layersDirty = false;
 // 用户动过提示词之后，刷新不再拿默认文案去盖他（包括他故意清空的那次）。
 let promptTouched = false;
+let rerankPromptTouched = false;
 // 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
 let peerCache = [];
 let peerWritePending = false;
@@ -357,10 +362,18 @@ function paintGatePanels() {
   if (advanced) advanced.hidden = $("recallGate").value !== "llm";
 }
 
+/** 只有 rerank=llm 才展开重排提示词与模型。 */
+function paintRerankPanels() {
+  const advanced = $("rerankAdvanced");
+  if (advanced) advanced.hidden = $("rerank").value !== "llm";
+}
+
 /** 提示词旁那行小字：默认 / 已修改 / 空（不拦截）。 */
 function paintPromptStatus() {
   const node = $("gatePromptStatus");
   if (node) node.textContent = promptStatus($("gatePrompt").value);
+  const rerankNode = $("rerankPromptStatus");
+  if (rerankNode) rerankNode.textContent = rerankPromptStatus($("rerankPrompt").value);
 }
 
 function setOptions(select, options, value) {
@@ -387,17 +400,19 @@ function setOptions(select, options, value) {
  * 一个下拉选到底：首项是默认，其余是目录里的每个模型。
  *
  * 目录读不到时只留首项、旁边写一行原因，但不禁用这块：默认通道照样能选、能保存。
+ * gate 与 rerank 共用这一份，只换节点和当前值。
  */
-function paintModelSelect() {
-  const select = $("gateModel");
-  const hint = $("gateModelsHint");
+function paintModelSelectInto(selectId, hintId, value) {
+  const select = $(selectId);
+  const hint = $(hintId);
   if (!select) return;
 
   const options = modelCatalog.ok
     ? [DEFAULT_MODEL_OPTION, ...modelOptions(modelCatalog.models)]
     : [DEFAULT_MODEL_OPTION];
-  setOptions(select, options, layers.gateModel);
+  setOptions(select, options, value);
 
+  if (!hint) return;
   if (!modelCatalog.loaded) {
     hint.hidden = false;
     hint.textContent = "正在读取模型目录…";
@@ -411,6 +426,11 @@ function paintModelSelect() {
     hint.hidden = true;
     hint.textContent = "";
   }
+}
+
+function paintModelSelect() {
+  paintModelSelectInto("gateModel", "gateModelsHint", layers.gateModel);
+  paintModelSelectInto("rerankModel", "rerankModelsHint", layers.rerankModel);
 }
 
 function renderModels(payload) {
@@ -572,13 +592,18 @@ function applyLayers(next) {
   layers = paintRecallConfig(next);
   $("recallGate").value = layers.recallGate;
   $("queryMode").value = layers.queryMode;
+  $("rerank").value = layers.rerank;
   // 用户正在改提示词时不要被一次刷新抢走光标与内容。
   if (document.activeElement !== $("gatePrompt")) {
     // 配置为空时拿默认提示词当草稿填上：一打开就能直接改，不靠 placeholder。
     $("gatePrompt").value = promptDraft(layers.gatePrompt, promptTouched);
   }
+  if (document.activeElement !== $("rerankPrompt")) {
+    $("rerankPrompt").value = rerankPromptDraft(layers.rerankPrompt, rerankPromptTouched);
+  }
   paintPromptStatus();
   paintGatePanels();
+  paintRerankPanels();
   paintModelSelect();
 }
 
@@ -588,6 +613,9 @@ function readLayers() {
     queryMode: $("queryMode").value,
     gatePrompt: normalizeGatePrompt($("gatePrompt").value),
     gateModel: $("gateModel").value,
+    rerank: $("rerank").value,
+    rerankPrompt: normalizeRerankPrompt($("rerankPrompt").value),
+    rerankModel: $("rerankModel").value,
   };
 }
 
@@ -596,6 +624,9 @@ const LAYER_KEYS = [
   "queryMode",
   "gatePrompt",
   "gateModel",
+  "rerank",
+  "rerankPrompt",
+  "rerankModel",
 ];
 
 function sameLayers(a, b) {
@@ -686,6 +717,22 @@ $("gateResetPrompt").addEventListener("click", () => {
 });
 
 $("gateModel").addEventListener("change", saveLayers);
+
+// 结果重排：第三项下拉即时提交，展开块跟着它显隐。
+$("rerank").addEventListener("change", saveLayers);
+$("rerank").addEventListener("change", paintRerankPanels);
+$("rerankPrompt").addEventListener("input", () => {
+  rerankPromptTouched = true;
+  paintPromptStatus();
+});
+$("rerankPrompt").addEventListener("change", saveLayers);
+$("rerankResetPrompt").addEventListener("click", () => {
+  rerankPromptTouched = true;
+  $("rerankPrompt").value = DEFAULT_RERANK_PROMPT;
+  paintPromptStatus();
+  saveLayers();
+});
+$("rerankModel").addEventListener("change", saveLayers);
 
 for (const id of ["serverUrl", "apiKey", "peerPrefix"]) {
   $(id).addEventListener("change", saveConnection);

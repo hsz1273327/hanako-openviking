@@ -128,6 +128,14 @@
           </select>
           <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
         </div>
+        <div class="field">
+          <label for="rerank">结果重排</label>
+          <select id="rerank">
+            <option value="off">关</option>
+            <option value="llm">模型判断</option>
+          </select>
+          <span class="field-hint">开启后用同一个模型通道挑出真正有用的候选；解析失败、超时或没权限时一律全保留。</span>
+        </div>
       </div>
 
       <!-- 只有 recallGate=llm 时才展开。提示词框里放的就是当前生效的提示词：
@@ -153,6 +161,28 @@
             <option value="">默认（宿主辅助模型）</option>
           </select>
           <span id="gateModelsHint" class="field-hint" hidden></span>
+        </div>
+      </div>
+
+      <!-- 只有 rerank=llm 时才展开。与 gate 共用 gate-advanced / prompt-head 组件；
+           默认模板不写进 HTML，由脚本从 recall-layers.js 里填，避免两份字面量走样。 -->
+      <div id="rerankAdvanced" class="gate-advanced" hidden>
+        <div class="field">
+          <div class="prompt-head">
+            <label for="rerankPrompt">重排提示词</label>
+            <span id="rerankPromptStatus" class="prompt-status"></span>
+            <button id="rerankResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
+          </div>
+          <textarea id="rerankPrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
+          <span class="field-hint">用 {{message}} 表示当前这条用户消息，用 {{candidates}} 表示候选清单；没写 {{candidates}} 的话，清单会自动接在末尾。</span>
+        </div>
+
+        <div class="field">
+          <label for="rerankModel">重排模型</label>
+          <select id="rerankModel">
+            <option value="">默认（宿主辅助模型）</option>
+          </select>
+          <span id="rerankModelsHint" class="field-hint" hidden></span>
         </div>
       </div>
 

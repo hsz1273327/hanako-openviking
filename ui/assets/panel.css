@@ -257,7 +257,7 @@ html, body {
 
 .recall-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
   min-width: 0;
   transition: opacity 0.2s;
@@ -268,7 +268,7 @@ html, body {
   .recall-grid { grid-template-columns: 1fr; }
 }
 
-/* llm 判断的展开区：提示词 + 模型来源。默认 hidden，由脚本切换。 */
+/* llm 判断 / 重排的展开区：提示词 + 模型。默认 hidden，由脚本切换。 */
 .gate-advanced {
   display: grid;
   gap: 12px;
