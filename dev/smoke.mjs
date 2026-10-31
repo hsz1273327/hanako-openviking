@@ -59,6 +59,7 @@ import {
   shouldSkipRecall,
   DEDUP_LIMIT,
   GATE_MAX_CHARS,
+  GATE_QUESTION_WORDS,
   MEMORY_MAX_TOKENS,
 } from "../src/memory/recall.js";
 import {
@@ -2487,6 +2488,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("把这个删了 -> 召回", shouldSkipRecall("把这个删了", "rules"), false);
   eq("继续 -> 召回", shouldSkipRecall("继续", "rules"), false);
   eq("那为啥不是默认开启? -> 召回", shouldSkipRecall("那为啥不是默认开启?", "rules"), false);
+
+  // ---- 口语疑问词：书面词表漏掉的那批 ----
+  // 这几句都很短、也没有问号，但都是问事，必须召回；只靠「为什么/怎么」收不住它们。
+  eq("啥意思 -> 召回（啥）", shouldSkipRecall("啥意思", "rules"), false);
+  eq("咋办 -> 召回（咋）", shouldSkipRecall("咋办", "rules"), false);
+  eq("为啥 -> 召回（为啥）", shouldSkipRecall("为啥", "rules"), false);
+  eq("干嘛呢 -> 召回（干嘛）", shouldSkipRecall("干嘛呢", "rules"), false);
+  eq("几号 -> 召回（几）", shouldSkipRecall("几号", "rules"), false);
+  eq("如何 -> 召回（何）", shouldSkipRecall("如何", "rules"), false);
+  eq("怎样 -> 召回（怎样）", shouldSkipRecall("怎样", "rules"), false);
+  eq("为什么 -> 召回（为什么）", shouldSkipRecall("为什么", "rules"), false);
+
+  // 反例：补词只能多召回，不能把真正的操作指令也放进来。
+  // 这五句都是「说完就完、不指向任何东西」的短指令，仍然该跳过。
+  eq("运行测试 -> 仍跳过", shouldSkipRecall("运行测试", "rules"), true);
+  eq("重启一下服务 -> 仍跳过", shouldSkipRecall("重启一下服务", "rules"), true);
+  eq("看看日志 -> 仍跳过", shouldSkipRecall("看看日志", "rules"), true);
+  eq("嗯 -> 仍跳过", shouldSkipRecall("嗯", "rules"), true);
+  eq("好 -> 仍跳过", shouldSkipRecall("好", "rules"), true);
+
+  // 指代 / 问号本来就召回，补了口语词之后不能反过来变成跳过。
+  eq("这啥 -> 召回（指代 + 疑问词）", shouldSkipRecall("这啥", "rules"), false);
+  eq("它在哪 -> 召回（指代 + 疑问词）", shouldSkipRecall("它在哪", "rules"), false);
+  eq("那为啥不是默认开启? -> 召回（指代 + 疑问词 + 问号）", shouldSkipRecall("那为啥不是默认开启?", "rules"), false);
+
+  // 词表本身：口语词确实在里面，不是靠别的判据蒙对的。
+  check(
+    "口语疑问词都在表里",
+    ["啥", "咋", "干嘛", "干吗", "几", "何", "怎样"].every((w) => GATE_QUESTION_WORDS.includes(w)),
+  );
 
   // off / 非法值永远不跳
   eq("off 永远不跳过", shouldSkipRecall("运行测试", "off"), false);
