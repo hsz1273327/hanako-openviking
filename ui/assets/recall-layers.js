@@ -16,13 +16,20 @@ export const RERANK_CHANNEL_LABELS = Object.freeze({
 });
 // 每种通道的默认超时（ms）。与 src/memory/recall.js 的常量同值：
 // systemone 一次问完全部候选，候选越多越慢，所以给得比另两种宽。
+// 后端在没手配超时时会按候选数自适应（每条 +700，上限 8000），
+// 这里显示的是基础值，也就是候选很少时的那个数。
 export const RERANK_CHANNEL_TIMEOUT_DEFAULTS = Object.freeze({
   rerank: 800,
-  systemone: 2500,
+  systemone: 3500,
   model: 1500,
 });
 // systemone 的超时上限，配得再大也只认这个数。
-export const SYSTEMONE_TIMEOUT_MAX = 5000;
+export const SYSTEMONE_TIMEOUT_MAX = 8000;
+// 自适应超时的两个参数：基础值与每条候选的增量。
+export const SYSTEMONE_TIMEOUT_BASE = 3500;
+export const SYSTEMONE_TIMEOUT_STEP = 700;
+// systemone 一次只问前这么多条候选。
+export const SYSTEMONE_MAX_CANDIDATES = 5;
 export const GATE_PROMPT_MAX = 2000;
 export const RERANK_PROMPT_MAX = 2000;
 

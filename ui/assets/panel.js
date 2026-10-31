@@ -31,7 +31,10 @@ import {
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   RERANK_CHANNEL_TYPES,
+  SYSTEMONE_MAX_CANDIDATES,
+  SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_MAX,
+  SYSTEMONE_TIMEOUT_STEP,
   commitLayers,
   emptyRerankChannel,
   isCompleteRerankChannel,
@@ -517,6 +520,10 @@ function renderRerankChannels(list) {
     );
     timeout.step = "100";
     timeout.placeholder = String(RERANK_CHANNEL_TIMEOUT_DEFAULTS[channel.type] ?? 800);
+    timeout.title =
+      channel.type === "systemone"
+        ? `留空 = 自适应：${SYSTEMONE_TIMEOUT_BASE}ms 起，每多一条候选再给 ${SYSTEMONE_TIMEOUT_STEP}ms，上限 ${SYSTEMONE_TIMEOUT_MAX}ms；一次只问前 ${SYSTEMONE_MAX_CANDIDATES} 条`
+        : "留空 = 用该类型的默认值";
     timeout.value = channel.timeoutMs ? String(channel.timeoutMs) : "";
     timeout.addEventListener("change", () => {
       const text = timeout.value.trim();

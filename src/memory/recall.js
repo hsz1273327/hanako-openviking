@@ -448,14 +448,21 @@ export const RERANK_SAMPLE_ITEMS_MAX = 20;
 /**
  * systemone 的默认超时与上限。
  *
- * 它一次问完全部候选，一次前向比一条一次更贵：5 条约 2.9s，8 条接近 5s。
- * 所以缺省给 2500，配得再大也只认 5000——超了不如直接弃权，别把这一轮挂住。
+ * 它一次问完全部候选：实测 5 条约 2.9s，8 条接近 5s。
+ * 所以基础值给 3500（留给 5 条约 20% 余量），候选每多一条再加 700，
+ * 上限 8000——超了不如直接弃权，别把这一轮挂住。
  */
-export const SYSTEMONE_CHANNEL_TIMEOUT_MS = 2500;
-export const SYSTEMONE_TIMEOUT_MAX_MS = 5000;
+export const SYSTEMONE_CHANNEL_TIMEOUT_MS = 3500;
+export const SYSTEMONE_TIMEOUT_MAX_MS = 8000;
 
-/** systemone 一次只问前这么多条：每题一次前向，再多的收益抵不过延迟。 */
-export const SYSTEMONE_MAX_CANDIDATES = 8;
+/**
+ * systemone 一次只问前这么多条：每题一次前向，实测 5 条约 2.9s，
+ * 再往上就顶超时上限了，多问的收益抵不过整路弃权。
+ */
+export const SYSTEMONE_MAX_CANDIDATES = 5;
+
+/** 不手动配超时时，每多一条候选多给这么多时间。 */
+export const SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS = 700;
 
 /** 送进 systemone 的单条候选正文上限。全部候选挤同一个 state，长条目会挤掉后面的人。 */
 export const SYSTEMONE_DOCUMENT_CHARS = 500;
@@ -568,6 +575,25 @@ function channelTimeout(channel, fallback, max = 30000) {
   const value = Number(channel?.timeoutMs);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.min(Math.floor(value), max);
+}
+
+/**
+ * systemone 的超时：手动配了就用配的（仍受上限管），没配就按候选数自适应。
+ *
+ * 实测 5 条约 2.9s，所以基础值给 3500；每条候选再多给 700，顶到上限为止。
+ * 固定一个数不行：5 条和 1 条差一个数量级，按大的给会让 1 条那种白等。
+ */
+export function systemoneTimeoutFor(channel, count) {
+  const given = Number(channel?.timeoutMs);
+  if (Number.isFinite(given) && given > 0) {
+    return Math.min(Math.floor(given), SYSTEMONE_TIMEOUT_MAX_MS);
+  }
+  const asked = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  const adaptive = Math.max(
+    SYSTEMONE_CHANNEL_TIMEOUT_MS,
+    asked * SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS,
+  );
+  return Math.min(adaptive, SYSTEMONE_TIMEOUT_MAX_MS);
 }
 
 /** 分数只在 0..1 有意义。解析不出数字给 null，由调用方判为这一路失败。 */
@@ -741,7 +767,7 @@ async function scoreSystemOneChannel(sdk, channel, query, items) {
     sdk,
     channelEndpoint(channel.url, "/v1/systemone"),
     { model: channel.model, state, questions },
-    channelTimeout(channel, SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_MAX_MS),
+    systemoneTimeoutFor(channel, count),
   );
 
   const answers = data?.answers;

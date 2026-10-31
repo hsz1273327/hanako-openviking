@@ -90,9 +90,11 @@ import {
   readRerankSample,
   buildSystemOneState,
   systemoneInstructions,
+  systemoneTimeoutFor,
   SYSTEMONE_MAX_CANDIDATES,
   SYSTEMONE_CHANNEL_TIMEOUT_MS,
   SYSTEMONE_TIMEOUT_MAX_MS,
+  SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS,
   SYSTEMONE_DOCUMENT_CHARS,
   SYSTEMONE_STATE_MAX_CHARS,
   RERANK_CHANNEL_TIMEOUT_MS,
@@ -140,6 +142,9 @@ import {
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SYSTEMONE_TIMEOUT_MAX as UI_SYSTEMONE_TIMEOUT_MAX,
+  SYSTEMONE_TIMEOUT_BASE as UI_SYSTEMONE_TIMEOUT_BASE,
+  SYSTEMONE_TIMEOUT_STEP as UI_SYSTEMONE_TIMEOUT_STEP,
+  SYSTEMONE_MAX_CANDIDATES as UI_SYSTEMONE_MAX_CANDIDATES,
   commitLayers,
   emptyRerankChannel,
   isCompleteRerankChannel,
@@ -2038,6 +2043,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     model: RERANK_MODEL_CHANNEL_TIMEOUT_MS,
   });
   eq("systemone 超时上限与后端一致", UI_SYSTEMONE_TIMEOUT_MAX, SYSTEMONE_TIMEOUT_MAX_MS);
+  eq(
+    "自适应两个参数与后端一致",
+    [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
+    [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
+  );
+  eq("候选上限与后端一致", UI_SYSTEMONE_MAX_CANDIDATES, SYSTEMONE_MAX_CANDIDATES);
+  check(
+    "面板提示写明默认 5 条",
+    html.includes("默认 5 条") && html.includes(`只问前 ${SYSTEMONE_MAX_CANDIDATES}`) === false,
+  );
   check("通道行能编辑超时", panelJs.includes('channelCell("超时（ms）", timeout)'));
   check(
     "超时那一格注明候选越多越慢",
@@ -4637,7 +4652,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("systemone 序号跟着候选走", calls[0].body.questions.r2.instructions, systemoneInstructions(2));
     eq("systemone answers.rN 还原到候选下标", outcome.channels[0].scores, [0.6, 0.9]);
     eq("systemone 标准化后拉平", outcome.merged, [0, 1]);
-    eq("systemone 走默认 2500ms 超时", calls[0].init.timeoutMs, 2500);
+    eq("systemone 走默认自适应超时（2 条 = 3500）", calls[0].init.timeoutMs, 3500);
     resetRuntimeTransport();
   }
 
@@ -4720,7 +4735,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     resetRuntimeTransport();
   }
 
-  // ---- systemone：只问前 8 条，超出的按未打分处理 ----
+  // ---- systemone：只问前 5 条，超出的按未打分处理 ----
   {
     const calls = [];
     const answers = {};
@@ -4734,36 +4749,52 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       },
     });
     const sdk = recallSdk({ values: {}, dataDir: dir });
-    const nine = Array.from({ length: SYSTEMONE_MAX_CANDIDATES + 1 }, (_, index) => ({
+    const six = Array.from({ length: SYSTEMONE_MAX_CANDIDATES + 1 }, (_, index) => ({
       text: `候选${index + 1}`,
     }));
     const outcome = await runRerankChannels({
       sdk,
       switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
       query: "用户问题",
-      items: nine,
+      items: six,
       channels: [
         { type: "systemone", name: "", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
       ],
     });
-    eq("systemone 只问前 8 条", Object.keys(calls[0].body.questions).length, SYSTEMONE_MAX_CANDIDATES);
+    eq(
+      "systemone 只问前 5 条",
+      Object.keys(calls[0].body.questions).length,
+      SYSTEMONE_MAX_CANDIDATES,
+    );
     check(
-      "systemone state 只列前 8 条",
-      calls[0].body.state.includes("8. 候选8") && !calls[0].body.state.includes("9. 候选9"),
+      "systemone state 只列前 5 条",
+      calls[0].body.state.includes(`${SYSTEMONE_MAX_CANDIDATES}. 候选${SYSTEMONE_MAX_CANDIDATES}`) &&
+        !calls[0].body.state.includes(`6. 候选6`),
       calls[0].body.state.split("\n").slice(-1)[0],
     );
-    eq(
-      "systemone 超出的候选记为 null",
-      outcome.channels[0].scores,
-      [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, null],
-    );
-    eq("systemone 候选上限是 8", SYSTEMONE_MAX_CANDIDATES, 8);
+    eq("systemone 超出的候选记为 null", outcome.channels[0].scores, [0.1, 0.2, 0.3, 0.4, 0.5, null]);
+    eq("systemone 候选上限是 5", SYSTEMONE_MAX_CANDIDATES, 5);
     resetRuntimeTransport();
   }
 
-  // ---- systemone：超时可配，上限 5000 ----
+  // ---- systemone：不手动配超时时按候选数自适应 ----
   {
-    for (const [given, expected] of [[1200, 1200], [9999, 5000]]) {
+    eq("自适应：1 条 = 基础值 3500", systemoneTimeoutFor({}, 1), 3500);
+    eq("自适应：5 条 = 3500", systemoneTimeoutFor({}, 5), 3500);
+    eq("自适应：6 条 = 4200（超上限前先按每条约 700）", systemoneTimeoutFor({}, 6), 4200);
+    eq("自适应：8 条 = 5600", systemoneTimeoutFor({}, 8), 5600);
+    eq("自适应：12 条被压到上限 8000", systemoneTimeoutFor({}, 12), 8000);
+    eq("手动配 2000 不自适应", systemoneTimeoutFor({ timeoutMs: 2000 }, 5), 2000);
+    eq("手动配 99999 被压到上限 8000", systemoneTimeoutFor({ timeoutMs: 99999 }, 5), 8000);
+    eq("空串 / 非数字当没配", [
+      systemoneTimeoutFor({ timeoutMs: "" }, 5),
+      systemoneTimeoutFor({ timeoutMs: "abc" }, 5),
+    ], [3500, 3500]);
+  }
+
+  // ---- systemone：超时可配，上限 8000 ----
+  {
+    for (const [given, expected] of [[1200, 1200], [9999, 8000]]) {
       const calls = [];
       setRuntimeTransport({
         send: async (url, init) => {
@@ -4797,8 +4828,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       eq(`systemone 超时可配：${given} -> ${expected}`, calls[0].init.timeoutMs, expected);
       resetRuntimeTransport();
     }
-    eq("systemone 默认 2500ms 超时常量", SYSTEMONE_CHANNEL_TIMEOUT_MS, 2500);
-    eq("systemone 超时上限 5000ms", SYSTEMONE_TIMEOUT_MAX_MS, 5000);
+    eq("systemone 默认 3500ms 超时常量", SYSTEMONE_CHANNEL_TIMEOUT_MS, 3500);
+    eq("systemone 超时上限 8000ms", SYSTEMONE_TIMEOUT_MAX_MS, 8000);
     eq("rerank 默认仍是 800ms", RERANK_CHANNEL_TIMEOUT_MS, 800);
     eq("model 默认仍是 1500ms", RERANK_MODEL_CHANNEL_TIMEOUT_MS, 1500);
   }
