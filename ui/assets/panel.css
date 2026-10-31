@@ -268,6 +268,35 @@ html, body {
   .recall-grid { grid-template-columns: 1fr; }
 }
 
+/* llm 判断的展开区：提示词 + 模型来源。默认 hidden，由脚本切换。 */
+.gate-advanced {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(128, 128, 128, 0.14);
+  transition: opacity 0.2s;
+}
+.gate-advanced.dim { opacity: 0.45; }
+.gate-advanced .field { margin-bottom: 0; }
+
+/* 提示词那一行：标签、状态、恢复默认按钮排在一起，状态占剩余宽度。
+   状态字不抢眼，但清空时要能看见“不会拦截”的提醒。 */
+.prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.prompt-head label { margin: 0; }
+.prompt-status {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  opacity: 0.55;
+  text-align: right;
+}
+.prompt-head .btn { flex: none; }
+
 /* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」，
    层次靠这条线分开，不另起一栏。 */
 .recall-sep {
@@ -343,6 +372,22 @@ html, body {
 }
 .field select { cursor: pointer; }
 .field input::placeholder { color: currentColor; opacity: 0.35; }
+.field textarea {
+  font: inherit;
+  font-size: 12.5px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  background: rgba(128, 128, 128, 0.05);
+  color: inherit;
+  min-width: 0;
+  min-height: 84px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.field textarea::placeholder { color: currentColor; opacity: 0.35; }
 .field-hint {
   font-size: 10.5px;
   line-height: 1.4;
@@ -350,6 +395,11 @@ html, body {
 }
 .field input:focus,
 .field select:focus {
+  outline: none;
+  border-color: rgba(111, 143, 104, 0.7);
+  box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);
+}
+.field textarea:focus {
   outline: none;
   border-color: rgba(111, 143, 104, 0.7);
   box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);

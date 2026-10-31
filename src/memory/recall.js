@@ -9,7 +9,7 @@
 // 一律 return undefined（不干预）。调用方拿回 undefined 就不会改载荷，本轮对话照常。
 // 注意 readOnly 只约束写回，不约束召回：观察模式仍然要能看到记忆。
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
@@ -97,6 +97,195 @@ export function isShortOperationCommand(text, limit = GATE_MAX_CHARS) {
 export function shouldSkipRecall(text, gate = "off") {
   if (gate !== "rules") return false;
   return isShortOperationCommand(text);
+}
+
+/**
+ * llm 判断的默认提示词。导出给测试与面板文案对照。
+ * 面板里的 textarea 以它作为草稿（配置为空时直接填进去让人改），两边必须是同一段文字，
+ * 冒烟会比对 ui/assets/recall-layers.js 里的副本与这里的字面量。
+ */
+export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答它需不需要先查历史记忆。
+
+需要查的情况：问过去做过什么、提到「上次」「之前」「那个」「继续」，或者要参考已经定过的决定。
+
+不需要查的情况：纯操作指令，例如运行命令、删除文件、重启服务，并且不指向任何历史内容。
+
+只回一个词：需要，或不需要。`;
+
+/** 判断最多等 600ms；超时后按「召回」处理，不能把这一轮挂在模型上。 */
+export const GATE_TIMEOUT_MS = 600;
+
+/** 判断只要一个词，给 8 个 token 足够；再大只会让超时来得更早。 */
+export const GATE_MAX_TOKENS = 8;
+
+/**
+ * 空串表示“没有提示词”，不是“用默认”。
+ *
+ * 这层语义改过一次：早先空值会静默回退成 DEFAULT_GATE_PROMPT，用户以为自己在用默认、
+ * 其实配置里是空的，清空也清不掉。现在空就是空，由调用方决定空的时候怎么办
+ * （llm 档的处理是“不拦截”，见 handler 里那段）。
+ */
+export function gatePromptOf(switches) {
+  return typeof switches?.gatePrompt === "string" ? switches.gatePrompt.trim() : "";
+}
+
+/**
+ * 判断模型的标识：空串意味着“用宿主辅助模型”，非空形如 `provider/model`。
+ *
+ * 不再有单独的“模型来源”开关：值本身就说清了走哪条通道，少一层就少一处不一致。
+ */
+export function gateModelOf(switches) {
+  return typeof switches?.gateModel === "string" ? switches.gateModel.trim() : "";
+}
+
+/** `provider/model` -> { provider, model }。按第一个斜杠切，模型 id 里允许再有斜杠。 */
+export function parseModelRef(ref) {
+  const value = typeof ref === "string" ? ref.trim() : "";
+  const cut = value.indexOf("/");
+  if (cut <= 0) return null;
+  const provider = value.slice(0, cut).trim();
+  const model = value.slice(cut + 1).trim();
+  if (!provider || !model) return null;
+  return { provider, model };
+}
+
+/**
+ * 模型回答 -> 是否召回。
+ *
+ * 顺序不能反：「不需要」里包含「需要」，必须先判否定。
+ * 空、跑题、乱码都召回——这是安全默认，判断失败不能变成漏召回。
+ */
+export function gateAnswerRecalls(answer) {
+  const text = typeof answer === "string" ? answer : "";
+  if (text.includes("不需要")) return false;
+  if (text.includes("需要")) return true;
+  // 显式安全分支：模型没给明确答案时宁可多召回，也不静默漏掉历史。
+  return true;
+}
+
+/** 把一行 NDJSON 吃进文本或抛错；error 事件必须立即失败。 */
+function consumeGateStreamLine(line, state) {
+  const raw = line.trim();
+  if (!raw) return;
+  let event;
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    throw new Error("模型流不是合法 NDJSON");
+  }
+  if (event?.type === "text-delta") {
+    if (typeof event.delta === "string") state.text += event.delta;
+    return;
+  }
+  if (event?.type === "error") {
+    throw new Error(String(event.message || event.code || "模型流返回错误"));
+  }
+}
+
+/** 从 stream 的 NDJSON 里拼 text-delta；遇到 error 事件立刻抛。 */
+export async function readGateStreamText(response) {
+  if (!response || typeof response !== "object") {
+    throw new Error("模型流没有返回响应");
+  }
+
+  const state = { text: "" };
+  const body = response.body;
+  // 测试或宿主给了普通 Response 时走 text() 兜底，逻辑仍是同一套逐行解析。
+  if (!body || typeof body.getReader !== "function") {
+    const raw = typeof response.text === "function" ? await response.text() : "";
+    for (const line of String(raw).split("\n")) consumeGateStreamLine(line, state);
+    return state.text;
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, index);
+        buffer = buffer.slice(index + 1);
+        consumeGateStreamLine(line, state);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeGateStreamLine(buffer, state);
+    return state.text;
+  } catch (error) {
+    // 失败时释放读者；不 await，取消本身不能再把这一轮挂住。
+    try {
+      Promise.resolve(reader.cancel()).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  }
+}
+
+/**
+ * 问宿主模型这条消息要不要查记忆。
+ *
+ * 只有两个通道，不再分“默认 / 自选”两层：gateModel 为空走 utility（宿主自己的辅助
+ * 模型配置），非空（形如 provider/model）走 stream。两条路都用 Promise.race 加 600ms
+ * 上限：超时/失败主动 cancel，让宿主那边尽快收尾；调用方把异常当作「召回」。
+ */
+export async function askGateModel(sdk, switches, text) {
+  const models = sdk?.models;
+  if (!models) throw new Error("宿主没有提供 ctx.models");
+
+  const ref = gateModelOf(switches);
+  const picked = ref ? parseModelRef(ref) : null;
+  // 只检查当前这条通道需要的方法：自选只要 stream，默认只要 utility。
+  if (picked && typeof models.stream !== "function") {
+    throw new Error("宿主没有提供 ctx.models.stream");
+  }
+  if (!picked && typeof models.utility !== "function") {
+    throw new Error("宿主没有提供 ctx.models.utility");
+  }
+
+  const requestId = `openviking-gate-${randomUUID()}`;
+  const base = {
+    requestId,
+    messages: [{ role: "user", content: text }],
+    systemPrompt: gatePromptOf(switches),
+    maxTokens: GATE_MAX_TOKENS,
+    temperature: 0,
+  };
+
+  let work;
+  if (picked) {
+    work = Promise.resolve(
+      models.stream({ ...base, provider: picked.provider, model: picked.model }),
+    ).then(readGateStreamText);
+  } else {
+    work = Promise.resolve(models.utility({ ...base, scope: "app" })).then((result) => {
+      if (typeof result?.text !== "string") throw new Error("utility 没有返回文本");
+      return result.text;
+    });
+  }
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`TIMEOUT ${GATE_TIMEOUT_MS}ms`)), GATE_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([work, timeout]);
+  } catch (error) {
+    // 超时、error 事件、宿主播错都撤销在途请求；不 await，避免取消本身再挂住。
+    try {
+      Promise.resolve(models.cancel(requestId)).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 进程内去重表容量。一个键约 100 字节，200 条足够覆盖同时活跃的几个会话。 */
@@ -307,18 +496,48 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
-    // 召回判断：只跳过极短的纯操作指令，且在发请求之前。
     // 判据看最后一条用户原话，不看拼接后的查询：gate 回答的是“这句话需不需要查记忆”，
     // queryMode 回答的是“用什么去查”，两件事分开。若用拼接结果判断，context 模式
     // 一旦有历史就必然超 8 字，rules 会被整个抵消掉。
-    if (shouldSkipRecall(lastText, switches.recallGate)) {
-      log(sdk, "info", `gate: skipped (session=${sessionId} chars=${charLength(lastText)})`);
+    // 召回判断：rules 只看极短纯操作指令；llm 让宿主模型判断。
+    // llm 失败 / 超时 / 没权限一律按「召回」走——判断失败不能变成漏召回。
+    let gateSkip = null;
+    if (switches.recallGate === "llm") {
+      const prompt = gatePromptOf(switches);
+      if (!prompt) {
+        // 空提示词不是“用默认”：没有判据就不拦，模型根本不问。
+        log(sdk, "info", `gate: llm prompt empty, recall anyway (session=${sessionId})`);
+      } else {
+        try {
+          const answer = await askGateModel(sdk, switches, lastText);
+          if (!gateAnswerRecalls(answer)) {
+            gateSkip = { by: "llm", reason: "llm-no-need" };
+          }
+        } catch (error) {
+          log(
+            sdk,
+            "info",
+            `gate: llm failed, recall anyway (session=${sessionId}) ${reasonOf(error)}`,
+          );
+        }
+      }
+    } else if (shouldSkipRecall(lastText, switches.recallGate)) {
+      gateSkip = { by: "rules", reason: "short-operation-command" };
+    }
+
+    if (gateSkip) {
+      log(
+        sdk,
+        "info",
+        `gate: skipped by=${gateSkip.by} (session=${sessionId} chars=${charLength(lastText)})`,
+      );
       if (switches.probe && typeof options.probe === "function") {
         try {
           await options.probe("recall/gate-skip", {
             session,
             query: lastText,
-            reason: "short-operation-command",
+            reason: gateSkip.reason,
+            by: gateSkip.by,
           });
         } catch {
           /* 探针写不进去不能影响本轮对话 */

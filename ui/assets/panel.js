@@ -5,8 +5,9 @@
 //   GET  /probe     日志尾部
 //   GET  /controls  六个开关 + 召回范围 + 超时 + 预算
 //   POST /controls  改上面这组
-//   GET  /recall-mode  召回判断 / 召回查询
-//   POST /recall-mode  改上面这两个（面板「召回管理」栏里的两个下拉，整单提交）
+//   GET  /recall-mode  召回判断 / 召回查询 / llm 提示词与判断模型
+//   POST /recall-mode  改上面这组（面板「召回管理」栏，整单提交）
+//   GET  /models       宿主公开模型目录（自选模型下拉的选项）
 //   POST /conn      改连接三字段（地址 / key / 门牌前缀）
 //   GET  /peers     中枢里的 peer + 是否排除
 //   POST /peers     改排除名单
@@ -21,7 +22,16 @@ import { statusTone } from "./check-tone.js";
 // 服务端检查项的摘要与状态词：纯函数，冒烟直接验。
 import { summarizeChecks } from "./check-summary.js";
 // 召回那排下拉的状态与提交：整单校验、失败回滚，纯逻辑单独一份，冒烟直接验。
-import { commitLayers, paintLayers } from "./recall-layers.js";
+import {
+  DEFAULT_GATE_PROMPT,
+  DEFAULT_MODEL_OPTION,
+  commitLayers,
+  modelOptions,
+  normalizeGatePrompt,
+  paintRecallConfig,
+  promptDraft,
+  promptStatus,
+} from "./recall-layers.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,12 +43,17 @@ const SWITCH_KEYS = ["skillRouting", "probe"];
 let controls = null;
 let logOpen = false;
 // 上一次确认过的召回策略（服务端回的或默认值）。提交失败时回滚到这份。
-let layers = paintLayers(null);
+let layers = paintRecallConfig(null);
 let layersPending = false;
 let layersDirty = false;
+// 用户动过提示词之后，刷新不再拿默认文案去盖他（包括他故意清空的那次）。
+let promptTouched = false;
 // 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
 let peerCache = [];
 let peerWritePending = false;
+// 宿主模型目录。它可能读不到；读不到只影响「自选模型」两个下拉，其它区块照常。
+let modelCatalog = { loaded: false, ok: false, models: [], error: "" };
+let modelsLoading = false;
 
 async function jsonGet(path) {
   const res = await hana.api.fetch(path);
@@ -92,7 +107,7 @@ function applyControls(out) {
 }
 
 function paintDim(enabled) {
-  for (const node of document.querySelectorAll(".toggle, .recall-grid")) {
+  for (const node of document.querySelectorAll(".toggle, .recall-grid, .gate-advanced")) {
     node.classList.toggle("dim", !enabled);
   }
   $("masterCard").setAttribute("data-off", enabled ? "false" : "true");
@@ -336,6 +351,92 @@ async function togglePeerExclusion(name) {
   }
 }
 
+/** 只有 llm 才展开提示词与判断模型。 */
+function paintGatePanels() {
+  const advanced = $("gateAdvanced");
+  if (advanced) advanced.hidden = $("recallGate").value !== "llm";
+}
+
+/** 提示词旁那行小字：默认 / 已修改 / 空（不拦截）。 */
+function paintPromptStatus() {
+  const node = $("gatePromptStatus");
+  if (node) node.textContent = promptStatus($("gatePrompt").value);
+}
+
+function setOptions(select, options, value) {
+  if (!select) return;
+  select.textContent = "";
+  for (const option of options) {
+    const node = document.createElement("option");
+    node.value = option.value;
+    node.textContent = option.label;
+    select.appendChild(node);
+  }
+  const wanted = String(value || "");
+  // 存量值不在目录里也要留住，否则一打开面板就像配置丢了。
+  if (wanted && !options.some((option) => option.value === wanted)) {
+    const node = document.createElement("option");
+    node.value = wanted;
+    node.textContent = `${wanted}（不在目录里）`;
+    select.appendChild(node);
+  }
+  select.value = wanted || options[0]?.value || "";
+}
+
+/**
+ * 一个下拉选到底：首项是默认，其余是目录里的每个模型。
+ *
+ * 目录读不到时只留首项、旁边写一行原因，但不禁用这块：默认通道照样能选、能保存。
+ */
+function paintModelSelect() {
+  const select = $("gateModel");
+  const hint = $("gateModelsHint");
+  if (!select) return;
+
+  const options = modelCatalog.ok
+    ? [DEFAULT_MODEL_OPTION, ...modelOptions(modelCatalog.models)]
+    : [DEFAULT_MODEL_OPTION];
+  setOptions(select, options, layers.gateModel);
+
+  if (!modelCatalog.loaded) {
+    hint.hidden = false;
+    hint.textContent = "正在读取模型目录…";
+  } else if (!modelCatalog.ok) {
+    hint.hidden = false;
+    hint.textContent = `模型目录不可用：${modelCatalog.error || "读不到"}。现在只能用默认模型。`;
+  } else if (options.length <= 1) {
+    hint.hidden = false;
+    hint.textContent = "宿主没有可用模型，只能用默认模型。";
+  } else {
+    hint.hidden = true;
+    hint.textContent = "";
+  }
+}
+
+function renderModels(payload) {
+  const ok = Boolean(payload && payload.ok !== false && Array.isArray(payload.models));
+  modelCatalog = {
+    loaded: true,
+    ok,
+    models: ok ? payload.models : [],
+    error: ok ? "" : String(payload?.error || "读不到模型目录"),
+  };
+  paintModelSelect();
+}
+
+// 面板打开时多读一次目录；它失败只影响模型下拉的候选，不阻断其它区块。
+async function loadModels() {
+  if (modelsLoading) return;
+  modelsLoading = true;
+  try {
+    renderModels(await jsonGet("/models"));
+  } catch (error) {
+    renderModels({ ok: false, error: String(error?.message || error) });
+  } finally {
+    modelsLoading = false;
+  }
+}
+
 function renderProbe(payload) {
   const lines = payload?.lines || [];
   const counts = {};
@@ -404,6 +505,8 @@ async function refresh(opts = {}) {
   try {
     const sid = await currentSessionKey();
     const statusPath = sid ? `/status?session=${encodeURIComponent(sid)}` : "/status";
+    // 模型目录单独读、不 await：它慢或失败只影响「自选模型」，不拖住整页。
+    loadModels();
     const [status, probe, ctrl, conn, peers, layerOut] = await Promise.all([
       jsonGet(statusPath),
       jsonGet("/probe").catch(() => ({ lines: [] })),
@@ -419,7 +522,7 @@ async function refresh(opts = {}) {
     if (ctrl) applyControls(ctrl);
     applyConnection(conn);
     // 读不到就留上一次的值，不把下拉刷成空。
-    if (layerOut) applyLayers(paintLayers(layerOut));
+    if (layerOut) applyLayers(layerOut);
     if (opts.note) flash(opts.note, false);
     $("foot").textContent = `上次读取 ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -464,19 +567,39 @@ async function patchControls(body) {
 
 /* ---------------- 召回策略 ---------------- */
 
-// 两个下拉只回写、不重算：服务端存下什么就显示什么，脏值已在 paintLayers 收敛。
+// 控件只回写、不重算：服务端存下什么就显示什么，脏值已在 paintRecallConfig 收敛。
 function applyLayers(next) {
-  layers = next;
-  $("recallGate").value = next.recallGate;
-  $("queryMode").value = next.queryMode;
+  layers = paintRecallConfig(next);
+  $("recallGate").value = layers.recallGate;
+  $("queryMode").value = layers.queryMode;
+  // 用户正在改提示词时不要被一次刷新抢走光标与内容。
+  if (document.activeElement !== $("gatePrompt")) {
+    // 配置为空时拿默认提示词当草稿填上：一打开就能直接改，不靠 placeholder。
+    $("gatePrompt").value = promptDraft(layers.gatePrompt, promptTouched);
+  }
+  paintPromptStatus();
+  paintGatePanels();
+  paintModelSelect();
 }
 
 function readLayers() {
-  return { recallGate: $("recallGate").value, queryMode: $("queryMode").value };
+  return {
+    recallGate: $("recallGate").value,
+    queryMode: $("queryMode").value,
+    gatePrompt: normalizeGatePrompt($("gatePrompt").value),
+    gateModel: $("gateModel").value,
+  };
 }
 
+const LAYER_KEYS = [
+  "recallGate",
+  "queryMode",
+  "gatePrompt",
+  "gateModel",
+];
+
 function sameLayers(a, b) {
-  return a.recallGate === b.recallGate && a.queryMode === b.queryMode;
+  return LAYER_KEYS.every((key) => a?.[key] === b?.[key]);
 }
 
 // 改一下立刻提交，跟上面两个开关一样没有保存按钮。
@@ -500,6 +623,8 @@ async function saveLayers() {
         send: (body) => jsonPost("/recall-mode", body),
         apply: applyLayers,
         flash,
+        // llm 的提示词与判断模型也在同一单里；失败时整组一起回滚。
+        normalize: paintRecallConfig,
       });
     } while (layersDirty);
   } finally {
@@ -543,6 +668,24 @@ for (const node of document.querySelectorAll('.switch[data-key]')) {
 for (const id of ["recallGate", "queryMode"]) {
   $(id).addEventListener("change", saveLayers);
 }
+
+// llm 展开块：显隐即时生效，内容改动同样走 saveLayers 整单提交。
+$("recallGate").addEventListener("change", paintGatePanels);
+$("gatePrompt").addEventListener("input", () => {
+  promptTouched = true;
+  paintPromptStatus();
+});
+$("gatePrompt").addEventListener("change", saveLayers);
+
+// 恢复默认：只把文字填回框里，然后走正常提交，不绕过校验也不偷写配置。
+$("gateResetPrompt").addEventListener("click", () => {
+  promptTouched = true;
+  $("gatePrompt").value = DEFAULT_GATE_PROMPT;
+  paintPromptStatus();
+  saveLayers();
+});
+
+$("gateModel").addEventListener("change", saveLayers);
 
 for (const id of ["serverUrl", "apiKey", "peerPrefix"]) {
   $(id).addEventListener("change", saveConnection);

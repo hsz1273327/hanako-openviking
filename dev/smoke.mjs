@@ -16,6 +16,7 @@ import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
 import registerRecallModeRoutes from "../routes/recall-mode.js";
+import registerModelsRoutes from "../routes/models.js";
 import {
   composePeer,
   resolvePeer,
@@ -33,6 +34,9 @@ import {
   parseExcludedPeers,
   normalizeRecallGate,
   normalizeQueryMode,
+  normalizeGateModel,
+  normalizeGatePrompt,
+  GATE_PROMPT_MAX,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
@@ -57,6 +61,12 @@ import {
   memoryBlock,
   resetShapeWarning,
   shouldSkipRecall,
+  gateAnswerRecalls,
+  gatePromptOf,
+  readGateStreamText,
+  DEFAULT_GATE_PROMPT,
+  GATE_TIMEOUT_MS,
+  GATE_MAX_TOKENS,
   DEDUP_LIMIT,
   GATE_MAX_CHARS,
   GATE_QUESTION_WORDS,
@@ -84,7 +94,17 @@ import {
   summarizeChecks as uiSummarizeChecks,
 } from "../ui/assets/check-summary.js";
 // 面板那排召回下拉的状态与提交：成功 / 失败两种收笔都由它定。
-import { commitLayers, paintLayers } from "../ui/assets/recall-layers.js";
+import {
+  DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
+  DEFAULT_MODEL_OPTION,
+  commitLayers,
+  modelOptions,
+  paintGateConfig,
+  paintLayers,
+  paintRecallConfig,
+  promptDraft,
+  promptStatus,
+} from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
 
@@ -110,12 +130,13 @@ function sdkWith(values = {}) {
 
 // ---- mock sdk（召回用：配置 + 网络 + 临时 dataDir）----
 // reads 统计 sdk.config.get 的调用次数，用来断言"去重键提前"真的省掉了配置读取。
-function recallSdk({ values = {}, fetchImpl, dataDir, logger, reads }) {
+function recallSdk({ values = {}, fetchImpl, dataDir, logger, reads, models }) {
   const counter = reads || { count: 0 };
   const sink = logger || {};
   return {
     dataDir,
     reads: counter,
+    models,
     config: {
       get: async (key) => {
         counter.count += 1;
@@ -141,6 +162,35 @@ function mockFetch({ status = 200, body = { status: "ok", result: {} } } = {}) {
     });
   };
   return { calls, fetchImpl };
+}
+
+// ---- mock 宿主模型（ctx.models）----
+// 记录每次调用的形状；utility / stream 的具体返回值由用例决定。
+function modelSdk({ utility, stream } = {}) {
+  const calls = { utility: [], stream: [], cancel: [] };
+  return {
+    calls,
+    models: {
+      utility: async (request) => {
+        calls.utility.push(request);
+        return utility ? utility(request) : { text: "" };
+      },
+      stream: async (request) => {
+        calls.stream.push(request);
+        return stream ? stream(request) : new Response("");
+      },
+      cancel: async (requestId) => {
+        calls.cancel.push(requestId);
+      },
+    },
+  };
+}
+
+function ndjsonResponse(events) {
+  return new Response(events.map((event) => JSON.stringify(event)).join("\n") + "\n", {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson" },
+  });
 }
 
 // ================= client =================
@@ -1512,6 +1562,42 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("null recallGate 回退 off", normalizeRecallGate(null), "off");
   eq("数字 queryMode 回退 last", normalizeQueryMode(1), "last");
   eq("大小写不匹配也回退", normalizeRecallGate("RULES"), "off");
+
+  // ---- llm 判断的配置：一个模型标识 + 提示词 ----
+  eq("gateModel 默认空（用默认通道）", DEFAULTS.gateModel, "");
+  eq("空串就是默认通道", normalizeGateModel(""), "");
+  eq("只有空白也算空", normalizeGateModel("   "), "");
+  eq("provider/model 原样保留", normalizeGateModel(" deepseek/deepseek-flash "), "deepseek/deepseek-flash");
+  eq("缺 provider 的形状回退空", normalizeGateModel("/flash"), "");
+  eq("缺 model 的形状回退空", normalizeGateModel("deepseek/"), "");
+  eq("没有斜杠的形状回退空", normalizeGateModel("deepseek-flash"), "");
+  eq("非字符串回退空", normalizeGateModel({ provider: "p" }), "");
+  eq("带空格的标识回退空", normalizeGateModel("deep seek/flash"), "");
+  eq("数字 gatePrompt 给空串", normalizeGatePrompt(1), "");
+  eq(
+    "gatePrompt 截断到上限",
+    Array.from(normalizeGatePrompt("字".repeat(GATE_PROMPT_MAX + 50))).length,
+    GATE_PROMPT_MAX,
+  );
+
+  const gateSet = await readSwitches(
+    sdkWith({
+      recallGate: "llm",
+      gatePrompt: "提".repeat(GATE_PROMPT_MAX + 5),
+      gateModel: "  deepseek/deepseek-flash  ",
+    }),
+  );
+  eq("recallGate 读到 llm", gateSet.recallGate, "llm");
+  eq(
+    "readSwitches 也截断提示词",
+    Array.from(gateSet.gatePrompt).length,
+    GATE_PROMPT_MAX,
+  );
+  eq("readSwitches 读到模型标识", gateSet.gateModel, "deepseek/deepseek-flash");
+
+  const gateBad = await readSwitches(sdkWith({ gateModel: "bogus-shape" }));
+  eq("存量非法 gateModel 回退空", gateBad.gateModel, "");
+  eq("未填时 gateModel 为空", (await readSwitches(sdkWith({}))).gateModel, "");
 }
 
 // ================= ui: 召回策略在主面板 =================
@@ -1566,9 +1652,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .match(/<h2 class="card-title">([^<]*)<\/h2>/);
   eq("这一栏的标题是「召回管理」", recallTitle?.[1], "召回管理");
   check("召回判断在前、召回查询在后", gateIdx < modeIdx);
-  // 这一栏恰好两个下拉，没有掉进中枢卡。
-  check("这一栏恰好两个下拉",
-    (html.slice(recallStart, recallEnd).match(/<select /g) || []).length === 2);
+  // 这一栏的主栅格恰好两个下拉；llm 展开区另有自己的一个模型下拉。
+  const advancedIdx = html.indexOf('id="gateAdvanced"');
+  const sepAfterAdvanced = html.indexOf('<div class="recall-sep"', advancedIdx);
+  check("召回判断/查询是两个主下拉",
+    (html.slice(recallStart, advancedIdx).match(/<select /g) || []).length === 2);
+  check("llm 展开区只有一个模型下拉（不再分两层）",
+    (html.slice(advancedIdx, sepAfterAdvanced).match(/<select /g) || []).length === 1);
   // 上下两块之间要有一条分隔，不然读起来像一锅端。
   check("下拉与名单之间有分隔",
     /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
@@ -1627,6 +1717,52 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("面板没有为召回单设保存按钮", html.includes("recallSave") === false);
 
+  // ---- llm 档：选项、展开块、提示词与模型来源 ----
+  check("召回判断有 llm 选项", html.includes('value="llm"') && html.includes("模型判断（用宿主模型）"));
+  check("llm 展开块存在", advancedIdx > 0);
+  const advancedTag = html.slice(advancedIdx, html.indexOf(">", advancedIdx));
+  check("llm 展开块默认 hidden", /\shidden(?:\s|$)/.test(advancedTag), advancedTag);
+  check("提示词框 rows=4", /id="gatePrompt"[^>]*rows="4"/.test(html));
+  // 默认提示词靠 value 填，不靠 placeholder：placeholder 一敲键盘就消失，当不了草稿。
+  const promptTag = /<textarea[^>]*id="gatePrompt"[^>]*>/.exec(html)?.[0] ?? "";
+  check("提示词框没有 placeholder", promptTag.includes("placeholder") === false, promptTag);
+  check(
+    "默认提示词不再写进 HTML 的 placeholder",
+    html.includes(DEFAULT_GATE_PROMPT) === false,
+  );
+  check("恢复默认按钮在", /id="gateResetPrompt"[^>]*>\s*恢复默认\s*</.test(html));
+  check("提示词状态位在", /id="gatePromptStatus"/.test(html));
+  check(
+    "恢复默认走正常提交",
+    /gateResetPrompt"\)\.addEventListener\("click"[\s\S]{0,200}saveLayers\(\)/.test(panelJs),
+  );
+  check(
+    "提示词框绑 input 并标记过 touched",
+    /gatePrompt"\)\.addEventListener\("input"/.test(panelJs) &&
+      panelJs.includes("promptTouched = true"),
+  );
+  check("空提示词不再写“留空使用默认”", html.includes("留空使用默认提示词") === false);
+  // 模型只能一步选到位：一个下拉，首项是默认；没有 radio，也没有第二层 provider + 模型。
+  check("判断模型只有一个下拉", (html.match(/<select[^>]*id="gateModel"/g) || []).length === 1);
+  check(
+    "模型下拉首项是默认",
+    /<select id="gateModel">\s*<option value="">默认（宿主辅助模型）<\/option>/.test(html),
+  );
+  check("没有模型来源两个单选", html.includes('name="gateModelMode"') === false);
+  check("没有第二层 provider 下拉", html.includes('id="gateProvider"') === false);
+  check("没有可展开的自选区", html.includes('id="gateCustom"') === false);
+  check("模型下拉不预设禁用", /id="gateModel"[^>]*disabled/.test(html) === false);
+  check("目录读不到时留原因位", /id="gateModelsHint"/.test(html));
+  check("面板读模型目录", panelJs.includes('jsonGet("/models")'));
+  check(
+    "llm 展开区受召回判断控制",
+    panelJs.includes("paintGatePanels") && panelJs.includes("gateAdvanced"),
+  );
+  check("模型下拉由目录填充", panelJs.includes("modelOptions(modelCatalog.models)"));
+  check("目录坏了只留默认项", panelJs.includes("[DEFAULT_MODEL_OPTION]"));
+  check("新控件有样式", /\n\.gate-advanced \{/.test(css));
+  check("textarea 有输入框样式", /\n\.field textarea \{/.test(css));
+
   // 设置页只剩连接：不再有召回分组、下拉、也不再碰 /recall-mode。
   check("设置页不再有召回判断", settingsHtml.includes("recallGate") === false);
   check("设置页不再有召回查询", settingsHtml.includes("queryMode") === false);
@@ -1649,9 +1785,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   const props = manifest.contributes.settings.schema.properties;
   eq("manifest 里 recallGate 默认 off", props.recallGate?.default, "off");
-  eq("manifest 里 recallGate 枚举", props.recallGate?.enum, ["off", "rules"]);
+  eq("manifest 里 recallGate 枚举", props.recallGate?.enum, ["off", "rules", "llm"]);
   eq("manifest 里 queryMode 默认 last", props.queryMode?.default, "last");
   eq("manifest 里 queryMode 枚举", props.queryMode?.enum, ["last", "context"]);
+  eq("manifest 里 gateModel 默认空", props.gateModel?.default, "");
+  eq("manifest 里没有 gateModelMode", props.gateModelMode, undefined);
+  eq("manifest 里没有 gateProvider", props.gateProvider, undefined);
+  eq("manifest 里 gatePrompt 默认空", props.gatePrompt?.default, "");
+  check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
 }
 
 // ================= ui: 召回下拉的收笔逻辑 =================
@@ -1738,6 +1879,113 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     eq("半单被拒时只落一次界面状态", shown.length - shownCount, 1);
     eq("半单被拒时界面仍是旧值", shown.at(-1), before);
+  }
+
+  // ---- 提示词框的显示与状态（value 当草稿，不靠 placeholder） ----
+  eq("两份默认提示词逐字一致", UI_DEFAULT_GATE_PROMPT, DEFAULT_GATE_PROMPT);
+  eq("配置为空时草稿就是默认全文", promptDraft(""), DEFAULT_GATE_PROMPT);
+  eq("配置为空且用户动过就不再填默认", promptDraft("", true), "");
+  eq("有自定义内容就显示自定义", promptDraft("我的提示词"), "我的提示词");
+  eq("超过上限的存量值按截断显示", promptDraft("字".repeat(GATE_PROMPT_MAX + 5)).length, GATE_PROMPT_MAX);
+  eq("内容等于默认 -> 当前为默认提示词", promptStatus(DEFAULT_GATE_PROMPT), "当前为默认提示词");
+  eq("内容改过 -> 已修改", promptStatus("我的提示词"), "已修改");
+  check(
+    "清空 -> 已修改并提醒不拦截",
+    promptStatus("").includes("已修改") && promptStatus("").includes("提示词为空时不会拦截任何召回"),
+    promptStatus(""),
+  );
+  check(
+    "只有空白也算空",
+    promptStatus("   \n ").includes("不会拦截任何召回"),
+    promptStatus("   \n "),
+  );
+
+  // ---- llm 的提示词与判断模型：归一化 + 整单收笔 ----
+  eq(
+    "llm 配置归一化非法值",
+    paintGateConfig({
+      gatePrompt: "字".repeat(GATE_PROMPT_MAX + 10),
+      gateModel: "  p1/m1  ",
+    }),
+    {
+      gatePrompt: "字".repeat(GATE_PROMPT_MAX),
+      gateModel: "p1/m1",
+    },
+  );
+  eq(
+    "形状不对的模型标识当空（回到默认通道）",
+    paintGateConfig({ gateModel: "m1" }).gateModel,
+    "",
+  );
+  eq("完整投影包含两层与 llm 配置", paintRecallConfig({ recallGate: "llm" }), {
+    recallGate: "llm",
+    queryMode: "last",
+    gatePrompt: "",
+    gateModel: "",
+  });
+
+  // 模型目录 -> 选项：一步选到位，文案带 provider，值形如 provider/id。
+  eq("目录选项带 provider", modelOptions([
+    { provider: "deepseek", id: "deepseek-flash", name: "DeepSeek Flash" },
+    { provider: "opencode-go", id: "glm-5.2", name: "GLM-5.2" },
+  ]), [
+    { value: "deepseek/deepseek-flash", label: "deepseek · deepseek-flash" },
+    { value: "opencode-go/glm-5.2", label: "opencode-go · glm-5.2" },
+  ]);
+  eq("同名模型靠 provider 区分", modelOptions([
+    { provider: "a", id: "flash" },
+    { provider: "b", id: "flash" },
+  ]).map((o) => o.label), ["a · flash", "b · flash"]);
+  eq("形状不全的条目丢掉", modelOptions([{ id: "no-provider" }, { provider: "p" }, null, 1]), []);
+  eq("重复标识只留一条", modelOptions([
+    { provider: "p", id: "m" },
+    { provider: "p", id: "m" },
+  ]).length, 1);
+  eq("非数组当空", modelOptions(undefined), []);
+  eq("下拉首项是默认", DEFAULT_MODEL_OPTION, { value: "", label: "默认（宿主辅助模型）" });
+
+  {
+    const extendedBefore = paintRecallConfig({ recallGate: "off" });
+    const extendedNext = paintRecallConfig({
+      recallGate: "llm",
+      queryMode: "last",
+      gatePrompt: "自定义",
+      gateModel: "p/m",
+    });
+    const sent = [];
+    const out = await commitLayers({
+      before: extendedBefore,
+      next: extendedNext,
+      send: async (body) => {
+        sent.push(body);
+        return { ok: true, ...extendedNext };
+      },
+      apply: (value) => shown.push(value),
+      flash,
+      normalize: paintRecallConfig,
+    });
+    eq("llm 整单带上四个字段", sent[0], extendedNext);
+    eq("llm 成功收在服务端四字段上", shown.at(-1), extendedNext);
+    eq("llm 成功也算成功", out.ok, true);
+  }
+
+  {
+    const extendedBefore = paintRecallConfig({
+      recallGate: "llm",
+      gatePrompt: "旧提示词",
+      gateModel: "p/m",
+    });
+    const out = await commitLayers({
+      before: extendedBefore,
+      next: { ...extendedBefore, gatePrompt: "新提示词" },
+      send: async () => ({ ok: false, error: "gatePrompt 被拒" }),
+      apply: (value) => shown.push(value),
+      flash,
+      normalize: paintRecallConfig,
+    });
+    eq("llm 被拒时提示词回滚", shown.at(-1).gatePrompt, "旧提示词");
+    eq("llm 被拒时判断模型也回滚", shown.at(-1).gateModel, "p/m");
+    eq("llm 被拒不算成功", out.ok, false);
   }
 }
 
@@ -2324,6 +2572,100 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const partial = await post({ queryMode: "last" });
   eq("只提交一个键也能改", partial.status, 200);
   eq("另一个键保持原值", store.recallGate, "rules");
+
+  // ---- llm 档与提示词 / 判断模型 ----
+  writes.length = 0;
+  const llm = await post({
+    recallGate: "llm",
+    gatePrompt: "自定义提示词",
+    gateModel: "",
+  });
+  eq("llm 档可写", store.recallGate, "llm");
+  eq("提示词落库", store.gatePrompt, "自定义提示词");
+  eq("模型标识落库（空 = 默认通道）", store.gateModel, "");
+  eq(
+    "GET 回显 llm 配置",
+    [llm.body.gatePrompt, llm.body.gateModel],
+    ["自定义提示词", ""],
+  );
+
+  writes.length = 0;
+  const custom = await post({ gateModel: "  p1/m1  " });
+  eq("模型标识落库", store.gateModel, "p1/m1");
+  eq("回显也去空白", custom.body.gateModel, "p1/m1");
+
+  writes.length = 0;
+  const badRef = await post({ gateModel: "m1" });
+  eq("缺 provider 的标识 400", badRef.status, 400);
+  eq("缺 provider 零写入", writes.length, 0);
+  eq("被拒后旧值还在", store.gateModel, "p1/m1");
+
+  writes.length = 0;
+  const badRef2 = await post({ gateModel: "p1/" });
+  eq("缺 model 的标识 400", badRef2.status, 400);
+  eq("缺 model 零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badRefType = await post({ gateModel: 7 });
+  eq("标识类型不对 400", badRefType.status, 400);
+  eq("标识类型不对零写入", writes.length, 0);
+
+  // 旧键彻底不认：提交它们不该被当成合法写入。
+  writes.length = 0;
+  await post({ gateModelMode: "custom", gateProvider: "p9" });
+  eq("旧键不再落库", writes.length, 0);
+
+  writes.length = 0;
+  const longPrompt = await post({ gatePrompt: "字".repeat(GATE_PROMPT_MAX + 1) });
+  eq("超长提示词 400", longPrompt.status, 400);
+  eq("超长提示词零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badPrompt = await post({ gatePrompt: 1 });
+  eq("提示词类型不对 400", badPrompt.status, 400);
+  eq("提示词类型不对零写入", writes.length, 0);
+
+  // 只改别的键不该被存量模型配置连坐。
+  store.gateModel = "p1/m1";
+  const untouched = await post({ queryMode: "context" });
+  eq("只改 queryMode 不受模型配置影响", untouched.status, 200);
+  eq("模型配置原样还在", store.gateModel, "p1/m1");
+}
+
+// ================= routes: models =================
+{
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+  };
+  let mode = "ok";
+  const catalog = [{ id: "m1", provider: "p1", name: "M1", contextWindow: 8 }];
+  const ctx = {
+    models: {
+      list: async () => {
+        if (mode === "throw") throw new Error("APP_CAPABILITY_DENIED");
+        return { models: catalog };
+      },
+    },
+  };
+  registerModelsRoutes(app, ctx);
+  const get = () =>
+    handlers["GET /models"]({ json: (payload, status) => ({ body: payload, status }) });
+
+  const ok = await get();
+  eq("models 成功时原样透传", ok.body, { ok: true, models: catalog });
+  eq("models 成功时状态 200", ok.status, 200);
+
+  mode = "throw";
+  const failed = await get();
+  eq("models 失败时仍是 200", failed.status, 200);
+  eq("models 失败时 ok 为 false", failed.body.ok, false);
+  check("models 失败时带上原因", String(failed.body.error || "").includes("APP_CAPABILITY_DENIED"));
+
+  // 形状不认识时不要抛，给空目录。
+  ctx.models.list = async () => ({ unexpected: true });
+  const odd = await get();
+  eq("models 形状不认识时给空数组", odd.body, { ok: true, models: [] });
 }
 
 // ================= routes: session =================
@@ -2465,6 +2807,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 // ================= recall gate =================
 {
   eq("gate 长度上限是 8", GATE_MAX_CHARS, 8);
+
+  // ---- llm 档的内置提示词与解析规则 ----
+  const expectedPrompt = `下面是一条用户消息。判断回答它需不需要先查历史记忆。
+
+需要查的情况：问过去做过什么、提到「上次」「之前」「那个」「继续」，或者要参考已经定过的决定。
+
+不需要查的情况：纯操作指令，例如运行命令、删除文件、重启服务，并且不指向任何历史内容。
+
+只回一个词：需要，或不需要。`;
+  eq("默认提示词全文", DEFAULT_GATE_PROMPT, expectedPrompt);
+  // 空提示词不再是“用默认”：没有判据就不拦。
+  eq("提示词为空时没有提示词", gatePromptOf({ gatePrompt: "" }), "");
+  eq("只有空白的提示词也算空", gatePromptOf({ gatePrompt: "  \n " }), "");
+  eq("没传这个键也算空", gatePromptOf({}), "");
+  eq("自定义提示词原样用", gatePromptOf({ gatePrompt: "  自定义  " }), "自定义");
+  eq("gate 超时 600ms", GATE_TIMEOUT_MS, 600);
+  eq("gate 只要 8 个 token", GATE_MAX_TOKENS, 8);
+
+  // 顺序不能反：「不需要」里含「需要」。
+  eq("解析：不需要 -> 跳过", gateAnswerRecalls("不需要"), false);
+  eq("解析：不需要优先于需要", gateAnswerRecalls("不需要，虽然看起来需要"), false);
+  eq("解析：需要 -> 召回", gateAnswerRecalls("需要"), true);
+  eq("解析：空串安全召回", gateAnswerRecalls(""), true);
+  eq("解析：非字符串也安全召回", gateAnswerRecalls(null), true);
+  eq("解析：跑题安全召回", gateAnswerRecalls("今天天气不错"), true);
 
   // 判据 1：trim 后长度 ≤ 8
   eq("≤8 字的纯操作指令跳过", isShortOperationCommand("运行测试"), true);
@@ -2744,6 +3111,307 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   });
   check("默认 off 时短指令照常召回", Boolean(offRecalled?.payload));
   eq("默认 off 时发了请求", offMock.calls.length, 1);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall gate: llm =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-recall-gate-llm");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const values = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    recallGate: "llm",
+    gateModel: "",
+    // 空提示词已经不再回退成默认，要跑模型判断就得真存一份提示词。
+    gatePrompt: DEFAULT_GATE_PROMPT,
+    probe: true,
+  };
+  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+
+  // ---- default：走 utility，说不需 -> 跳过 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
+    const infos = [];
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values,
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+        logger: { info: (m) => infos.push(m) },
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "运行测试" }] },
+      session: { sessionId: "llm-default-skip" },
+    });
+    eq("llm 说不需时返回 undefined", result, undefined);
+    eq("llm 说不需时不发召回", mock.calls.length, 0);
+    eq("default 走 utility", fake.calls.utility.length, 1);
+    eq("default 不走 stream", fake.calls.stream.length, 0);
+    const req = fake.calls.utility[0];
+    check(
+      "utility requestId 非空",
+      typeof req.requestId === "string" && req.requestId.length > 0,
+    );
+    eq("utility scope app", req.scope, "app");
+    eq("utility messages 只放用户原话", req.messages, [
+      { role: "user", content: "运行测试" },
+    ]);
+    eq("utility 用默认提示词", req.systemPrompt, DEFAULT_GATE_PROMPT);
+    eq("utility maxTokens", req.maxTokens, 8);
+    eq("utility temperature", req.temperature, 0);
+    eq("utility 不传 provider/model", ["provider" in req, "model" in req], [false, false]);
+    eq("llm 跳过探针记一次", probes.length, 1);
+    eq("llm 跳过探针 by", probes[0].invocation.by, "llm");
+    eq("llm 跳过探针 reason", probes[0].invocation.reason, "llm-no-need");
+    check(
+      "llm 跳过日志带 by=llm",
+      infos.some((m) => m.includes("gate: skipped") && m.includes("by=llm")),
+    );
+  }
+
+  // ---- custom：走 stream，text-delta 拼出「需要」-> 召回 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({
+      stream: () =>
+        ndjsonResponse([
+          { type: "start", requestId: "r1" },
+          { type: "text-delta", requestId: "r1", delta: "需" },
+          { type: "text-delta", requestId: "r1", delta: "要" },
+          {
+            type: "done",
+            requestId: "r1",
+            stopReason: "stop",
+            assistant: { role: "assistant", content: [] },
+          },
+        ]),
+    });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          gateModel: "p1/m1",
+          gatePrompt: "自定义提示词",
+        },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+      session: { sessionId: "llm-custom-recall" },
+    });
+    check("llm 说需要时照常召回", Boolean(result?.payload));
+    eq("custom 走 stream", fake.calls.stream.length, 1);
+    eq("custom 不走 utility", fake.calls.utility.length, 0);
+    const req = fake.calls.stream[0];
+    eq("stream provider/model", [req.provider, req.model], ["p1", "m1"]);
+    eq("stream 用自定义提示词", req.systemPrompt, "自定义提示词");
+    eq("stream messages 只放用户原话", req.messages, [
+      { role: "user", content: "上次那个决定是什么" },
+    ]);
+    eq("stream maxTokens/temperature", [req.maxTokens, req.temperature], [8, 0]);
+    eq("stream 不传 scope", "scope" in req, false);
+    eq("需要时确实发了召回", mock.calls.length, 1);
+  }
+
+  // ---- custom 只需要 stream：没有 utility 也不能因此走不到模型 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    let streamCalls = 0;
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          gateModel: "p1/m1",
+        },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: {
+          stream: async () => {
+            streamCalls += 1;
+            return ndjsonResponse([{ type: "text-delta", delta: "需要" }]);
+          },
+          cancel: async () => {},
+        },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "只有 stream 也要能判断" }] },
+      session: { sessionId: "llm-stream-only" },
+    });
+    eq("custom 只提供 stream 也能调用", streamCalls, 1);
+    check("stream-only 判断照常召回", Boolean(result?.payload));
+  }
+
+  // ---- 空提示词：不是“用默认”，而是根本不问模型，直接召回 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, gatePrompt: "" },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "重启一下服务" }] },
+      session: { sessionId: "llm-empty-prompt" },
+    });
+    eq("空提示词时一次模型都没问", fake.calls.utility.length, 0);
+    eq("空提示词时也不发 cancel", fake.calls.cancel.length, 0);
+    check("空提示词时照常召回", Boolean(result?.payload));
+    eq("空提示词时发了召回请求", mock.calls.length, 1);
+    check(
+      "空提示词日志说清不拦截",
+      infos.some((m) => m.includes("prompt empty") && m.includes("recall anyway")),
+    );
+  }
+
+  // ---- 只有空白的提示词同样算空 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, gatePrompt: "   \n " },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "重启一下服务" }] },
+      session: { sessionId: "llm-blank-prompt" },
+    });
+    eq("空白提示词也不问模型", fake.calls.utility.length, 0);
+    check("空白提示词照常召回", Boolean(result?.payload));
+  }
+
+  // ---- 空回答：安全召回 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => ({ text: "" }) });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "空回答也召回" }] },
+      session: { sessionId: "llm-empty-recall" },
+    });
+    check("空回答也照常召回", Boolean(result?.payload));
+    eq("空回答时发了召回", mock.calls.length, 1);
+  }
+
+  // ---- 抛错：安全召回 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({
+      utility: () => {
+        throw new Error("APP_CAPABILITY_DENIED");
+      },
+    });
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values,
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "抛错也要召回" }] },
+      session: { sessionId: "llm-throw-recall" },
+    });
+    check("模型抛错时照常召回", Boolean(result?.payload));
+    eq("模型抛错时发了召回", mock.calls.length, 1);
+    eq("抛错也 cancel 一次", fake.calls.cancel.length, 1);
+    check("抛错日志说明照常召回", infos.some((m) => m.includes("recall anyway")));
+  }
+
+  // ---- error 事件：立即失败并召回 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({
+      stream: () =>
+        ndjsonResponse([
+          {
+            type: "error",
+            requestId: "r1",
+            code: "APP_MODEL_NOT_FOUND",
+            message: "模型不存在",
+          },
+        ]),
+    });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          gateModel: "p1/missing",
+        },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "error 事件要召回" }] },
+      session: { sessionId: "llm-stream-error" },
+    });
+    check("error 事件后照常召回", Boolean(result?.payload));
+    eq("error 事件后发了召回", mock.calls.length, 1);
+    eq("error 事件后 cancel", fake.calls.cancel.length, 1);
+  }
+
+  // ---- 超时：600ms 后安全召回，不能挂住 ----
+  {
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => new Promise(() => {}) });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
+    );
+    const started = Date.now();
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "超时也要召回" }] },
+      session: { sessionId: "llm-timeout" },
+    });
+    const elapsed = Date.now() - started;
+    check("超时后照常召回", Boolean(result?.payload));
+    check("超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
+    eq("超时后发了召回", mock.calls.length, 1);
+    eq("超时后 cancel 一次", fake.calls.cancel.length, 1);
+  }
+
+  // ---- stream 文本解析：error 事件立即失败 ----
+  {
+    let threw = null;
+    try {
+      await readGateStreamText(
+        ndjsonResponse([
+          { type: "text-delta", delta: "需" },
+          { type: "error", code: "X", message: "坏了" },
+        ]),
+      );
+    } catch (error) {
+      threw = error;
+    }
+    check("stream error 事件直接抛", String(threw?.message).includes("坏了"));
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
