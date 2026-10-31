@@ -64,7 +64,9 @@ import {
   gateAnswerRecalls,
   gatePromptOf,
   readGateStreamText,
+  renderGatePrompt,
   DEFAULT_GATE_PROMPT,
+  GATE_MESSAGE_PLACEHOLDER,
   GATE_TIMEOUT_MS,
   GATE_MAX_TOKENS,
   DEDUP_LIMIT,
@@ -1733,6 +1735,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("恢复默认按钮在", /id="gateResetPrompt"[^>]*>\s*恢复默认\s*</.test(html));
   check("提示词状态位在", /id="gatePromptStatus"/.test(html));
   check(
+    "提示词框下有占位符说明",
+    html.includes("用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。"),
+  );
+  check(
     "恢复默认走正常提交",
     /gateResetPrompt"\)\.addEventListener\("click"[\s\S]{0,200}saveLayers\(\)/.test(panelJs),
   );
@@ -2815,8 +2821,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 不需要查的情况：纯操作指令，例如运行命令、删除文件、重启服务，并且不指向任何历史内容。
 
-只回一个词：需要，或不需要。`;
+只回一个词：需要，或不需要。
+
+用户消息：{{message}}`;
   eq("默认提示词全文", DEFAULT_GATE_PROMPT, expectedPrompt);
+  eq("占位符字面量", GATE_MESSAGE_PLACEHOLDER, "{{message}}");
+  check("默认模板含 {{message}}", DEFAULT_GATE_PROMPT.includes(GATE_MESSAGE_PLACEHOLDER));
+  check("默认模板以占位符结尾", DEFAULT_GATE_PROMPT.endsWith(GATE_MESSAGE_PLACEHOLDER));
   // 空提示词不再是“用默认”：没有判据就不拦。
   eq("提示词为空时没有提示词", gatePromptOf({ gatePrompt: "" }), "");
   eq("只有空白的提示词也算空", gatePromptOf({ gatePrompt: "  \n " }), "");
@@ -2824,6 +2835,45 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("自定义提示词原样用", gatePromptOf({ gatePrompt: "  自定义  " }), "自定义");
   eq("gate 超时 600ms", GATE_TIMEOUT_MS, 600);
   eq("gate 只要 8 个 token", GATE_MAX_TOKENS, 8);
+
+  // ---- 模板渲染：占位符替换 / 无占位符追加 / 空模板 / 消息里的占位符字样 ----
+  eq(
+    "占位符被消息替换",
+    renderGatePrompt("判断：{{message}}", "运行测试"),
+    "判断：运行测试",
+  );
+  eq(
+    "多处占位符全部替换",
+    renderGatePrompt("{{message}} 和 {{message}}", "运行测试"),
+    "运行测试 和 运行测试",
+  );
+  eq(
+    "占位符在中间也替换",
+    renderGatePrompt("前 {{message}} 后", "运行测试"),
+    "前 运行测试 后",
+  );
+  eq(
+    "无占位符时消息接在末尾并隔一空行",
+    renderGatePrompt("只判断", "运行测试"),
+    "只判断\n\n运行测试",
+  );
+  eq("空模板返回空串", renderGatePrompt("", "运行测试"), "");
+  eq("非字符串模板也返回空串", renderGatePrompt(null, "运行测试"), "");
+  eq(
+    "消息里的占位符字样不被二次替换",
+    renderGatePrompt("判断：{{message}}", "{{message}}"),
+    "判断：{{message}}",
+  );
+  eq(
+    "消息原样插入不裁剪",
+    renderGatePrompt("判断：{{message}}", "  原样  "),
+    "判断：  原样  ",
+  );
+  eq(
+    "默认模板渲染出完整提示词",
+    renderGatePrompt(DEFAULT_GATE_PROMPT, "运行测试"),
+    `${expectedPrompt.slice(0, -GATE_MESSAGE_PLACEHOLDER.length)}运行测试`,
+  );
 
   // 顺序不能反：「不需要」里含「需要」。
   eq("解析：不需要 -> 跳过", gateAnswerRecalls("不需要"), false);
@@ -3161,10 +3211,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       typeof req.requestId === "string" && req.requestId.length > 0,
     );
     eq("utility scope app", req.scope, "app");
-    eq("utility messages 只放用户原话", req.messages, [
-      { role: "user", content: "运行测试" },
-    ]);
-    eq("utility 用默认提示词", req.systemPrompt, DEFAULT_GATE_PROMPT);
+    eq("utility 只有一条 user 消息", req.messages.length, 1);
+    eq("utility 消息 role 是 user", req.messages[0].role, "user");
+    eq(
+      "utility 消息是渲染后的默认模板",
+      req.messages[0].content,
+      renderGatePrompt(DEFAULT_GATE_PROMPT, "运行测试"),
+    );
+    eq("utility 不传 systemPrompt", "systemPrompt" in req, false);
     eq("utility maxTokens", req.maxTokens, 8);
     eq("utility temperature", req.temperature, 0);
     eq("utility 不传 provider/model", ["provider" in req, "model" in req], [false, false]);
@@ -3199,7 +3253,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         values: {
           ...values,
           gateModel: "p1/m1",
-          gatePrompt: "自定义提示词",
+          gatePrompt: "自定义判断：{{message}}",
         },
         fetchImpl: mock.fetchImpl,
         dataDir: dir,
@@ -3215,10 +3269,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("custom 不走 utility", fake.calls.utility.length, 0);
     const req = fake.calls.stream[0];
     eq("stream provider/model", [req.provider, req.model], ["p1", "m1"]);
-    eq("stream 用自定义提示词", req.systemPrompt, "自定义提示词");
-    eq("stream messages 只放用户原话", req.messages, [
-      { role: "user", content: "上次那个决定是什么" },
-    ]);
+    eq("stream 只有一条 user 消息", req.messages.length, 1);
+    eq("stream 消息 role 是 user", req.messages[0].role, "user");
+    eq(
+      "stream 消息是渲染后的自定义模板",
+      req.messages[0].content,
+      "自定义判断：上次那个决定是什么",
+    );
+    eq("stream 不传 systemPrompt", "systemPrompt" in req, false);
     eq("stream maxTokens/temperature", [req.maxTokens, req.temperature], [8, 0]);
     eq("stream 不传 scope", "scope" in req, false);
     eq("需要时确实发了召回", mock.calls.length, 1);

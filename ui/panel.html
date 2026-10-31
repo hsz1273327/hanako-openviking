@@ -141,6 +141,8 @@
             <button id="gateResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
           </div>
           <textarea id="gatePrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
+          <!-- 提示词是模板：占位符处填当前这条用户消息，渲染后整段作为单条用户消息发给模型。 -->
+          <span class="field-hint">用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
         </div>
 
         <div class="field">

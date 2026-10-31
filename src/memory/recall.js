@@ -100,7 +100,15 @@ export function shouldSkipRecall(text, gate = "off") {
 }
 
 /**
- * llm 判断的默认提示词。导出给测试与面板文案对照。
+ * 模板里代表"当前这条用户消息"的占位符。
+ *
+ * 提示词要判断的是"这条消息需不需要查记忆"，消息本身就是材料，所以它是模板的一部分，
+ * 不是另发一段 systemPrompt。写成常量是为了让面板文案与测试引同一份字面量。
+ */
+export const GATE_MESSAGE_PLACEHOLDER = "{{message}}";
+
+/**
+ * llm 判断的默认提示词模板。导出给测试与面板文案对照。
  * 面板里的 textarea 以它作为草稿（配置为空时直接填进去让人改），两边必须是同一段文字，
  * 冒烟会比对 ui/assets/recall-layers.js 里的副本与这里的字面量。
  */
@@ -110,7 +118,31 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 
 不需要查的情况：纯操作指令，例如运行命令、删除文件、重启服务，并且不指向任何历史内容。
 
-只回一个词：需要，或不需要。`;
+只回一个词：需要，或不需要。
+
+用户消息：{{message}}`;
+
+/**
+ * 模板 + 消息 -> 真正要发给模型的那一段文本。
+ *
+ * 三条规矩：
+ *   1. 有占位符就整体替换（多处出现都换，位置不限）；
+ *   2. 没占位符就把消息接在末尾，中间空一行——用户可能写了个别的形状的提示词；
+ *   3. 模板为空返回空串，调用方据此不问模型（空提示词不拦截召回）。
+ *
+ * 消息原样插入：不转义、不裁剪、也不再扫一遍占位符。用户消息里恰好写着
+ * `{{message}}` 时它只是文字，二次替换会把消息复制进自己肚子里。
+ */
+export function renderGatePrompt(template, message) {
+  const text = typeof template === "string" ? template : "";
+  if (!text) return "";
+  const body = typeof message === "string" ? message : "";
+  if (text.includes(GATE_MESSAGE_PLACEHOLDER)) {
+    return text.split(GATE_MESSAGE_PLACEHOLDER).join(body);
+  }
+  if (!body) return text;
+  return `${text}\n\n${body}`;
+}
 
 /** 判断最多等 600ms；超时后按「召回」处理，不能把这一轮挂在模型上。 */
 export const GATE_TIMEOUT_MS = 600;
@@ -248,10 +280,13 @@ export async function askGateModel(sdk, switches, text) {
   }
 
   const requestId = `openviking-gate-${randomUUID()}`;
+  // 提示词模板已经把"判断什么"和"材料是什么"写在一段里，渲染后整段作为单条 user 消息。
+  // 不再拆成 systemPrompt + messages：拆两段会让小模型分不清哪段是要求、哪段是材料。
   const base = {
     requestId,
-    messages: [{ role: "user", content: text }],
-    systemPrompt: gatePromptOf(switches),
+    messages: [
+      { role: "user", content: renderGatePrompt(gatePromptOf(switches), text) },
+    ],
     maxTokens: GATE_MAX_TOKENS,
     temperature: 0,
   };
