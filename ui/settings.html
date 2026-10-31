@@ -9,8 +9,7 @@
     .page { display: block; max-width: 560px; padding: 4px 2px 18px; }
     .field { display: grid; gap: 5px; margin-bottom: 14px; }
     .field label { font-size: 12px; opacity: 0.75; }
-    .field input,
-    .field select {
+    .field input {
       font: inherit;
       font-size: 13px;
       width: 100%;
@@ -23,21 +22,12 @@
       min-width: 0;
     }
     .field input::placeholder { color: currentColor; opacity: 0.4; }
-    .field input:focus,
-    .field select:focus {
+    .field input:focus {
       outline: none;
       border-color: rgba(111, 143, 104, 0.75);
       box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.16);
     }
     .field .hint { font-size: 11px; opacity: 0.55; }
-    .group-title {
-      margin: 22px 0 10px;
-      padding-top: 14px;
-      border-top: 1px solid rgba(128, 128, 128, 0.2);
-      font-size: 12px;
-      font-weight: 600;
-      opacity: 0.7;
-    }
     .actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
     .status { font-size: 11.5px; opacity: 0.75; }
     .status.ok { color: #5d7d56; opacity: 1; }
@@ -53,8 +43,8 @@
   </style>
 </head>
 <body>
-  <!-- 设置页两件事：把这台机器接到中枢上去；调召回前两层的策略。
-       连接字段填完就该再也不用来，召回策略是按整台机器算的，也放这里。 -->
+  <!-- 设置页只做一件事：把这台机器接到中枢上去。
+       运行时开关与召回策略都在「OpenViking」页面，那里改完即时生效。 -->
   <main class="page" data-hana-app-ui>
     <div class="field">
       <label for="serverUrl">服务地址</label>
@@ -74,34 +64,14 @@
       <span class="hint">同机不同助手各自一个门牌：前缀-openhanako-助手目录名。留空则只带 openhanako 和助手目录名。</span>
     </div>
 
-    <h2 class="group-title">召回</h2>
-
-    <div class="field">
-      <label for="recallGate">召回判断</label>
-      <select id="recallGate">
-        <option value="off">不判断（每轮都召回）</option>
-        <option value="rules">规则跳过（极短的纯操作指令）</option>
-      </select>
-      <span class="hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令；拿不准就召回。</span>
-    </div>
-
-    <div class="field">
-      <label for="queryMode">召回查询</label>
-      <select id="queryMode">
-        <option value="last">最后一句</option>
-        <option value="context">带上文（最近三条）</option>
-      </select>
-      <span class="hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
-    </div>
-
     <div class="actions">
       <button id="save" class="btn" type="button">保存</button>
       <span id="status" class="status"></span>
     </div>
 
     <p class="footnote">
-      总开关、自动召回、写回、只读、探针这些运行时开关不在这一页，去「OpenViking」页面改。
-      这里的两个召回策略是按整台机器算的，保存后下一轮生效。
+      总开关、自动召回、写回、只读、召回范围、技能路由、探针，以及召回判断与召回查询，
+      都在「OpenViking」页面里改：跳过去改一下就生效，不用回这一页。
     </p>
   </main>
   <script type="module" src="./assets/settings.js"></script>

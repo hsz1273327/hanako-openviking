@@ -235,6 +235,27 @@ html, body {
   line-height: 1.35;
 }
 
+/* ---------- 召回策略 ---------- */
+
+/* 召回的前两层跟上面两个开关一样是按整台机器算的、改了就生效，
+   所以占满一整行、两个下拉并排，不做折叠也没有保存按钮。 */
+.recall-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  background: rgba(128, 128, 128, 0.025);
+  min-width: 0;
+  transition: opacity 0.2s;
+}
+.recall-row.dim { opacity: 0.45; }
+.recall-row .field { margin-bottom: 0; }
+@media (max-width: 760px) {
+  .recall-row { grid-template-columns: 1fr; }
+}
+
 .scoped-note {
   margin: -2px 2px 0;
   font-size: 11.5px;
@@ -287,7 +308,8 @@ html, body {
   opacity: 0.62;
 }
 
-.field input {
+.field input,
+.field select {
   font: inherit;
   font-size: 12.5px;
   width: 100%;
@@ -299,13 +321,15 @@ html, body {
   color: inherit;
   min-width: 0;
 }
+.field select { cursor: pointer; }
 .field input::placeholder { color: currentColor; opacity: 0.35; }
 .field-hint {
   font-size: 10.5px;
   line-height: 1.4;
   opacity: 0.45;
 }
-.field input:focus {
+.field input:focus,
+.field select:focus {
   outline: none;
   border-color: rgba(111, 143, 104, 0.7);
   box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);

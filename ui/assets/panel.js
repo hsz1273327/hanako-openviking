@@ -1,15 +1,18 @@
 // 整页控制台：状态投影 + 当场可改的开关。
 //
-// 数据面只有三个端点：
+// 数据面只有这几个端点：
 //   GET  /status    只读投影（也顺带做一次 health，往返时间就是它）
 //   GET  /probe     日志尾部
 //   GET  /controls  六个开关 + 召回范围 + 超时 + 预算
 //   POST /controls  改上面这组
+//   GET  /recall-mode  召回判断 / 召回查询
+//   POST /recall-mode  改上面这两个（面板那一排下拉，整单提交）
 //   POST /conn      改连接三字段（地址 / key / 门牌前缀）
 //   GET  /peers     中枢里的 peer + 是否排除
 //   POST /peers     改排除名单
 //
 // 写操作一律乐观更新，失败回滚并提示。开关不是装饰。
+// 召回判断 / 召回查询两个下拉也在这页：改一下直接 POST，没有保存按钮。
 
 import { hana } from "./sdk.js";
 import { sessionKeyOf } from "./session-key.js";
@@ -17,6 +20,8 @@ import { sessionKeyOf } from "./session-key.js";
 import { statusTone } from "./check-tone.js";
 // 服务端检查项的摘要与状态词：纯函数，冒烟直接验。
 import { summarizeChecks } from "./check-summary.js";
+// 召回那排下拉的状态与提交：整单校验、失败回滚，纯逻辑单独一份，冒烟直接验。
+import { commitLayers, paintLayers } from "./recall-layers.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +32,10 @@ const SWITCH_KEYS = ["skillRouting", "probe"];
 
 let controls = null;
 let logOpen = false;
+// 上一次确认过的召回策略（服务端回的或默认值）。提交失败时回滚到这份。
+let layers = paintLayers(null);
+let layersPending = false;
+let layersDirty = false;
 // 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
 let peerCache = [];
 let peerWritePending = false;
@@ -83,7 +92,7 @@ function applyControls(out) {
 }
 
 function paintDim(enabled) {
-  for (const node of document.querySelectorAll(".toggle")) {
+  for (const node of document.querySelectorAll(".toggle, .recall-row")) {
     node.classList.toggle("dim", !enabled);
   }
   $("masterCard").setAttribute("data-off", enabled ? "false" : "true");
@@ -395,19 +404,22 @@ async function refresh(opts = {}) {
   try {
     const sid = await currentSessionKey();
     const statusPath = sid ? `/status?session=${encodeURIComponent(sid)}` : "/status";
-    const [status, probe, ctrl, conn, peers] = await Promise.all([
+    const [status, probe, ctrl, conn, peers, layerOut] = await Promise.all([
       jsonGet(statusPath),
       jsonGet("/probe").catch(() => ({ lines: [] })),
       jsonGet("/controls").catch(() => null),
       jsonGet("/conn").catch(() => null),
       // peer 列表是锦上添花：读不到也不能把整页状态拖下水。
       jsonGet("/peers").catch(() => null),
+      jsonGet("/recall-mode").catch(() => null),
     ]);
     renderStatus(status, Math.round(performance.now() - started));
     renderPeers(peers);
     renderProbe(probe);
     if (ctrl) applyControls(ctrl);
     applyConnection(conn);
+    // 读不到就留上一次的值，不把下拉刷成空。
+    if (layerOut) applyLayers(paintLayers(layerOut));
     if (opts.note) flash(opts.note, false);
     $("foot").textContent = `上次读取 ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -450,6 +462,52 @@ async function patchControls(body) {
   }
 }
 
+/* ---------------- 召回策略 ---------------- */
+
+// 两个下拉只回写、不重算：服务端存下什么就显示什么，脏值已在 paintLayers 收敛。
+function applyLayers(next) {
+  layers = next;
+  $("recallGate").value = next.recallGate;
+  $("queryMode").value = next.queryMode;
+}
+
+function readLayers() {
+  return { recallGate: $("recallGate").value, queryMode: $("queryMode").value };
+}
+
+function sameLayers(a, b) {
+  return a.recallGate === b.recallGate && a.queryMode === b.queryMode;
+}
+
+// 改一下立刻提交，跟上面两个开关一样没有保存按钮。
+// 一次只发一单（/recall-mode 整单校验）：请求还在飞的时候又改了一格，
+// 就记一笔、等上一单收笔后再发，不把这次改动丢掉。
+async function saveLayers() {
+  if (layersPending) {
+    layersDirty = true;
+    return;
+  }
+  layersPending = true;
+  try {
+    do {
+      layersDirty = false;
+      const next = readLayers();
+      // 已经跟确认过的值一致：不用再发（失败回滚后就走到这里）。
+      if (sameLayers(next, layers)) break;
+      await commitLayers({
+        before: layers,
+        next,
+        send: (body) => jsonPost("/recall-mode", body),
+        apply: applyLayers,
+        flash,
+      });
+    } while (layersDirty);
+  } finally {
+    layersPending = false;
+    layersDirty = false;
+  }
+}
+
 async function saveConnection() {
   const body = {};
   const url = $("serverUrl").value.trim();
@@ -480,6 +538,10 @@ $("swEnabled").addEventListener("click", () => flip("enabled", $("swEnabled")));
 
 for (const node of document.querySelectorAll('.switch[data-key]')) {
   node.addEventListener("click", () => flip(node.dataset.key, node));
+}
+
+for (const id of ["recallGate", "queryMode"]) {
+  $(id).addEventListener("change", saveLayers);
 }
 
 for (const id of ["serverUrl", "apiKey", "peerPrefix"]) {

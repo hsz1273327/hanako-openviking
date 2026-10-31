@@ -54,6 +54,27 @@
       </div>
     </section>
 
+    <!-- 召回的前两层是按整台机器算的，跟上面两个开关一样改了就生效，所以并排一行、
+         没有保存按钮。第三层（召回范围）是按会话的，仍在右侧卡片里。 -->
+    <section class="recall-row" aria-label="召回策略">
+      <div class="field">
+        <label for="recallGate">召回判断</label>
+        <select id="recallGate">
+          <option value="off">不判断（每轮都召回）</option>
+          <option value="rules">规则跳过（极短的纯操作指令）</option>
+        </select>
+        <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令，拿不准就召回。</span>
+      </div>
+      <div class="field">
+        <label for="queryMode">召回查询</label>
+        <select id="queryMode">
+          <option value="last">最后一句</option>
+          <option value="context">带上文（最近三条）</option>
+        </select>
+        <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
+      </div>
+    </section>
+
     <p class="scoped-note">
       记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
     </p>

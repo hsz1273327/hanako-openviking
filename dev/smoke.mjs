@@ -82,6 +82,8 @@ import {
   checkStatusLabel as uiCheckStatusLabel,
   summarizeChecks as uiSummarizeChecks,
 } from "../ui/assets/check-summary.js";
+// 面板那排召回下拉的状态与提交：成功 / 失败两种收笔都由它定。
+import { commitLayers, paintLayers } from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
 
@@ -1511,19 +1513,92 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("大小写不匹配也回退", normalizeRecallGate("RULES"), "off");
 }
 
-// ================= ui: 设置页召回下拉 =================
+// ================= ui: 召回策略在主面板 =================
 {
   const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
-  const html = read("settings.html");
-  const js = read("assets/settings.js");
+  const html = read("panel.html");
+  const panelJs = read("assets/panel.js");
+  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const settingsHtml = read("settings.html");
+  const settingsJs = read("assets/settings.js");
 
-  check("召回判断下拉在设置页", html.includes('id="recallGate"'));
+  const gateIdx = html.indexOf('id="recallGate"');
+  const modeIdx = html.indexOf('id="queryMode"');
+  check("面板上有召回判断下拉", gateIdx > 0, `idx=${gateIdx}`);
+  check("面板上有召回查询下拉", modeIdx > 0, `idx=${modeIdx}`);
   check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
-  check("召回查询下拉在设置页", html.includes('id="queryMode"'));
   check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
-  check("下拉沿用 field 字段样式", /\.field select\s*\{/.test(html));
-  check("读设置时带上召回策略", js.includes('hana.api.fetch("/recall-mode")'));
-  check("保存时写入召回策略", js.includes('hana.api.fetch("/recall-mode", {'));
+
+  // 位置：技能路由 / 探针那一排之后，中枢与身份两栏之前。
+  const skillIdx = html.indexOf('data-key="skillRouting"');
+  const probeIdx = html.indexOf('data-key="probe"');
+  const colsIdx = html.indexOf('<section class="cols">');
+  const hubIdx = html.indexOf(">中枢<");
+  const identIdx = html.indexOf(">身份<");
+  check("技能路由与探针还在，且路由在前", skillIdx > 0 && probeIdx > skillIdx);
+  check(
+    "两个下拉都在开关排之后",
+    gateIdx > probeIdx && modeIdx > probeIdx,
+    `gate=${gateIdx} mode=${modeIdx} probe=${probeIdx}`,
+  );
+  check(
+    "两个下拉都在两栏之前",
+    gateIdx < colsIdx && modeIdx < colsIdx,
+    `gate=${gateIdx} mode=${modeIdx} cols=${colsIdx}`,
+  );
+  check("中枢与身份仍在那之后", hubIdx > modeIdx && identIdx > modeIdx);
+  check("召回判断在前、召回查询在后", gateIdx < modeIdx);
+
+  // 两个下拉同在一个占满整行的区块里，没有掉进中枢卡。
+  const rowStart = html.lastIndexOf('<section class="recall-row"', gateIdx);
+  const rowEnd = html.indexOf("</section>", rowStart);
+  check("两个下拉同在一行区块里", rowStart > 0 && modeIdx < rowEnd, `row=${rowStart}..${rowEnd}`);
+  check("这一行在两栏之外", rowStart < colsIdx);
+  check("这一行恰好两个下拉", (html.slice(rowStart, rowEnd).match(/<select /g) || []).length === 2);
+
+  // 说明文字沿用面板的 hint 样式。
+  check("规则跳过的说明在面板上", html.includes("≤8 字") && html.includes("指代词"));
+  check(
+    "带上文的说明在面板上",
+    html.includes("300 字符") && html.includes("最新一句保持完整"),
+  );
+  check("说明小字用 field-hint", (html.match(/class="field-hint"/g) || []).length >= 2);
+
+  const recallRule = css.indexOf(".recall-row {");
+  check("召回那一行有整行栅格", recallRule >= 0);
+  check(
+    "召回那一行是两个下拉并排",
+    /grid-template-columns\s*:\s*1fr 1fr/.test(css.slice(recallRule, css.indexOf("}", recallRule))),
+  );
+  check("下拉沿用 field 输入框样式", /\.field input,\n\.field select \{/.test(css));
+
+  // 面板脚本：读 + 整单提交，改了就发，没有保存按钮。
+  check("面板读取召回策略", panelJs.includes('jsonGet("/recall-mode")'));
+  check("面板提交召回策略", panelJs.includes('jsonPost("/recall-mode"'));
+  check(
+    "两个下拉绑 change 即时提交",
+    /for \(const id of \["recallGate", "queryMode"\]\)[\s\S]{0,160}addEventListener\("change"/.test(
+      panelJs,
+    ),
+  );
+  check("面板没有为召回单设保存按钮", html.includes("recallSave") === false);
+
+  // 设置页只剩连接：不再有召回分组、下拉、也不再碰 /recall-mode。
+  check("设置页不再有召回判断", settingsHtml.includes("recallGate") === false);
+  check("设置页不再有召回查询", settingsHtml.includes("queryMode") === false);
+  check("设置页不再有下拉", settingsHtml.includes("<select") === false);
+  check("设置页不再有召回分组标题", settingsHtml.includes("group-title") === false);
+  check("设置页只留连接三字段", ["serverUrl", "apiKey", "peerPrefix"].every((id) =>
+    settingsHtml.includes(`id="${id}"`),
+  ));
+  check("页脚说清开关在 OpenViking 页面", settingsHtml.includes("「OpenViking」页面"));
+  check("settings.js 不再调 /recall-mode", settingsJs.includes("/recall-mode") === false);
+  check("settings.js 不再有召回下拉的状态", settingsJs.includes("recallGate") === false);
+  check(
+    "settings.js 保存只走 /conn",
+    (settingsJs.match(/hana\.api\.fetch\(/g) || []).length === 2 &&
+      settingsJs.includes('hana.api.fetch("/conn", {'),
+  );
 
   const manifest = JSON.parse(
     fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
@@ -1533,6 +1608,93 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("manifest 里 recallGate 枚举", props.recallGate?.enum, ["off", "rules"]);
   eq("manifest 里 queryMode 默认 last", props.queryMode?.default, "last");
   eq("manifest 里 queryMode 枚举", props.queryMode?.enum, ["last", "context"]);
+}
+
+// ================= ui: 召回下拉的收笔逻辑 =================
+{
+  // 服务端回的投影照着显示；形状不全时回退默认值，别让下拉变空。
+  eq("服务端回的召回策略照着显示", paintLayers({ recallGate: "rules", queryMode: "context" }), {
+    recallGate: "rules",
+    queryMode: "context",
+  });
+  eq("形状不全时回退默认值", paintLayers({}), { recallGate: "off", queryMode: "last" });
+  eq("null 也回退默认值", paintLayers(null), { recallGate: "off", queryMode: "last" });
+  eq("脏值回退默认值", paintLayers({ recallGate: "on", queryMode: "all" }), {
+    recallGate: "off",
+    queryMode: "last",
+  });
+
+  const shown = [];
+  const notes = [];
+  const apply = (layers) => shown.push(layers);
+  const flash = (text, bad) => notes.push([text, Boolean(bad)]);
+  const before = { recallGate: "off", queryMode: "last" };
+  const next = { recallGate: "rules", queryMode: "context" };
+
+  // 成功：整单一次提交两个键，界面收在服务端回的值上。
+  {
+    const sent = [];
+    const out = await commitLayers({
+      before,
+      next,
+      send: async (body) => {
+        sent.push(body);
+        return { ok: true, applied: ["recallGate", "queryMode"], ...next };
+      },
+      apply,
+      flash,
+    });
+    eq("一次只发一单", sent.length, 1);
+    eq("整单带上两个键", sent[0], next);
+    eq("成功时返回新值", out, { ok: true, layers: next });
+    eq("成功时界面停在服务端值上", shown.at(-1), next);
+    eq("成功时提示不是错误", notes.at(-1), ["召回策略已生效", false]);
+  }
+
+  // 失败（服务端整单拒）：退回上一次确认的值，报错，不谎报已生效。
+  {
+    const out = await commitLayers({
+      before: next,
+      next: { recallGate: "rules", queryMode: "bogus" },
+      send: async () => ({ ok: false, error: "queryMode 只能是 last / context" }),
+      apply,
+      flash,
+    });
+    eq("被拒时 ok 为 false", out.ok, false);
+    eq("被拒时界面退回上次确认的值", shown.at(-1), paintLayers(next));
+    eq("被拒时返回回滚后的值", out.layers, paintLayers(next));
+    eq("被拒时面板上有错误提示", notes.at(-1), ["queryMode 只能是 last / context", true]);
+  }
+
+  // 失败（网络抛错）：同一条回滚路。
+  {
+    const out = await commitLayers({
+      before,
+      next,
+      send: async () => {
+        throw new Error("网络不通");
+      },
+      apply,
+      flash,
+    });
+    eq("网络错也回滚", shown.at(-1), before);
+    eq("网络错也提示", notes.at(-1), ["网络不通", true]);
+    eq("网络错不算成功", out.ok, false);
+  }
+
+  // 半路失败不会出现「一半生效」：脏值连同合法值一起被服务端拒掉，界面整单回滚。
+  {
+    const shownCount = shown.length;
+    await commitLayers({
+      before,
+      next: { recallGate: "on", queryMode: "context" },
+      send: async () => ({ ok: false, error: "recallGate 只能是 off / rules" }),
+      apply,
+      flash,
+    });
+    eq("半单被拒时只落一次界面状态", shown.length - shownCount, 1);
+    eq("半单被拒时界面仍是旧值", shown.at(-1), before);
+  }
 }
 
 // ================= probe =================
