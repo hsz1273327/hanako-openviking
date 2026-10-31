@@ -1529,32 +1529,61 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
   check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
 
-  // 位置：技能路由 / 探针那一排之后，中枢与身份两栏之前。
-  const skillIdx = html.indexOf('data-key="skillRouting"');
-  const probeIdx = html.indexOf('data-key="probe"');
-  const colsIdx = html.indexOf('<section class="cols">');
+  // 位置：两栏之后、日志之前，占满整行（不在两栏里），跟 peer 名单同一栏。
+  const colsStart = html.indexOf('<section class="cols">');
+  const colsEnd = html.indexOf("</section>", colsStart);
+  const logsIdx = html.indexOf('<section class="card logs"');
+  const recallStart = html.indexOf('<section class="card recall"');
+  const recallEnd = html.indexOf("</section>", recallStart);
+  const peerIdx = html.indexOf('id="peerList"');
+  const peerCountIdx = html.indexOf('id="peerCount"');
+  check("召回管理一栏找得到", recallStart > 0 && recallEnd > recallStart,
+    `recall=${recallStart}..${recallEnd}`);
+  check("召回管理在两栏之后", recallStart > colsEnd, `recall=${recallStart} colsEnd=${colsEnd}`);
+  check("召回管理在日志之前", recallEnd < logsIdx, `recallEnd=${recallEnd} logs=${logsIdx}`);
   const hubIdx = html.indexOf(">中枢<");
   const identIdx = html.indexOf(">身份<");
-  check("技能路由与探针还在，且路由在前", skillIdx > 0 && probeIdx > skillIdx);
   check(
-    "两个下拉都在开关排之后",
-    gateIdx > probeIdx && modeIdx > probeIdx,
-    `gate=${gateIdx} mode=${modeIdx} probe=${probeIdx}`,
+    "中枢与身份仍在两栏里、在召回管理之前",
+    hubIdx > colsStart && hubIdx < colsEnd && identIdx > colsStart && identIdx < colsEnd &&
+      identIdx < recallStart,
+    `hub=${hubIdx} ident=${identIdx} cols=${colsStart}..${colsEnd} recall=${recallStart}`,
   );
-  check(
-    "两个下拉都在两栏之前",
-    gateIdx < colsIdx && modeIdx < colsIdx,
-    `gate=${gateIdx} mode=${modeIdx} cols=${colsIdx}`,
-  );
-  check("中枢与身份仍在那之后", hubIdx > modeIdx && identIdx > modeIdx);
-  check("召回判断在前、召回查询在后", gateIdx < modeIdx);
 
-  // 两个下拉同在一个占满整行的区块里，没有掉进中枢卡。
-  const rowStart = html.lastIndexOf('<section class="recall-row"', gateIdx);
-  const rowEnd = html.indexOf("</section>", rowStart);
-  check("两个下拉同在一行区块里", rowStart > 0 && modeIdx < rowEnd, `row=${rowStart}..${rowEnd}`);
-  check("这一行在两栏之外", rowStart < colsIdx);
-  check("这一行恰好两个下拉", (html.slice(rowStart, rowEnd).match(/<select /g) || []).length === 2);
+  // 同一栏：两个下拉与 peer 名单都在这个 section 里。
+  check(
+    "两个下拉与 peer 列表在同一个 section 内",
+    gateIdx > recallStart && gateIdx < recallEnd &&
+      modeIdx > recallStart && modeIdx < recallEnd &&
+      peerIdx > recallStart && peerIdx < recallEnd,
+    `recall=${recallStart}..${recallEnd} gate=${gateIdx} mode=${modeIdx} peer=${peerIdx}`,
+  );
+  check("计数也在这一栏里（仍算 peer 个数）",
+    peerCountIdx > recallStart && peerCountIdx < recallEnd);
+  const recallTitle = html
+    .slice(recallStart, recallEnd)
+    .match(/<h2 class="card-title">([^<]*)<\/h2>/);
+  eq("这一栏的标题是「召回管理」", recallTitle?.[1], "召回管理");
+  check("召回判断在前、召回查询在后", gateIdx < modeIdx);
+  // 这一栏恰好两个下拉，没有掉进中枢卡。
+  check("这一栏恰好两个下拉",
+    (html.slice(recallStart, recallEnd).match(/<select /g) || []).length === 2);
+  // 上下两块之间要有一条分隔，不然读起来像一锅端。
+  check("下拉与名单之间有分隔",
+    /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
+
+  // 技能路由 / 探针那排恢复成只有两个开关，没有下拉。
+  const toggleStart = html.indexOf('<section id="toggleGrid"');
+  const toggleEnd = html.indexOf("</section>", toggleStart);
+  const toggleBlock = html.slice(toggleStart, toggleEnd);
+  const skillIdx = toggleBlock.indexOf('data-key="skillRouting"');
+  const probeIdx = toggleBlock.indexOf('data-key="probe"');
+  check("技能路由与探针还在，且路由在前", skillIdx > 0 && probeIdx > skillIdx);
+  check("技能路由 / 探针那排里不含 select", toggleBlock.includes("<select") === false,
+    toggleBlock);
+  check("召回管理在开关排之后", recallStart > toggleEnd, `recall=${recallStart} toggleEnd=${toggleEnd}`);
+  check("那排恰好两个开关", (toggleBlock.match(/role="switch"/g) || []).length === 2,
+    toggleBlock);
 
   // 说明文字沿用面板的 hint 样式。
   check("规则跳过的说明在面板上", html.includes("≤8 字") && html.includes("指代词"));
@@ -1563,14 +1592,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     html.includes("300 字符") && html.includes("最新一句保持完整"),
   );
   check("说明小字用 field-hint", (html.match(/class="field-hint"/g) || []).length >= 2);
-
-  const recallRule = css.indexOf(".recall-row {");
-  check("召回那一行有整行栅格", recallRule >= 0);
+  // 原来那句排除说明保留，并说清排除了就不参与上面的召回。
   check(
-    "召回那一行是两个下拉并排",
+    "名单底部说明串起两件事",
+    html.includes("点一下任意一行可以排除这个 peer") && html.includes("不再参与上面的召回"),
+  );
+
+  // 旧的独立 recall-row 区块已并进召回管理栏：HTML / CSS / 脚本都不该再有它。
+  check("HTML 里不再有独立的 recall-row 区块", html.includes("recall-row") === false);
+  check("CSS 里不再有 recall-row 规则", css.includes(".recall-row") === false);
+  check("脚本里不再引用 recall-row", panelJs.includes("recall-row") === false);
+
+  const recallRule = css.indexOf(".recall-grid {");
+  check("下拉那一行有栅格", recallRule >= 0);
+  check(
+    "召回那两个下拉并排（一行两列）",
     /grid-template-columns\s*:\s*1fr 1fr/.test(css.slice(recallRule, css.indexOf("}", recallRule))),
   );
+  check("分隔线有样式", /\n\.recall-sep \{/.test(css));
+  check("peer 名单样式还在", /\n\.peer-list \{/.test(css));
   check("下拉沿用 field 输入框样式", /\.field input,\n\.field select \{/.test(css));
+  // 总闸关着时下拉也要跟着暗，别再指向已经不存在的类名。
+  check("置灰覆盖到召回下拉", /\.toggle, \.recall-grid/.test(panelJs));
 
   // 面板脚本：读 + 整单提交，改了就发，没有保存按钮。
   check("面板读取召回策略", panelJs.includes('jsonGet("/recall-mode")'));

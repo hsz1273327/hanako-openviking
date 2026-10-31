@@ -6,7 +6,7 @@
 //   GET  /controls  六个开关 + 召回范围 + 超时 + 预算
 //   POST /controls  改上面这组
 //   GET  /recall-mode  召回判断 / 召回查询
-//   POST /recall-mode  改上面这两个（面板那一排下拉，整单提交）
+//   POST /recall-mode  改上面这两个（面板「召回管理」栏里的两个下拉，整单提交）
 //   POST /conn      改连接三字段（地址 / key / 门牌前缀）
 //   GET  /peers     中枢里的 peer + 是否排除
 //   POST /peers     改排除名单
@@ -92,7 +92,7 @@ function applyControls(out) {
 }
 
 function paintDim(enabled) {
-  for (const node of document.querySelectorAll(".toggle, .recall-row")) {
+  for (const node of document.querySelectorAll(".toggle, .recall-grid")) {
     node.classList.toggle("dim", !enabled);
   }
   $("masterCard").setAttribute("data-off", enabled ? "false" : "true");

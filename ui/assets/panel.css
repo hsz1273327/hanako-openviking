@@ -235,25 +235,45 @@ html, body {
   line-height: 1.35;
 }
 
-/* ---------- 召回策略 ---------- */
+/* ---------- 召回管理（下拉 + peer 名单） ---------- */
 
 /* 召回的前两层跟上面两个开关一样是按整台机器算的、改了就生效，
-   所以占满一整行、两个下拉并排，不做折叠也没有保存按钮。 */
-.recall-row {
+   所以跟 peer 名单合成一栏：上面两个下拉并排，下面名单占满整行宽度。
+   不做折叠也没有保存按钮。 */
+.recall-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.recall-head .card-title {
+  margin: 0;
+}
+.peer-count {
+  font-size: 10.5px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.recall-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  background: rgba(128, 128, 128, 0.025);
   min-width: 0;
   transition: opacity 0.2s;
 }
-.recall-row.dim { opacity: 0.45; }
-.recall-row .field { margin-bottom: 0; }
+.recall-grid.dim { opacity: 0.45; }
+.recall-grid .field { margin-bottom: 0; }
 @media (max-width: 760px) {
-  .recall-row { grid-template-columns: 1fr; }
+  .recall-grid { grid-template-columns: 1fr; }
+}
+
+/* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」，
+   层次靠这条线分开，不另起一栏。 */
+.recall-sep {
+  height: 1px;
+  margin: 14px 0 12px;
+  background: rgba(128, 128, 128, 0.16);
 }
 
 .scoped-note {
@@ -466,22 +486,7 @@ html, body {
   opacity: 0.6;
 }
 
-/* ---------- peer 管理（独立一栏） ---------- */
-
-.peers-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.peers-head .card-title {
-  margin: 0;
-}
-.peer-count {
-  font-size: 10.5px;
-  opacity: 0.45;
-  font-variant-numeric: tabular-nums;
-}
+/* ---------- peer 名单（召回管理栏内） ---------- */
 
 /* 一屏约 8 行（行高 ~31px + 6px 间距），再多就内部滚动。 */
 .peer-list {

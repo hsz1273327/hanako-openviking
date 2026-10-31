@@ -54,27 +54,6 @@
       </div>
     </section>
 
-    <!-- 召回的前两层是按整台机器算的，跟上面两个开关一样改了就生效，所以并排一行、
-         没有保存按钮。第三层（召回范围）是按会话的，仍在右侧卡片里。 -->
-    <section class="recall-row" aria-label="召回策略">
-      <div class="field">
-        <label for="recallGate">召回判断</label>
-        <select id="recallGate">
-          <option value="off">不判断（每轮都召回）</option>
-          <option value="rules">规则跳过（极短的纯操作指令）</option>
-        </select>
-        <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令，拿不准就召回。</span>
-      </div>
-      <div class="field">
-        <label for="queryMode">召回查询</label>
-        <select id="queryMode">
-          <option value="last">最后一句</option>
-          <option value="context">带上文（最近三条）</option>
-        </select>
-        <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
-      </div>
-    </section>
-
     <p class="scoped-note">
       记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
     </p>
@@ -121,14 +100,39 @@
       </article>
     </section>
 
-    <!-- peer 是「中枢里还有谁」，跟「这台机器怎么连」不是一件事，单独一整行。 -->
-    <section class="card peers">
-      <header class="peers-head">
-        <h2 class="card-title">Peer 管理</h2>
+    <!-- 召回相关的两件事合成一栏：上面两个下拉定「什么算该查、拿什么查」，
+         下面名单定「谁能进候选池」。下拉跟上面两个开关一样按整台机器算、改了
+         就生效，没有保存按钮；第三层（召回范围）是按会话的，仍在右侧卡片里。
+         占满整行是因为名单需要整行宽度。 -->
+    <section class="card recall" aria-label="召回管理">
+      <header class="recall-head">
+        <h2 class="card-title">召回管理</h2>
         <span id="peerCount" class="peer-count"></span>
       </header>
+
+      <div class="recall-grid">
+        <div class="field">
+          <label for="recallGate">召回判断</label>
+          <select id="recallGate">
+            <option value="off">不判断（每轮都召回）</option>
+            <option value="rules">规则跳过（极短的纯操作指令）</option>
+          </select>
+          <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令，拿不准就召回。</span>
+        </div>
+        <div class="field">
+          <label for="queryMode">召回查询</label>
+          <select id="queryMode">
+            <option value="last">最后一句</option>
+            <option value="context">带上文（最近三条）</option>
+          </select>
+          <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
+        </div>
+      </div>
+
+      <div class="recall-sep" aria-hidden="true"></div>
+
       <div id="peerList" class="peer-list empty">正在读取</div>
-      <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与召回，再点恢复。</p>
+      <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与上面的召回，再点恢复。</p>
     </section>
 
     <section class="card logs">
