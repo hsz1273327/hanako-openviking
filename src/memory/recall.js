@@ -10,10 +10,17 @@
 // 注意 readOnly 只约束写回，不约束召回：观察模式仍然要能看到记忆。
 
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
-import { readConnection, readExcludedPeers, readSwitches } from "../ov/settings.js";
+import {
+  parseRerankChannels,
+  readConnection,
+  readExcludedPeers,
+  readSwitches,
+} from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
 import {
   MEMORY_TAG_CLOSE,
@@ -426,16 +433,171 @@ export const RERANK_TIMEOUT_MS = 600;
 /** 32 个 token 足够吐出几十个编号；再大只会让超时来得更早。 */
 export const RERANK_MAX_TOKENS = 32;
 
+/** 外部精排通道的默认超时。每路独立计时，一路慢不拖住另一路。 */
+export const RERANK_CHANNEL_TIMEOUT_MS = 800;
+
+/** 模型通道比 HTTP 通道多给一点时间：它还要等宿主调度。 */
+export const RERANK_MODEL_CHANNEL_TIMEOUT_MS = 1500;
+
+/** 送进 rerank 的候选正文上限。 */
+export const RERANK_DOCUMENT_CHARS = 800;
+
+/** 测试按钮用最近一轮候选，最多留这么多条，避免状态文件无限长。 */
+export const RERANK_SAMPLE_ITEMS_MAX = 20;
+
 /**
- * 问宿主模型哪些候选真正有用。通道选择与 gate 完全一致：
- * rerankModel 为空走 utility（宿主辅助模型），非空（provider/model）走 stream。
- * 超时 / 抛错都抛给调用方，由调用方决定“保留全部”。
+ * systemone 的默认超时与上限。
+ *
+ * 它一次问完全部候选，一次前向比一条一次更贵：5 条约 2.9s，8 条接近 5s。
+ * 所以缺省给 2500，配得再大也只认 5000——超了不如直接弃权，别把这一轮挂住。
  */
-export async function askRerankModel(sdk, switches, prompt) {
+export const SYSTEMONE_CHANNEL_TIMEOUT_MS = 2500;
+export const SYSTEMONE_TIMEOUT_MAX_MS = 5000;
+
+/** systemone 一次只问前这么多条：每题一次前向，再多的收益抵不过延迟。 */
+export const SYSTEMONE_MAX_CANDIDATES = 8;
+
+/** 送进 systemone 的单条候选正文上限。全部候选挤同一个 state，长条目会挤掉后面的人。 */
+export const SYSTEMONE_DOCUMENT_CHARS = 500;
+
+/** systemone 的 state 总长上限。放不下的候选不再塞进去，按未打分处理。 */
+export const SYSTEMONE_STATE_MAX_CHARS = 12000;
+
+/**
+ * systemone 的逐条提问。
+ *
+ * /v1/systemone 的设计是「一个 state + 多个问题」，不是「多条 state 各问一次」。
+ * 所以每条候选配一个问题，序号必须与 state 里候选列表的编号一一对应。
+ */
+export function systemoneInstructions(position) {
+  return `第 ${position} 条候选能帮助回答用户的问题吗`;
+}
+
+function raceTimeout(promise, timeoutMs, label = "channel") {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`TIMEOUT ${timeoutMs}ms ${label}`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * 通过现有出口发一次 JSON POST。
+ *
+ * 优先受管运行时（runtime.fetch 的代理信封支持任意 http/https URL）；
+ * 运行时没起来时退回 ctx.network.fetch（受 manifest 白名单限制）。
+ * 两条路都不通时直接抛，调用方把这一路当弃权处理。
+ */
+async function postJson(sdk, url, payload, timeoutMs) {
+  const transport = transportFor(sdk);
+  const body = JSON.stringify(payload);
+
+  if (transport.mode === "runtime") {
+    const out = await raceTimeout(
+      transport.send(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        timeoutMs,
+      }),
+      timeoutMs,
+    );
+    if (!out || typeof out !== "object") throw new Error("通道没有返回信封");
+    if (!out.ok) throw new Error(`HTTP ${out.status}`);
+    if (!out.data || typeof out.data !== "object") {
+      throw new Error("通道返回的不是 JSON 对象");
+    }
+    return out.data;
+  }
+
+  if (transport.mode === "direct") {
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    };
+    // 有 AbortSignal.timeout 就让底层也早点收手；外层 race 仍然是硬上限。
+    try {
+      if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+        init.signal = AbortSignal.timeout(timeoutMs);
+      }
+    } catch {
+      /* 老运行时没有这个静态方法，外层 race 照样管用 */
+    }
+    let response;
+    try {
+      response = await raceTimeout(transport.fetchImpl(url, init), timeoutMs);
+    } catch (error) {
+      // AbortSignal 先手时底层会扔 TimeoutError / AbortError，
+      // 统一成同一句，不然探针里两种出口的超时原因长得不一样。
+      const name = String(error?.name || "");
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new Error(`TIMEOUT ${timeoutMs}ms channel`);
+      }
+      throw error;
+    }
+    if (!response || !response.ok) throw new Error(`HTTP ${response?.status || 0}`);
+    const text = typeof response.text === "function" ? await response.text() : "";
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("通道返回的不是 JSON");
+    }
+    if (!data || typeof data !== "object") throw new Error("通道返回的不是 JSON 对象");
+    return data;
+  }
+
+  throw new Error("没有可用的出站通道");
+}
+
+function clipChars(text, max) {
+  const chars = Array.from(typeof text === "string" ? text : "");
+  return chars.length <= max ? chars.join("") : chars.slice(0, max).join("");
+}
+
+function channelEndpoint(url, suffix) {
+  return `${String(url || "").replace(/\/+$/, "")}${suffix}`;
+}
+
+/** 每路自己的超时；没有填就用类型默认值，配超了按这一路的上限收。 */
+function channelTimeout(channel, fallback, max = 30000) {
+  const value = Number(channel?.timeoutMs);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(Math.floor(value), max);
+}
+
+/** 分数只在 0..1 有意义。解析不出数字给 null，由调用方判为这一路失败。 */
+function scoreOf(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.min(1, Math.max(0, parsed));
+}
+
+/**
+ * systemone 单条答案的读数。
+ *
+ * 只认数字或数字串：显式 null / 缺项 / 字符串 "abc" 一律算「这条没答」，
+ * 不能借 Number(null) === 0 混成一张反对票。
+ */
+function noulScoreOf(value) {
+  if (typeof value === "number") return scoreOf(value);
+  if (typeof value === "string" && value.trim()) return scoreOf(Number(value));
+  return null;
+}
+
+/**
+ * 宿主模型通道的通用调用。askRerankModel 与可配置的 model 通道共用这一份；
+ * 唯一区别是模型标识与超时由调用方给。
+ */
+async function askModelChannel(sdk, { modelRef = "", prompt = "", timeoutMs = RERANK_TIMEOUT_MS } = {}) {
   const models = sdk?.models;
   if (!models) throw new Error("宿主没有提供 ctx.models");
 
-  const ref = rerankModelOf(switches);
+  const ref = typeof modelRef === "string" ? modelRef.trim() : "";
   const picked = ref ? parseModelRef(ref) : null;
   if (picked && typeof models.stream !== "function") {
     throw new Error("宿主没有提供 ctx.models.stream");
@@ -466,10 +628,7 @@ export async function askRerankModel(sdk, switches, prompt) {
 
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`TIMEOUT ${RERANK_TIMEOUT_MS}ms`)),
-      RERANK_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => reject(new Error(`TIMEOUT ${timeoutMs}ms`)), timeoutMs);
   });
 
   try {
@@ -483,6 +642,443 @@ export async function askRerankModel(sdk, switches, prompt) {
     throw error;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * 问宿主模型哪些候选真正有用。
+ *
+ * 保留旧签名：没有启用任何通道时，这就是兜底那一路。
+ * 超时 / 抛错都抛给调用方，由调用方决定“保留全部”。
+ */
+export async function askRerankModel(sdk, switches, prompt) {
+  return askModelChannel(sdk, {
+    modelRef: rerankModelOf(switches),
+    prompt,
+    timeoutMs: RERANK_TIMEOUT_MS,
+  });
+}
+
+/** OpenAI 兼容 /v1/rerank：一次带上全部候选，按 relevance_score 打分。 */
+async function scoreRerankChannel(sdk, channel, query, items) {
+  const data = await postJson(
+    sdk,
+    channelEndpoint(channel.url, "/v1/rerank"),
+    {
+      model: channel.model,
+      query,
+      documents: items.map((item) => clipChars(item.text, RERANK_DOCUMENT_CHARS)),
+    },
+    channelTimeout(channel, RERANK_CHANNEL_TIMEOUT_MS),
+  );
+
+  const list = Array.isArray(data?.results)
+    ? data.results
+    : Array.isArray(data?.data)
+      ? data.data
+      : null;
+  if (!list || !list.length) throw new Error("rerank 没有返回 results");
+
+  const scores = new Array(items.length).fill(0);
+  list.forEach((entry, position) => {
+    if (!entry || typeof entry !== "object") throw new Error("rerank 结果项不是对象");
+    const index = Number.isInteger(entry.index) ? entry.index : position;
+    const score = scoreOf(entry.relevance_score ?? entry.score);
+    if (score === null) throw new Error("rerank 结果缺少 relevance_score");
+    if (index >= 0 && index < items.length) scores[index] = score;
+  });
+  return scores;
+}
+
+/**
+ * 把用户问题与候选列表拼成 systemone 的 state。
+ *
+ * 序号是 rN 与候选下标的唯一纽带：只顺序编号，只在放不下时截断尾部，
+ * 所以「第 N 条」永远对应 items[N-1]。返回真正收进去的条数，调用方按它生成 r1..rN。
+ */
+export function buildSystemOneState(query, items) {
+  const list = (Array.isArray(items) ? items : []).map((item) =>
+    typeof item === "string" ? item : item?.text,
+  );
+  const head = `用户问题：${clipChars(query, SYSTEMONE_STATE_MAX_CHARS)}\n候选列表：`;
+  const lines = [];
+  let length = charLength(head);
+  for (const raw of list) {
+    const text = clipChars(typeof raw === "string" ? raw : "", SYSTEMONE_DOCUMENT_CHARS);
+    const line = `${lines.length + 1}. ${text}`;
+    const cost = charLength(line) + 1; // 前面那行换行
+    if (length + cost > SYSTEMONE_STATE_MAX_CHARS) break;
+    length += cost;
+    lines.push(line);
+  }
+  return {
+    state: lines.length ? `${head}\n${lines.join("\n")}` : head,
+    count: lines.length,
+  };
+}
+
+/**
+ * llama.cpp /v1/systemone：全部候选拼进同一个 state，一次请求问回全部概率。
+ *
+ * 逐条串行并不更快（每问一次前向），批量省的是 HTTP 往返和重复的 state 编码。
+ * 返回数组与 items 等长：没问的（超过 8 条、state 放不下、宿主没答）一律 null，
+ * 这些位置不参与这一路的标准化，但仍然是合法下标，供其它路投票。
+ */
+async function scoreSystemOneChannel(sdk, channel, query, items) {
+  const scores = new Array(items.length).fill(null);
+  const asked = items.slice(0, SYSTEMONE_MAX_CANDIDATES);
+  if (!asked.length) return scores;
+
+  const { state, count } = buildSystemOneState(query, asked);
+  if (!count) return scores;
+
+  const questions = {};
+  for (let position = 1; position <= count; position += 1) {
+    questions[`r${position}`] = { type: "noul", instructions: systemoneInstructions(position) };
+  }
+
+  const data = await postJson(
+    sdk,
+    channelEndpoint(channel.url, "/v1/systemone"),
+    { model: channel.model, state, questions },
+    channelTimeout(channel, SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_MAX_MS),
+  );
+
+  const answers = data?.answers;
+  let missing = 0;
+  for (let position = 1; position <= count; position += 1) {
+    const score = noulScoreOf(answers?.[`r${position}`]?.noul);
+    if (score === null) missing += 1;
+    else scores[position - 1] = score;
+  }
+  // 超过一半没答：不是个别缺项，是这一路整体不可信，整路弃权。
+  if (missing * 2 > count) {
+    throw new Error(`systemone 有 ${missing}/${count} 条没有返回分数`);
+  }
+  return scores;
+}
+
+/** 宿主模型通道：沿用编号清单，挑中 1、未挑中 0。 */
+async function scoreModelChannel(sdk, switches, channel, query, items) {
+  const prompt = renderRerankPrompt(rerankPromptOf(switches), query, items);
+  if (!prompt) throw new Error("重排提示词为空");
+
+  const answer = channel.legacy
+    ? await askRerankModel(sdk, switches, prompt)
+    : await askModelChannel(sdk, {
+        modelRef: channel.model,
+        prompt,
+        timeoutMs: channelTimeout(channel, RERANK_MODEL_CHANNEL_TIMEOUT_MS),
+      });
+  const indexes = parseRerankAnswer(answer, items.length);
+  if (indexes === null) throw new Error("模型回答解析不出编号");
+  const picked = new Set(indexes);
+  return items.map((_, index) => (picked.has(index) ? 1 : 0));
+}
+
+/**
+ * 这一轮实际要跑的通道。
+ *
+ * 有启用通道就按配置跑；一个启用通道都没有时，退回旧的 rerankPrompt / rerankModel
+ * 那一路（等价于一个 weight=1 的 model 通道），已有配置不会突然失灵。
+ */
+export function rerankChannelsOf(switches) {
+  const raw = switches?.rerankChannels;
+  const configured = Array.isArray(raw) ? raw : parseRerankChannels(raw);
+  const enabled = configured.filter((channel) => channel && channel.enabled !== false);
+  if (enabled.length) return enabled;
+  return [
+    {
+      type: "model",
+      name: "兜底模型",
+      url: "",
+      model: rerankModelOf(switches),
+      weight: 1,
+      enabled: true,
+      legacy: true,
+    },
+  ];
+}
+
+/**
+ * 一路分数先在自己这批候选内做 min-max 标准化，拉平到 0..1。
+ *
+ * 三种通道的量纲完全不同：relevance_score 常落在 0..0.9，noul 落 0.04..0.91，
+ * model 那路干脆是 0/1。不标准化就直接加权，等于用三把不同的尺子量同一样东西，
+ * 跨度大的那把会自动盖住跨度小的那把。
+ *
+ * 全部候选同分（max === min）时返回 null：这一路在这批上没有区分力，
+ * 投出去也是废票，顺便避开除零。
+ * 例外：全 0（max === 0）不是“没有区分力”，是这一路明确说一条都不要，
+ * 按全 0 参与合并，交给 dropRejectedIndexes 去落实。
+ *
+ * null 表示「这一路没给这条打分」（systemone 只问前 8 条、某条作答缺失）：
+ * 它不参与 min/max，也不表态，在 normalized 里保持 null。
+ */
+export function normalizeChannelScores(scores) {
+  if (!Array.isArray(scores) || !scores.length) return null;
+  const absent = (raw) => raw === null || raw === undefined;
+  let min = Infinity;
+  let max = -Infinity;
+  let seen = 0;
+  for (const raw of scores) {
+    if (absent(raw)) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    if (value < min) min = value;
+    if (value > max) max = value;
+    seen += 1;
+  }
+  if (!seen) return null;
+  if (!(max > min)) {
+    if (max === 0) {
+      return {
+        min: 0,
+        max: 0,
+        normalized: scores.map((raw) => (absent(raw) ? null : 0)),
+        allZero: true,
+      };
+    }
+    return null;
+  }
+  const span = max - min;
+  return {
+    min,
+    max,
+    normalized: scores.map((raw) => (absent(raw) ? null : (Number(raw) - min) / span)),
+  };
+}
+
+/**
+ * 先标准化、再加权合并。只统计成功且未弃权的通道；全部弃权时返回 null，
+ * 调用方据此原样保留全部候选。
+ * 纯函数，测试可以直接喂原始分数。
+ */
+export function mergeRerankScores(results, total) {
+  if (!Array.isArray(results) || !Number.isFinite(total) || total <= 0) return null;
+  const active = [];
+  for (const result of results) {
+    if (!result || !result.ok || result.abstained === true) continue;
+    if (!Number.isFinite(result.weight) || result.weight <= 0) continue;
+
+    let normalized = null;
+    if (Array.isArray(result.normalized) && result.normalized.length === total) {
+      // null = 这一路没给这条打分，原样留空，合并时按 0 贡献算。
+      normalized = result.normalized.map((value) =>
+        value === null || value === undefined ? null : Number(value),
+      );
+      if (normalized.some((value) => value !== null && !Number.isFinite(value))) normalized = null;
+    }
+    if (!normalized) {
+      if (!Array.isArray(result.scores) || result.scores.length !== total) continue;
+      const scaled = normalizeChannelScores(result.scores);
+      if (!scaled) continue;
+      normalized = scaled.normalized;
+    }
+    active.push({ weight: result.weight, normalized });
+  }
+  if (!active.length) return null;
+
+  // 逐条算分母：这一条没被某路打分的，那一路就不该对它投票。
+  // 若把 null 当 0 算进去，只需这一路漏一条，那条就会被自家分母拉下去。
+  return Array.from({ length: total }, (_, index) => {
+    let sum = 0;
+    let weightSum = 0;
+    for (const result of active) {
+      const value = result.normalized[index];
+      if (value === null || value === undefined) continue;
+      sum += value * result.weight;
+      weightSum += result.weight;
+    }
+    return weightSum > 0 ? sum / weightSum : 0;
+  });
+}
+
+/** 合并分降序；同分保持原顺序。排序不管取舍，取舍看 dropRejectedIndexes。 */
+export function rankRerankIndexes(scores) {
+  if (!Array.isArray(scores)) return [];
+  return scores
+    .map((score, index) => ({ score, index }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.index);
+}
+
+/**
+ * 丢掉“所有成功通道的原始分都是 0”的候选。
+ *
+ * 只看原始分，不看标准化后的分：标准化后每路的最小值一定是 0，
+ * 要是拿它当“明确不要”，任何连续通道的末位都会被丢，等于标准化本身在削召回。
+ * 原始分 0 才是真的投了反对票（model 没挑中、rerank 给了 0）。
+ * null（这一路没给这条打分）不算反对票：没人打分的那条照旧保留。
+ */
+export function dropRejectedIndexes(indexes, results) {
+  if (!Array.isArray(indexes)) return [];
+  const active = (Array.isArray(results) ? results : []).filter(
+    (result) => result && result.ok && result.abstained !== true && Array.isArray(result.scores),
+  );
+  if (!active.length) return indexes;
+  return indexes.filter((index) => {
+    const scored = active
+      .map((result) => result.scores[index])
+      .filter((value) => value !== null && value !== undefined);
+    if (!scored.length) return true;
+    return scored.some((value) => Number(value) > 0);
+  });
+}
+
+/**
+ * 跑一轮多路精排。
+ *
+ * 每路先在自己批内 min-max 标准化，再按权重平均；同分的一路直接弃权。
+ * 没一路可用 -> fallback=true、indexes 是全部候选（不排序、不删）。
+ * 单路失败只让那一路弃权，不参与分母，也不会把它的失败当成 0 分。
+ */
+export async function runRerankChannels({ sdk, switches, query, items, channels } = {}) {
+  const startedAt = Date.now();
+  // 接受 [{text}] 与纯字符串两种候选，测试可直接传文本。
+  const candidates = (Array.isArray(items) ? items : []).map((item) =>
+    typeof item === "string" ? { text: item } : item,
+  );
+  const list = Array.isArray(channels) && channels.length ? channels : rerankChannelsOf(switches);
+
+  const results = await Promise.all(
+    list.map(async (channel) => {
+      const channelStarted = Date.now();
+      try {
+        let scores;
+        if (channel.type === "rerank") {
+          scores = await scoreRerankChannel(sdk, channel, query, candidates);
+        } else if (channel.type === "systemone") {
+          scores = await scoreSystemOneChannel(sdk, channel, query, candidates);
+        } else if (channel.type === "model") {
+          scores = await scoreModelChannel(sdk, switches, channel, query, candidates);
+        } else {
+          throw new Error(`未知通道类型 ${channel.type}`);
+        }
+        const scaled = normalizeChannelScores(scores);
+        if (!scaled) {
+          // 所有候选同分：这一路在这批上没有区分力，弃权，不进分母。
+          // 全是 null 是另一回事：这一路一条都没打分，同样没票可投。
+          return {
+            channel,
+            weight: channel.weight,
+            ok: false,
+            abstained: true,
+            scores,
+            error: Array.isArray(scores) && scores.some((score) => score !== null && score !== undefined)
+              ? "候选全部同分，这一路没有区分力"
+              : "这一路没有给任何候选打分",
+            elapsedMs: Date.now() - channelStarted,
+          };
+        }
+        return {
+          channel,
+          weight: channel.weight,
+          ok: true,
+          scores,
+          normalized: scaled.normalized,
+          range: [scaled.min, scaled.max],
+          elapsedMs: Date.now() - channelStarted,
+        };
+      } catch (error) {
+        return {
+          channel,
+          weight: channel.weight,
+          ok: false,
+          error: reasonOf(error),
+          elapsedMs: Date.now() - channelStarted,
+        };
+      }
+    }),
+  );
+
+  const merged = mergeRerankScores(results, candidates.length);
+  const fallback = merged === null;
+  const indexes = fallback
+    ? candidates.map((_, index) => index)
+    : dropRejectedIndexes(rankRerankIndexes(merged), results);
+
+  return {
+    // 探针把两段数字都留下：原始分数看量纲，标准化分数看实际贡献。
+    channels: results.map((result) => ({
+      name: result.channel.name || "",
+      type: result.channel.type,
+      weight: result.channel.weight,
+      ok: result.ok,
+      abstained: result.abstained === true,
+      elapsedMs: result.elapsedMs,
+      ...(Array.isArray(result.scores) ? { scores: result.scores } : {}),
+      ...(result.ok
+        ? { normalized: result.normalized, range: result.range }
+        : { error: result.error }),
+    })),
+    merged,
+    indexes,
+    kept: indexes.map((index) => candidates[index]),
+    fallback,
+    channelCount: list.length,
+    elapsedMs: Date.now() - startedAt,
+  };
+}
+
+function sampleFile(dataDir, sessionId) {
+  const safe = String(sessionId || "unknown")
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .slice(0, 160);
+  return path.join(dataDir || ".", "rerank-samples", `${safe}.json`);
+}
+
+/**
+ * 留一份最近一轮的真实候选，供面板「测试」按钮复跑，不注入。
+ * 写不进去不影响召回，所以整段吞异常。
+ */
+export function writeRerankSample(sdk, sessionId, { query, items } = {}) {
+  if (!sessionId || !Array.isArray(items)) return;
+  try {
+    const file = sampleFile(sdk?.dataDir, sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const payload = {
+      sessionId,
+      at: new Date().toISOString(),
+      query: clipChars(typeof query === "string" ? query : "", 2000),
+      items: items
+        .slice(0, RERANK_SAMPLE_ITEMS_MAX)
+        .map((item) => ({
+          text: clipChars(
+            typeof item === "string" ? item : item?.text,
+            RERANK_DOCUMENT_CHARS,
+          ),
+        }))
+        .filter((item) => item.text),
+    };
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, "utf8");
+    fs.renameSync(tmp, file);
+  } catch {
+    /* 样本只是测试用的，留不下来也不能影响这一轮 */
+  }
+}
+
+/** 读回最近一轮候选。没有样本时返回 null。 */
+export function readRerankSample(sdk, sessionId) {
+  if (!sessionId) return null;
+  try {
+    const raw = fs.readFileSync(sampleFile(sdk?.dataDir, sessionId), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const items = Array.isArray(parsed.items)
+      ? parsed.items
+          .map((item) => ({ text: typeof item?.text === "string" ? item.text : "" }))
+          .filter((item) => item.text)
+      : [];
+    if (!items.length) return null;
+    return {
+      at: typeof parsed.at === "string" ? parsed.at : "",
+      query: typeof parsed.query === "string" ? parsed.query : "",
+      items,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -817,34 +1413,32 @@ export function createRecallHandler(sdk, options = {}) {
     }
 
     // 重排必须在拼成一段文本之前做：拼完就分不清候选边界了。
-    // 默认 off，一次模型都不问；只有 llm 且候选 ≥ 2 条才值得让模型挑。
+    // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
     let kept = items;
     if (switches.rerank === "llm" && items.length >= 2) {
-      const startedAt = Date.now();
-      let indexes = null;
-      let fallback = false;
-      try {
-        const prompt = renderRerankPrompt(rerankPromptOf(switches), lastText, items);
-        if (!prompt) {
-          // 默认模板永远非空；走到这里只可能是配置成了空且默认被意外绕过。
-          fallback = true;
-        } else {
-          const answer = await askRerankModel(sdk, switches, prompt);
-          indexes = parseRerankAnswer(answer, items.length);
-          // null 是解析失败，不是“全都不要”：看不懂就一条都不删。
-          if (indexes === null) fallback = true;
-        }
-      } catch (error) {
-        fallback = true;
-        log(
-          sdk,
-          "info",
-          `rerank: llm failed, keep all (session=${sessionId}) ${reasonOf(error)}`,
-        );
-      }
+      // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
+      writeRerankSample(sdk, sessionId, { query: lastText, items });
 
-      if (indexes) kept = indexes.map((index) => items[index]);
-      const elapsedMs = Date.now() - startedAt;
+      const outcome = await runRerankChannels({
+        sdk,
+        switches,
+        query: lastText,
+        items,
+      });
+      kept = outcome.kept;
+
+      for (const channel of outcome.channels) {
+        if (!channel.ok) {
+          log(
+            sdk,
+            "info",
+            `rerank: channel ${channel.type} failed, abstained (session=${sessionId}) ${channel.error}`,
+          );
+        }
+      }
+      if (outcome.fallback) {
+        log(sdk, "info", `rerank: all channels abstained, keep all (session=${sessionId})`);
+      }
 
       if (switches.probe && typeof options.probe === "function") {
         try {
@@ -852,9 +1446,11 @@ export function createRecallHandler(sdk, options = {}) {
             session,
             query: lastText,
             candidates: items.length,
+            enabledChannels: outcome.channelCount,
+            channels: outcome.channels,
             kept: kept.length,
-            fallback,
-            elapsedMs,
+            fallback: outcome.fallback,
+            elapsedMs: outcome.elapsedMs,
           });
         } catch {
           /* 探针写不进去不能影响本轮对话 */
@@ -862,7 +1458,7 @@ export function createRecallHandler(sdk, options = {}) {
       }
 
       if (!kept.length) {
-        // 模型明确说“一条都用不上”（索引数组为空）：本轮不注入。
+        // 有通道成功，且把所有候选都打了 0 分：本轮不注入。
         log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
         return undefined;
       }

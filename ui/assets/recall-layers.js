@@ -7,6 +7,22 @@
 export const RECALL_GATES = Object.freeze(["off", "rules", "llm"]);
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
+export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
+export const RERANK_CHANNELS_MAX = 8;
+export const RERANK_CHANNEL_LABELS = Object.freeze({
+  rerank: "Rerank（/v1/rerank）",
+  systemone: "SystemOne（/v1/systemone）",
+  model: "宿主模型",
+});
+// 每种通道的默认超时（ms）。与 src/memory/recall.js 的常量同值：
+// systemone 一次问完全部候选，候选越多越慢，所以给得比另两种宽。
+export const RERANK_CHANNEL_TIMEOUT_DEFAULTS = Object.freeze({
+  rerank: 800,
+  systemone: 2500,
+  model: 1500,
+});
+// systemone 的超时上限，配得再大也只认这个数。
+export const SYSTEMONE_TIMEOUT_MAX = 5000;
 export const GATE_PROMPT_MAX = 2000;
 export const RERANK_PROMPT_MAX = 2000;
 
@@ -133,12 +149,91 @@ export function paintGateConfig(out) {
   };
 }
 
+/** 重排通道的界面归一化：只收敛形状，不丢用户正在编辑的行。 */
+export function normalizeRerankChannel(value) {
+  const item = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const type = oneOf(item.type, RERANK_CHANNEL_TYPES, "rerank");
+  const weight = Number(item.weight);
+  const timeout = Number(item.timeoutMs);
+  return {
+    type,
+    name: typeof item.name === "string" ? item.name : "",
+    url: typeof item.url === "string" ? item.url.trim() : "",
+    model: typeof item.model === "string" ? item.model.trim() : "",
+    weight: Number.isFinite(weight) && weight >= 0.1 && weight <= 10 ? weight : 1,
+    enabled: item.enabled !== false,
+    // 界面不编辑超时，但存量通道里填了要原样带回去，不能被一次保存洗掉。
+    ...(Number.isFinite(timeout) && timeout > 0 && timeout <= 30000
+      ? { timeoutMs: Math.floor(timeout) }
+      : {}),
+  };
+}
+
+/**
+ * /recall-mode 回的是数组；存量配置可能是 JSON 串。两种都接，形状坏了回空数组。
+ * 与 src/ov/settings.js 的 parseRerankChannels 同方向，但这里不丢行、不记日志：
+ * 面板只负责把服务端确认过的值画出来。
+ */
+export function normalizeRerankChannels(value) {
+  let list = [];
+  if (Array.isArray(value)) {
+    list = value;
+  } else if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {
+      list = [];
+    }
+  }
+  return list.slice(0, RERANK_CHANNELS_MAX).map(normalizeRerankChannel);
+}
+
+/** 通道数组 -> POST 用的 JSON 串。 */
+export function rerankChannelsText(list) {
+  return JSON.stringify(normalizeRerankChannels(list));
+}
+
+/**
+ * 一行通道是否已经填到“可以提交”的程度。
+ *
+ * 新加的空模板先留在界面上让人填，不写服务端；否则第一次 change 就会被
+ * 服务端的整单校验打回，用户刚敲的字也会跟着回滚掉。
+ */
+export function isCompleteRerankChannel(value) {
+  const channel = normalizeRerankChannel(value);
+  if (channel.type === "model") {
+    return !channel.model || normalizeGateModel(channel.model) !== "";
+  }
+  if (!channel.url || !channel.model) return false;
+  try {
+    const url = new URL(channel.url);
+    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** 「添加通道」推入的空模板。默认给一个 rerank 行。 */
+export function emptyRerankChannel(type = "rerank") {
+  return normalizeRerankChannel({ type, name: "", url: "", model: "", weight: 1, enabled: true });
+}
+
+/** 一行通道的说明：给列表底部计数用。 */
+export function rerankChannelsCountText(list) {
+  const channels = normalizeRerankChannels(list);
+  const enabled = channels.filter((channel) => channel.enabled).length;
+  if (!channels.length) return "还没有通道";
+  return `${channels.length} 路通道 · ${enabled} 路启用`;
+}
+
 /** 重排三个字段：开关、提示词模板、模型标识。 */
 export function paintRerankConfig(out) {
   return {
     rerank: normalizeRerank(out?.rerank),
     rerankPrompt: normalizeRerankPrompt(out?.rerankPrompt),
     rerankModel: normalizeRerankModel(out?.rerankModel),
+    rerankChannels: normalizeRerankChannels(out?.rerankChannels),
   };
 }
 

@@ -132,9 +132,9 @@
           <label for="rerank">结果重排</label>
           <select id="rerank">
             <option value="off">关</option>
-            <option value="llm">模型判断</option>
+            <option value="llm">开启</option>
           </select>
-          <span class="field-hint">开启后用同一个模型通道挑出真正有用的候选；解析失败、超时或没权限时一律全保留。</span>
+          <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
         </div>
       </div>
 
@@ -178,11 +178,28 @@
         </div>
 
         <div class="field">
-          <label for="rerankModel">重排模型</label>
+          <label for="rerankModel">兜底模型（无启用通道时）</label>
           <select id="rerankModel">
             <option value="">默认（宿主辅助模型）</option>
           </select>
           <span id="rerankModelsHint" class="field-hint" hidden></span>
+        </div>
+
+        <!-- 多路精排通道。通道行由脚本按配置渲染；列表为空时只显示一句空态文案。
+             静态 HTML 里不放下拉，避免与“重排展开区只有一个模型下拉”的结构约束打架。 -->
+        <div class="field channel-field">
+          <div class="prompt-head">
+            <label>精排通道</label>
+            <span id="rerankChannelsCount" class="prompt-status"></span>
+            <button id="rerankTestBtn" class="btn ghost sm" type="button">测试</button>
+          </div>
+          <p id="rerankChannelsEmpty" class="field-hint">还没有通道，精排不会生效</p>
+          <div id="rerankChannelList" class="channel-list"></div>
+          <div class="channel-actions">
+            <button id="rerankAddChannel" class="btn ghost sm" type="button">添加通道</button>
+          </div>
+          <pre id="rerankTestResult" class="channel-result" hidden></pre>
+          <span class="field-hint">rerank / systemone 走配置的 URL；model 走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。超时留空用该类型默认值：systemone 2500ms，候选越多越慢（一次问完全部候选，只问前 8 条）。</span>
         </div>
       </div>
 

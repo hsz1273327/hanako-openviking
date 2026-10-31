@@ -11,6 +11,7 @@ import {
   GATE_PROMPT_MAX,
   QUERY_MODES,
   RECALL_GATES,
+  RERANK_CHANNELS_MAX,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
   normalizeGateModel,
@@ -20,7 +21,12 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  parseRerankChannel,
+  parseRerankChannels,
+  readSwitches,
 } from "../src/ov/settings.js";
+import { readRerankSample, runRerankChannels } from "../src/memory/recall.js";
+import { sessionKeyOf } from "../src/state/session.js";
 
 const SPECS = Object.freeze({
   recallGate: RECALL_GATES,
@@ -59,6 +65,13 @@ async function current(ctx) {
     rerank: normalizeRerank(await ctx.config.get("rerank")),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
     rerankModel: normalizeRerankModel(await ctx.config.get("rerankModel")),
+    rerankChannels: parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {
+      try {
+        ctx?.logger?.warn?.(`openviking ${message}`);
+      } catch {
+        /* 日志不能影响读数 */
+      }
+    }),
   };
 }
 
@@ -132,11 +145,94 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push(["rerankModel", String(body.rerankModel).trim()]);
     }
 
+    if (has(body, "rerankChannels")) {
+      if (typeof body.rerankChannels !== "string") {
+        return c.json({ ok: false, error: "rerankChannels 必须是 JSON 字符串" }, 400);
+      }
+      const text = body.rerankChannels.trim();
+      if (!text) {
+        changes.push(["rerankChannels", ""]);
+      } else {
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          return c.json({ ok: false, error: "rerankChannels 不是合法 JSON" }, 400);
+        }
+        if (!Array.isArray(parsed)) {
+          return c.json({ ok: false, error: "rerankChannels 必须是数组" }, 400);
+        }
+        if (parsed.length > RERANK_CHANNELS_MAX) {
+          return c.json(
+            { ok: false, error: `rerankChannels 最多 ${RERANK_CHANNELS_MAX} 路` },
+            400,
+          );
+        }
+        const channels = [];
+        for (const [index, item] of parsed.entries()) {
+          const channel = parseRerankChannel(item);
+          if (!channel) {
+            return c.json(
+              { ok: false, error: `rerankChannels 第 ${index + 1} 项字段不完整` },
+              400,
+            );
+          }
+          channels.push(channel);
+        }
+        changes.push(["rerankChannels", JSON.stringify(channels)]);
+      }
+    }
+
     for (const [key, value] of changes) await ctx.config.set(key, value);
 
     return c.json(
       { ok: true, applied: changes.map(([key]) => key), ...(await current(ctx)) },
       200,
     );
+  });
+
+  // 面板「测试」按钮：拿这个会话最近一轮留存的真实候选复跑一次精排。
+  // 只读样本与配置，不注入、不改会话状态。
+  app.post("/recall-mode/test", async (c) => {
+    let body = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ ok: false, error: "body 不是 JSON" }, 400);
+    }
+    const sessionId = sessionKeyOf(typeof body?.session === "string" ? body.session : "");
+    if (!sessionId) return c.json({ ok: false, error: "unknown session key" }, 400);
+
+    const sample = readRerankSample(ctx, sessionId);
+    if (!sample) {
+      return c.json({ ok: false, error: "这个会话还没有可复跑的召回候选" }, 200);
+    }
+
+    try {
+      const switches = await readSwitches(ctx);
+      const outcome = await runRerankChannels({
+        sdk: ctx,
+        switches,
+        query: sample.query,
+        items: sample.items,
+      });
+      return c.json(
+        {
+          ok: true,
+          at: sample.at,
+          query: sample.query,
+          candidates: sample.items.length,
+          items: sample.items.map((item) => item.text.slice(0, 120)),
+          channels: outcome.channels,
+          merged: outcome.merged,
+          kept: outcome.indexes,
+          fallback: outcome.fallback,
+          elapsedMs: outcome.elapsedMs,
+        },
+        200,
+      );
+    } catch (error) {
+      return c.json({ ok: false, error: String(error?.message || error) }, 200);
+    }
   });
 }

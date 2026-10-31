@@ -5,8 +5,9 @@
 //   GET  /probe     日志尾部
 //   GET  /controls  六个开关 + 召回范围 + 超时 + 预算
 //   POST /controls  改上面这组
-//   GET  /recall-mode  召回判断 / 召回查询 / llm 提示词与判断模型
+//   GET  /recall-mode  召回判断 / 召回查询 / llm 提示词与判断模型 / 精排通道
 //   POST /recall-mode  改上面这组（面板「召回管理」栏，整单提交）
+//   POST /recall-mode/test  用当前会话最近一轮候选复跑精排（不注入）
 //   GET  /models       宿主公开模型目录（自选模型下拉的选项）
 //   POST /conn      改连接三字段（地址 / key / 门牌前缀）
 //   GET  /peers     中枢里的 peer + 是否排除
@@ -26,13 +27,23 @@ import {
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
+  RERANK_CHANNEL_LABELS,
+  RERANK_CHANNELS_MAX,
+  RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  RERANK_CHANNEL_TYPES,
+  SYSTEMONE_TIMEOUT_MAX,
   commitLayers,
+  emptyRerankChannel,
+  isCompleteRerankChannel,
   modelOptions,
   normalizeGatePrompt,
+  normalizeRerankChannels,
   normalizeRerankPrompt,
   paintRecallConfig,
   promptDraft,
   promptStatus,
+  rerankChannelsCountText,
+  rerankChannelsText,
   rerankPromptDraft,
   rerankPromptStatus,
 } from "./recall-layers.js";
@@ -53,6 +64,9 @@ let layersDirty = false;
 // 用户动过提示词之后，刷新不再拿默认文案去盖他（包括他故意清空的那次）。
 let promptTouched = false;
 let rerankPromptTouched = false;
+// 通道行的编辑草稿。服务端确认后从这里重画；读 /recall-mode 也覆盖它。
+let rerankChannelsDraft = [];
+let rerankTestPending = false;
 // 最近一次成功读到的 peer 列表。点击切换排除时先改这份，再按它提交整单。
 let peerCache = [];
 let peerWritePending = false;
@@ -362,10 +376,250 @@ function paintGatePanels() {
   if (advanced) advanced.hidden = $("recallGate").value !== "llm";
 }
 
-/** 只有 rerank=llm 才展开重排提示词与模型。 */
+/** 只有 rerank=llm 才展开重排提示词、兜底模型与精排通道。 */
 function paintRerankPanels() {
   const advanced = $("rerankAdvanced");
   if (advanced) advanced.hidden = $("rerank").value !== "llm";
+}
+
+function updateChannel(index, patch) {
+  const current = rerankChannelsDraft[index];
+  if (!current) return;
+  rerankChannelsDraft[index] = { ...current, ...patch };
+}
+
+function channelCell(labelText, control, wide = false) {
+  const cell = document.createElement("label");
+  cell.className = wide ? "channel-cell wide" : "channel-cell";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  cell.append(label, control);
+  return cell;
+}
+
+function textInput(value, placeholder) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.spellcheck = false;
+  input.value = value;
+  input.placeholder = placeholder;
+  return input;
+}
+
+/**
+ * 通道列表：每行是类型 / 名称 / URL / 模型 / 权重 / 启用 / 删除。
+ * 只在 change 时提交，不抢正在输入的光标；
+ */
+function renderRerankChannels(list) {
+  const box = $("rerankChannelList");
+  if (!box) return;
+  rerankChannelsDraft = normalizeRerankChannels(list);
+  box.textContent = "";
+
+  const empty = $("rerankChannelsEmpty");
+  if (empty) empty.hidden = rerankChannelsDraft.length > 0;
+  const count = $("rerankChannelsCount");
+  if (count) count.textContent = rerankChannelsCountText(rerankChannelsDraft);
+  const add = $("rerankAddChannel");
+  if (add) add.disabled = rerankChannelsDraft.length >= RERANK_CHANNELS_MAX;
+
+  rerankChannelsDraft.forEach((channel, index) => {
+    const row = document.createElement("div");
+    row.className = "channel-row";
+    row.dataset.index = String(index);
+
+    const head = document.createElement("div");
+    head.className = "channel-row-head";
+    const title = document.createElement("b");
+    title.textContent = `通道 ${index + 1}`;
+
+    const enabledLabel = document.createElement("label");
+    enabledLabel.className = "channel-enabled";
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = channel.enabled;
+    enabled.addEventListener("change", () => {
+      updateChannel(index, { enabled: enabled.checked });
+      saveLayers();
+    });
+    enabledLabel.append(enabled, document.createTextNode(" 启用"));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn ghost sm";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => {
+      rerankChannelsDraft.splice(index, 1);
+      renderRerankChannels(rerankChannelsDraft);
+      saveLayers();
+    });
+    head.append(title, enabledLabel, remove);
+
+    const type = document.createElement("select");
+    for (const value of RERANK_CHANNEL_TYPES) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = RERANK_CHANNEL_LABELS[value] || value;
+      type.appendChild(option);
+    }
+    type.value = channel.type;
+    type.addEventListener("change", () => {
+      // 那一格的默认超时跟类型走，placeholder 与上限一起换。
+      timeout.placeholder = String(RERANK_CHANNEL_TIMEOUT_DEFAULTS[type.value] ?? 800);
+      timeout.max = String(type.value === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000);
+      updateChannel(index, { type: type.value });
+      saveLayers();
+    });
+
+    const name = textInput(channel.name, "显示名，可空");
+    name.addEventListener("change", () => {
+      updateChannel(index, { name: name.value });
+      saveLayers();
+    });
+
+    const url = textInput(channel.url, "http://127.0.0.1:8080");
+    url.addEventListener("change", () => {
+      updateChannel(index, { url: url.value });
+      saveLayers();
+    });
+
+    const model = textInput(channel.model, channel.type === "model" ? "provider/model 或空" : "模型名");
+    model.addEventListener("change", () => {
+      updateChannel(index, { model: model.value });
+      saveLayers();
+    });
+
+    const weight = document.createElement("input");
+    weight.type = "number";
+    weight.min = "0.1";
+    weight.max = "10";
+    weight.step = "0.1";
+    weight.value = String(channel.weight);
+    weight.addEventListener("change", () => {
+      const parsed = Number(weight.value);
+      if (!Number.isFinite(parsed)) {
+        weight.value = String(channel.weight);
+        return;
+      }
+      const clamped = Math.min(10, Math.max(0.1, parsed));
+      weight.value = String(clamped);
+      updateChannel(index, { weight: clamped });
+      saveLayers();
+    });
+
+    // 超时那一格：留空 = 用该类型的默认值（placeholder 就显示这个数）。
+    // systemone 一次问完全部候选，候选越多越慢，所以提示只挂在它下面。
+    const timeout = document.createElement("input");
+    timeout.type = "number";
+    timeout.min = "200";
+    timeout.max = String(
+      channel.type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000,
+    );
+    timeout.step = "100";
+    timeout.placeholder = String(RERANK_CHANNEL_TIMEOUT_DEFAULTS[channel.type] ?? 800);
+    timeout.value = channel.timeoutMs ? String(channel.timeoutMs) : "";
+    timeout.addEventListener("change", () => {
+      const text = timeout.value.trim();
+      if (!text) {
+        const next = { ...rerankChannelsDraft[index] };
+        delete next.timeoutMs;
+        rerankChannelsDraft[index] = next;
+        saveLayers();
+        return;
+      }
+      const parsed = Number(text);
+      if (!Number.isFinite(parsed)) {
+        timeout.value = channel.timeoutMs ? String(channel.timeoutMs) : "";
+        return;
+      }
+      const ceiling = channel.type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000;
+      const clamped = Math.min(ceiling, Math.max(200, Math.floor(parsed)));
+      timeout.value = String(clamped);
+      updateChannel(index, { timeoutMs: clamped });
+      saveLayers();
+    });
+
+    const cells = document.createElement("div");
+    cells.className = "channel-cells";
+    cells.append(
+      channelCell("类型", type),
+      channelCell("名称", name),
+      channelCell("URL", url, true),
+      channelCell("模型", model, true),
+      channelCell("权重", weight),
+      channelCell("超时（ms）", timeout),
+    );
+
+    row.append(head, cells);
+    box.appendChild(row);
+  });
+}
+
+function formatChannelTest(out) {
+  const lines = [];
+  const channels = Array.isArray(out?.channels) ? out.channels : [];
+  lines.push(
+    `候选 ${out?.candidates ?? 0} 条 · ${channels.length} 路通道 · ${out?.elapsedMs ?? 0}ms`,
+  );
+  for (const channel of channels) {
+    const label = RERANK_CHANNEL_LABELS[channel?.type] || channel?.type || "通道";
+    const name = channel?.name ? `${label} ${channel.name}` : label;
+    if (channel?.ok) {
+      const raw = (Array.isArray(channel.scores) ? channel.scores : [])
+        .map((score) => (score === null || score === undefined ? "—" : Number(score).toFixed(2)))
+        .join(", ");
+      const scaled = (Array.isArray(channel.normalized) ? channel.normalized : [])
+        .map((score) => (score === null || score === undefined ? "—" : Number(score).toFixed(2)))
+        .join(", ");
+      const range = Array.isArray(channel.range)
+        ? ` ${Number(channel.range[0]).toFixed(2)}~${Number(channel.range[1]).toFixed(2)}`
+        : "";
+      lines.push(`${name} · ok ${channel.elapsedMs}ms · 原始 [${raw}]${range}`);
+      lines.push(`${name} · 标准化 [${scaled}] × 权重 ${Number(channel.weight ?? 1)}`);
+    } else {
+      lines.push(
+        `${name} · ${channel?.abstained ? "弃权" : "失败"} ${channel?.elapsedMs ?? 0}ms · ${channel?.error || "失败"}`,
+      );
+    }
+  }
+  if (out?.fallback) {
+    lines.push("合并：全部通道弃权，原样保留全部候选");
+  } else {
+    lines.push(
+      `合并：[${(Array.isArray(out?.merged) ? out.merged : [])
+        .map((score) => Number(score).toFixed(2))
+        .join(", ")}]`,
+    );
+    const kept = Array.isArray(out?.kept) ? out.kept.map((index) => `#${index + 1}`) : [];
+    lines.push(`保留：${kept.join(", ") || "无"}`);
+  }
+  return lines.join("\n");
+}
+
+async function runRerankChannelTest() {
+  const button = $("rerankTestBtn");
+  const box = $("rerankTestResult");
+  if (!button || !box || rerankTestPending) return;
+  rerankTestPending = true;
+  button.disabled = true;
+  button.textContent = "测试中…";
+  box.hidden = false;
+  box.textContent = "正在用这个会话最近一轮的真实候选测试…";
+  try {
+    const sid = await currentSessionKey();
+    if (!sid) throw new Error("当前会话还没绑定，先打开一次对话再试");
+    // 先落盘当前编辑，再用服务端刚存下的通道跑；失败会由 saveLayers 自己回滚。
+    await saveLayers();
+    const out = await jsonPost("/recall-mode/test", { session: sid });
+    if (!out || out.ok === false) throw new Error(out?.error || "测试失败");
+    box.textContent = formatChannelTest(out);
+  } catch (error) {
+    box.textContent = `测试失败：${String(error?.message || error)}`;
+  } finally {
+    rerankTestPending = false;
+    button.disabled = false;
+    button.textContent = "测试";
+  }
 }
 
 /** 提示词旁那行小字：默认 / 已修改 / 空（不拦截）。 */
@@ -589,6 +843,8 @@ async function patchControls(body) {
 
 // 控件只回写、不重算：服务端存下什么就显示什么，脏值已在 paintRecallConfig 收敛。
 function applyLayers(next) {
+  // 还没填完的新通道行先留在界面上：它们不在服务端配置里，但正在被编辑。
+  const pending = rerankChannelsDraft.filter((channel) => !isCompleteRerankChannel(channel));
   layers = paintRecallConfig(next);
   $("recallGate").value = layers.recallGate;
   $("queryMode").value = layers.queryMode;
@@ -604,6 +860,7 @@ function applyLayers(next) {
   paintPromptStatus();
   paintGatePanels();
   paintRerankPanels();
+  renderRerankChannels([...layers.rerankChannels, ...pending]);
   paintModelSelect();
 }
 
@@ -616,6 +873,8 @@ function readLayers() {
     rerank: $("rerank").value,
     rerankPrompt: normalizeRerankPrompt($("rerankPrompt").value),
     rerankModel: $("rerankModel").value,
+    // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
+    rerankChannels: rerankChannelsDraft.filter(isCompleteRerankChannel),
   };
 }
 
@@ -627,10 +886,15 @@ const LAYER_KEYS = [
   "rerank",
   "rerankPrompt",
   "rerankModel",
+  "rerankChannels",
 ];
 
 function sameLayers(a, b) {
-  return LAYER_KEYS.every((key) => a?.[key] === b?.[key]);
+  return LAYER_KEYS.every((key) =>
+    key === "rerankChannels"
+      ? rerankChannelsText(a?.[key]) === rerankChannelsText(b?.[key])
+      : a?.[key] === b?.[key],
+  );
 }
 
 // 改一下立刻提交，跟上面两个开关一样没有保存按钮。
@@ -651,10 +915,16 @@ async function saveLayers() {
       await commitLayers({
         before: layers,
         next,
-        send: (body) => jsonPost("/recall-mode", body),
+        send: (body) => {
+          const { rerankChannels, ...rest } = body;
+          return jsonPost("/recall-mode", {
+            ...rest,
+            rerankChannels: rerankChannelsText(rerankChannels),
+          });
+        },
         apply: applyLayers,
         flash,
-        // llm 的提示词与判断模型也在同一单里；失败时整组一起回滚。
+        // llm 的提示词、判断模型与精排通道也在同一单里；失败时整组一起回滚。
         normalize: paintRecallConfig,
       });
     } while (layersDirty);
@@ -733,6 +1003,14 @@ $("rerankResetPrompt").addEventListener("click", () => {
   saveLayers();
 });
 $("rerankModel").addEventListener("change", saveLayers);
+
+$("rerankAddChannel").addEventListener("click", () => {
+  if (rerankChannelsDraft.length >= RERANK_CHANNELS_MAX) return;
+  rerankChannelsDraft = [...rerankChannelsDraft, emptyRerankChannel()];
+  renderRerankChannels(rerankChannelsDraft);
+  saveLayers();
+});
+$("rerankTestBtn").addEventListener("click", () => runRerankChannelTest());
 
 for (const id of ["serverUrl", "apiKey", "peerPrefix"]) {
   $(id).addEventListener("change", saveConnection);

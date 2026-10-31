@@ -39,7 +39,12 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  parseRerankChannel,
+  parseRerankChannels,
+  serializeRerankChannels,
   GATE_PROMPT_MAX,
+  RERANK_CHANNELS_MAX,
+  RERANK_CHANNEL_TYPES,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
   DEFAULTS,
@@ -75,6 +80,24 @@ import {
   renderGatePrompt,
   renderRerankPrompt,
   rerankPromptOf,
+  rerankChannelsOf,
+  normalizeChannelScores,
+  mergeRerankScores,
+  rankRerankIndexes,
+  runRerankChannels,
+  dropRejectedIndexes,
+  writeRerankSample,
+  readRerankSample,
+  buildSystemOneState,
+  systemoneInstructions,
+  SYSTEMONE_MAX_CANDIDATES,
+  SYSTEMONE_CHANNEL_TIMEOUT_MS,
+  SYSTEMONE_TIMEOUT_MAX_MS,
+  SYSTEMONE_DOCUMENT_CHARS,
+  SYSTEMONE_STATE_MAX_CHARS,
+  RERANK_CHANNEL_TIMEOUT_MS,
+  RERANK_MODEL_CHANNEL_TIMEOUT_MS,
+  RERANK_DOCUMENT_CHARS,
   DEFAULT_GATE_PROMPT,
   DEFAULT_RERANK_PROMPT,
   GATE_MESSAGE_PLACEHOLDER,
@@ -113,14 +136,22 @@ import {
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT as UI_DEFAULT_RERANK_PROMPT,
+  RERANK_CHANNEL_LABELS,
+  RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
+  RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  SYSTEMONE_TIMEOUT_MAX as UI_SYSTEMONE_TIMEOUT_MAX,
   commitLayers,
+  emptyRerankChannel,
+  isCompleteRerankChannel,
   modelOptions,
+  normalizeRerankChannels,
   paintGateConfig,
   paintLayers,
   paintRecallConfig,
   paintRerankConfig,
   promptDraft,
   promptStatus,
+  rerankChannelsText,
   rerankPromptDraft,
   rerankPromptStatus,
 } from "../ui/assets/recall-layers.js";
@@ -1656,6 +1687,111 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     (await readSwitches(sdkWith({ rerankModel: "bogus-shape" }))).rerankModel,
     "",
   );
+
+  // ---- 精排通道：合法 / 非法 JSON / 字段不全 / 超过 8 路 ----
+  eq("默认没有精排通道", DEFAULTS.rerankChannels, "");
+  eq("未配置时通道为空数组", (await readSwitches(sdkWith({}))).rerankChannels, []);
+
+  const channelWarnings = [];
+  const channelWarn = (message) => channelWarnings.push(message);
+  const parsedChannels = parseRerankChannels(
+    JSON.stringify([
+      {
+        type: "rerank",
+        name: "本地 rerank",
+        url: "http://127.0.0.1:8080/",
+        model: "bge-reranker",
+        weight: 2,
+        enabled: true,
+      },
+      { type: "systemone", url: "https://example.test", model: "small" },
+      { type: "model", name: "宿主", model: "", enabled: false },
+    ]),
+    channelWarn,
+  );
+  eq("合法通道三项都保留", parsedChannels.length, 3);
+  eq("URL 末尾斜杠被去掉", parsedChannels[0].url, "http://127.0.0.1:8080");
+  eq("weight 缺省为 1", parsedChannels[1].weight, 1);
+  eq("enabled 缺省为 true", parsedChannels[1].enabled, true);
+  eq("model 类型允许空模型", parsedChannels[2].model, "");
+  eq("合法配置不记 warn", channelWarnings, []);
+
+  const badJsonWarnings = [];
+  eq(
+    "非法 JSON 回空数组",
+    parseRerankChannels("{oops", (message) => badJsonWarnings.push(message)),
+    [],
+  );
+  eq("非法 JSON 记一条 warn", badJsonWarnings.length, 1);
+  eq("不是数组也回空数组", parseRerankChannels('{"type":"model"}'), []);
+  eq("空串回空数组", parseRerankChannels("   "), []);
+
+  const incompleteWarnings = [];
+  const incomplete = parseRerankChannels(
+    JSON.stringify([
+      { type: "rerank", url: "http://h", model: "m" },
+      { type: "rerank", url: "http://h" },
+      { type: "bogus", url: "http://h", model: "m" },
+      { type: "model", model: "m1" },
+      { type: "systemone", model: "m", url: "ftp://h" },
+    ]),
+    (message) => incompleteWarnings.push(message),
+  );
+  eq("字段不全 / 类型不认识的整项丢弃", incomplete.length, 1);
+  eq("丢弃时每项各记一条 warn", incompleteWarnings.length, 4);
+  eq(
+    "合法项原样留下",
+    [incomplete[0].type, incomplete[0].model],
+    ["rerank", "m"],
+  );
+
+  const many = Array.from({ length: 10 }, (_, index) => ({
+    type: "model",
+    model: "",
+    name: `c${index}`,
+  }));
+  const cappedWarnings = [];
+  eq(
+    "超过 8 路只留前 8 路",
+    parseRerankChannels(JSON.stringify(many), (message) => cappedWarnings.push(message)).length,
+    RERANK_CHANNELS_MAX,
+  );
+  eq("只保留前 8 路", parseRerankChannels(JSON.stringify(many))[7].name, "c7");
+  eq("超过 8 路记一条 warn", cappedWarnings.length, 1);
+
+  eq("通道类型只有三种", RERANK_CHANNEL_TYPES, ["rerank", "systemone", "model"]);
+  eq("单项解析：缺 URL 给 null", parseRerankChannel({ type: "rerank", model: "m" }), null);
+  eq(
+    "单项解析：权重越界给 null",
+    parseRerankChannel({ type: "model", weight: 11 }),
+    null,
+  );
+  eq(
+    "单项解析：保留可选 timeoutMs",
+    parseRerankChannel({ type: "model", timeoutMs: 120 }).timeoutMs,
+    120,
+  );
+  eq(
+    "单项解析：timeoutMs 越界给 null",
+    parseRerankChannel({ type: "model", timeoutMs: 0 }),
+    null,
+  );
+  eq(
+    "serialize 会重新校验并收敛形状",
+    serializeRerankChannels([{ type: "model", model: "" }, { type: "rerank" }]),
+    JSON.stringify([{ type: "model", name: "", url: "", model: "", weight: 1, enabled: true }]),
+  );
+  eq(
+    "readSwitches 解析通道 JSON",
+    (await readSwitches(
+      sdkWith({
+        rerankChannels: JSON.stringify([
+          { type: "rerank", url: "http://h:1", model: "m", weight: 1 },
+        ]),
+      }),
+    )).rerankChannels.length,
+    1,
+  );
 }
 
 // ================= ui: 召回策略在主面板 =================
@@ -1676,8 +1812,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("面板上有结果重排下拉", rerankIdx > 0, `idx=${rerankIdx}`);
   check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
   check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
-  check("结果重排有 off / llm 选项", html.includes("结果重排") && html.includes("模型判断") &&
-    /<select id="rerank">\s*<option value="off">关<\/option>\s*<option value="llm">模型判断<\/option>/.test(html));
+  check("结果重排有 off / llm 选项", html.includes("结果重排") && html.includes("开启") &&
+    /<select id="rerank">\s*<option value="off">关<\/option>\s*<option value="llm">开启<\/option>/.test(html));
 
   // 位置：两栏之后、日志之前，占满整行（不在两栏里），跟 peer 名单同一栏。
   const colsStart = html.indexOf('<section class="cols">');
@@ -1873,6 +2009,40 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "重排展开区受结果重排控制",
     panelJs.includes("paintRerankPanels") && panelJs.includes("rerankAdvanced"),
   );
+
+  // ---- 精排通道：列表、添加、空态、测试 ----
+  check("面板有通道列表", html.includes('id="rerankChannelList"'));
+  check(
+    "面板有添加通道按钮",
+    /id="rerankAddChannel"[^>]*>\s*添加通道\s*</.test(html),
+  );
+  check("通道为空时有空态文案", html.includes("还没有通道，精排不会生效"));
+  check("面板有测试按钮", /id="rerankTestBtn"[^>]*>\s*测试\s*</.test(html));
+  check("面板有测试结果位", html.includes('id="rerankTestResult"'));
+  check(
+    "通道行由脚本渲染三种类型",
+    panelJs.includes("renderRerankChannels") && panelJs.includes("RERANK_CHANNEL_TYPES"),
+  );
+  check("删除按钮在通道行里", panelJs.includes('textContent = "删除"'));
+  check("权重输入有边界", panelJs.includes('weight.min = "0.1"') && panelJs.includes('weight.max = "10"'));
+  check("添加通道用空模板", panelJs.includes("emptyRerankChannel()"));
+  check("测试按钮打新端点", panelJs.includes('jsonPost("/recall-mode/test"'));
+  check("通道行有样式", /\n\.channel-row \{/.test(css));
+  check("测试结果有样式", /\n\.channel-result \{/.test(css));
+  eq("通道上限与后端一致", UI_RERANK_CHANNELS_MAX, RERANK_CHANNELS_MAX);
+  eq("三种通道都有下拉文案", Object.keys(RERANK_CHANNEL_LABELS), ["rerank", "systemone", "model"]);
+  // 界面那一格的默认超时跟后端常量同值：两边对不上就是界面在骗人。
+  eq("通道默认超时与后端一致", UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS, {
+    rerank: RERANK_CHANNEL_TIMEOUT_MS,
+    systemone: SYSTEMONE_CHANNEL_TIMEOUT_MS,
+    model: RERANK_MODEL_CHANNEL_TIMEOUT_MS,
+  });
+  eq("systemone 超时上限与后端一致", UI_SYSTEMONE_TIMEOUT_MAX, SYSTEMONE_TIMEOUT_MAX_MS);
+  check("通道行能编辑超时", panelJs.includes('channelCell("超时（ms）", timeout)'));
+  check(
+    "超时那一格注明候选越多越慢",
+    html.includes("超时（ms）") && html.includes("候选越多越慢"),
+  );
   // 两份默认模板各只有一份：HTML 里零份，recall-layers.js 里恰好一份。
   check("判断默认模板不在 HTML 里", html.includes(DEFAULT_GATE_PROMPT) === false);
   check("重排默认模板不在 HTML 里", html.includes(DEFAULT_RERANK_PROMPT) === false);
@@ -2046,7 +2216,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     paintGateConfig({ gateModel: "m1" }).gateModel,
     "",
   );
-  eq("完整投影包含两层、llm 与重排配置", paintRecallConfig({ recallGate: "llm" }), {
+  eq("完整投影包含两层、llm、重排配置与通道", paintRecallConfig({ recallGate: "llm" }), {
     recallGate: "llm",
     queryMode: "last",
     gatePrompt: "",
@@ -2054,6 +2224,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerank: "off",
     rerankPrompt: "",
     rerankModel: "",
+    rerankChannels: [],
   });
 
   // ---- 重排配置的归一化与草稿 ----
@@ -2068,6 +2239,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       rerank: "off",
       rerankPrompt: "字".repeat(RERANK_PROMPT_MAX),
       rerankModel: "p1/m1",
+      rerankChannels: [],
     },
   );
   eq("重排配置读到 llm", paintRerankConfig({ rerank: "llm" }).rerank, "llm");
@@ -2086,6 +2258,63 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankPromptStatus("").includes("已修改") &&
       rerankPromptStatus("").includes("提示词为空时使用默认模板"),
     rerankPromptStatus(""),
+  );
+
+  // ---- 精排通道的界面归一化 ----
+  eq("UI 通道：空值回空数组", normalizeRerankChannels(undefined), []);
+  eq("UI 通道：非法 JSON 回空数组", normalizeRerankChannels("{oops"), []);
+  eq(
+    "UI 通道：JSON 串也认",
+    normalizeRerankChannels(
+      JSON.stringify([{ type: "systemone", url: "http://h", model: "m", weight: 3 }]),
+    ).length,
+    1,
+  );
+  eq(
+    "UI 通道：保留启用状态与权重",
+    [
+      normalizeRerankChannels([{ type: "model", enabled: false, weight: 2.5 }])[0].enabled,
+      normalizeRerankChannels([{ type: "model", weight: 2.5 }])[0].weight,
+    ],
+    [false, 2.5],
+  );
+  eq(
+    "UI 通道：存量 timeoutMs 不会被保存洗掉",
+    normalizeRerankChannels([{ type: "model", timeoutMs: 120 }])[0].timeoutMs,
+    120,
+  );
+  eq("UI 通道：最多 8 行", normalizeRerankChannels(
+    Array.from({ length: 10 }, () => ({ type: "model" })),
+  ).length, UI_RERANK_CHANNELS_MAX);
+  eq("空模板默认 rerank", emptyRerankChannel(), {
+    type: "rerank",
+    name: "",
+    url: "",
+    model: "",
+    weight: 1,
+    enabled: true,
+  });
+  eq(
+    "通道 JSON 串往返",
+    JSON.parse(rerankChannelsText([{ type: "rerank", url: "http://h", model: "m", weight: 2 }]))[0]
+      .weight,
+    2,
+  );
+  eq("空模板还不算完整通道", isCompleteRerankChannel(emptyRerankChannel()), false);
+  eq(
+    "填好 URL 与模型才算完整",
+    isCompleteRerankChannel({ type: "rerank", url: "http://h", model: "m" }),
+    true,
+  );
+  eq(
+    "model 通道留空也算完整",
+    isCompleteRerankChannel({ type: "model", model: "" }),
+    true,
+  );
+  eq(
+    "非 http(s) 的 URL 不算完整",
+    isCompleteRerankChannel({ type: "systemone", url: "ftp://h", model: "m" }),
+    false,
   );
 
   // 模型目录 -> 选项：一步选到位，文案带 provider，值形如 provider/id。
@@ -2845,6 +3074,131 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const untouched = await post({ queryMode: "context" });
   eq("只改 queryMode 不受模型配置影响", untouched.status, 200);
   eq("模型配置原样还在", store.gateModel, "p1/m1");
+
+  // ---- 精排通道的读写与整单校验 ----
+  eq("GET 缺省时通道为空数组", (await get()).body.rerankChannels, []);
+
+  writes.length = 0;
+  const channelJson = JSON.stringify([
+    { type: "rerank", name: "r", url: "http://h:1/", model: "m", weight: 2, enabled: true },
+    { type: "model", name: "host", model: "", enabled: false },
+  ]);
+  const channelsOk = await post({ rerankChannels: channelJson });
+  eq("通道 JSON 可写", channelsOk.status, 200);
+  eq("通道落库仍是 JSON 串", typeof store.rerankChannels, "string");
+  eq("落库时重算形状", JSON.parse(store.rerankChannels).length, 2);
+  eq("落库时 URL 去尾斜杠", JSON.parse(store.rerankChannels)[0].url, "http://h:1");
+  eq("回显是通道数组", channelsOk.body.rerankChannels.length, 2);
+  check("applied 列出 rerankChannels", channelsOk.body.applied.includes("rerankChannels"));
+
+  writes.length = 0;
+  const badChannelsJson = await post({ rerankChannels: "{oops" });
+  eq("非法通道 JSON 400", badChannelsJson.status, 400);
+  eq("非法通道 JSON 零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badChannelsType = await post({ rerankChannels: 1 });
+  eq("通道不是字符串 400", badChannelsType.status, 400);
+  eq("通道类型不对零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badChannelsShape = await post({ rerankChannels: '{"type":"model"}' });
+  eq("通道不是数组 400", badChannelsShape.status, 400);
+  eq("通道不是数组零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badChannelsItem = await post({
+    rerankChannels: JSON.stringify([{ type: "rerank", url: "http://h" }]),
+  });
+  eq("通道字段不全 400", badChannelsItem.status, 400);
+  eq("通道字段不全零写入", writes.length, 0);
+
+  writes.length = 0;
+  const tooManyChannels = await post({
+    rerankChannels: JSON.stringify(
+      Array.from({ length: RERANK_CHANNELS_MAX + 1 }, () => ({ type: "model", model: "" })),
+    ),
+  });
+  eq("通道超过 8 路 400", tooManyChannels.status, 400);
+  eq("通道超过 8 路零写入", writes.length, 0);
+
+  writes.length = 0;
+  const clearedChannels = await post({ rerankChannels: "" });
+  eq("空串清空通道", clearedChannels.status, 200);
+  eq("清空后落库为空串", store.rerankChannels, "");
+  eq("清空后回显空数组", clearedChannels.body.rerankChannels, []);
+}
+
+// ================= routes: 精排通道测试按钮 =================
+{
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const dir = path.join(import.meta.dirname, ".tmp-recall-mode-test");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const session = "01a1585b-86d2-4a5f-9c1e-1234567890ab";
+  const store = {
+    rerank: "llm",
+    rerankChannels: JSON.stringify([
+      { type: "rerank", name: "r", url: "http://127.0.0.1:9", model: "m", weight: 1 },
+    ]),
+  };
+  const calls = [];
+  const ctx = {
+    dataDir: dir,
+    config: {
+      get: async (key) => store[key],
+      set: async (key, value) => { store[key] = value; },
+    },
+    network: {
+      fetch: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return new Response(
+          JSON.stringify({
+            results: [
+              { index: 0, relevance_score: 0.8 },
+              { index: 1, relevance_score: 0.1 },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    },
+  };
+  registerRecallModeRoutes(app, ctx);
+  const post = (body) =>
+    handlers["POST /recall-mode/test"]({
+      req: { json: async () => body },
+      json: (payload, status) => ({ body: payload, status }),
+    });
+
+  writeRerankSample({ dataDir: dir }, session, {
+    query: "问过什么",
+    items: [{ text: "甲" }, { text: "乙" }],
+  });
+  resetRuntimeTransport();
+  const tested = await post({ session });
+  eq("测试端点成功", tested.body.ok, true);
+  eq("测试端点回候选数", tested.body.candidates, 2);
+  eq("测试端点回每路分数", tested.body.channels[0].scores, [0.8, 0.1]);
+  eq("测试端点回标准化分", tested.body.channels[0].normalized, [1, 0]);
+  eq("测试端点回合并分", tested.body.merged, [1, 0]);
+  eq("测试端点回保留索引（标准化后的末位不丢）", tested.body.kept, [0, 1]);
+  eq("测试端点不写配置", store.rerankChannels.startsWith("["), true);
+  eq("测试端点走当前配置的 URL", calls[0].url, "http://127.0.0.1:9/v1/rerank");
+
+  const unknown = await post({ session: "sess_not_a_key" });
+  eq("认不出的会话 key 400", unknown.status, 400);
+
+  const missing = await post({ session: "01a1585b-86d2-4a5f-9c1e-000000000000" });
+  eq("没有样本时返回可读错误", [missing.body.ok, missing.body.error], [
+    false,
+    "这个会话还没有可复跑的召回候选",
+  ]);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 // ================= routes: models =================
@@ -3983,6 +4337,659 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
     check("超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
     eq("超时后 cancel 一次", fake.calls.cancel.length, 1);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall rerank: 多路通道 =================
+{
+  const r2 = (values) => values.map((value) => Math.round(value * 100) / 100);
+
+  // ---- 每路先标准化，再加权合并 ----
+  eq(
+    "合并：两路同分（标准化后落在两端）",
+    mergeRerankScores(
+      [
+        { ok: true, scores: [1, 0.5], weight: 1 },
+        { ok: true, scores: [1, 0.5], weight: 1 },
+      ],
+      2,
+    ),
+    [1, 0],
+  );
+  eq(
+    "合并：两路分歧按权重",
+    mergeRerankScores(
+      [
+        { ok: true, scores: [1, 0], weight: 3 },
+        { ok: true, scores: [0, 1], weight: 1 },
+      ],
+      2,
+    ),
+    [0.75, 0.25],
+  );
+  eq(
+    "合并：一路弃权不归零（不参与分母）",
+    mergeRerankScores(
+      [
+        { ok: false, weight: 1 },
+        { ok: true, scores: [0.2, 0.8], weight: 2 },
+      ],
+      2,
+    ),
+    [0, 1],
+  );
+  eq(
+    "合并：全部弃权回 null",
+    mergeRerankScores([{ ok: false, weight: 1 }, { ok: false, weight: 2 }], 2),
+    null,
+  );
+  eq("合并：空结果回 null", mergeRerankScores([], 2), null);
+
+  // ---- 标准化：min-max 把一路拉平到 0..1 ----
+  eq(
+    "标准化：量纲不同的数值被拉平",
+    r2(normalizeChannelScores([0.82, 0.85]).normalized),
+    [0, 1],
+  );
+  {
+    const scaled = normalizeChannelScores([0.82, 0.85]);
+    eq("标准化：原区间一并带出", [scaled.min, scaled.max], [0.82, 0.85]);
+  }
+  eq("标准化：全部同分回 null（这一路弃权）", normalizeChannelScores([0.5, 0.5]), null);
+  eq("标准化：单条候选回 null", normalizeChannelScores([0.77]), null);
+  eq("标准化：非数字回 null", normalizeChannelScores([0.3, "x"]), null);
+
+  // ---- 量纲差很多：标准化后的结论与“两路都说乙更好”一致 ----
+  {
+    const wide = { ok: true, weight: 1, scores: [0.82, 0.85] }; // 窄区间，尺子短
+    const narrow = { ok: true, weight: 1, scores: [0.12, 0.88] }; // 宽区间，尺子长
+    const naive = wide.scores.map((value, index) => (value + narrow.scores[index]) / 2);
+    const scaled = mergeRerankScores([wide, narrow], 2);
+    eq("量纲差：直接加权被长尺子带走", r2(naive), [0.47, 0.87]);
+    eq("量纲差：标准化后两路等权", r2(scaled), [0, 1]);
+    eq("量纲差：排序仍是乙在前", rankRerankIndexes(scaled), [1, 0]);
+  }
+
+  // ---- 一路分数全相同 -> 该路弃权，另一路照旧 ----
+  {
+    const flat = { ok: true, weight: 3, scores: [0.4, 0.4] };
+    const alive = { ok: true, weight: 1, scores: [0.2, 0.9] };
+    eq("同分那一路单独算就是 null", mergeRerankScores([flat], 2), null);
+    eq("同分那一路不影响另一路", mergeRerankScores([flat, alive], 2), [0, 1]);
+    eq(
+      "同分那一路被标成弃权",
+      mergeRerankScores([{ ...flat, abstained: true }, alive], 2),
+      [0, 1],
+    );
+  }
+
+  // ---- 二值通道与连续通道混跑：二值不再无届放大 ----
+  {
+    const binary = { ok: true, weight: 1, scores: [1, 0] }; // 挑中甲
+    const smooth = { ok: true, weight: 1, scores: [0.85, 0.9] }; // 几乎平手，偏好乙
+    const naive = binary.scores.map((value, index) => (value + smooth.scores[index]) / 2);
+    const scaled = mergeRerankScores([binary, smooth], 2);
+    eq("二值直加：1 与 0 的落差盖过 0.05 的偏好", r2(naive), [0.93, 0.45]);
+    eq("二值标准化：两路各投一票，平手", r2(scaled), [0.5, 0.5]);
+  }
+
+  eq("排序：降序且同分保持原序", rankRerankIndexes([0.2, 0.9, 0.9, 0]), [1, 2, 0, 3]);
+  eq("取舍：所有通道原始分都是 0 才丢", dropRejectedIndexes([0, 1, 2], [
+    { ok: true, scores: [0, 1, 0] },
+    { ok: true, scores: [0.4, 0.9, 0] },
+  ]), [0, 1]);
+  eq(
+    "标准化：全 0 是明确反对，不是同分弃权",
+    [normalizeChannelScores([0, 0]).allZero, normalizeChannelScores([0, 0]).normalized],
+    [true, [0, 0]],
+  );
+  eq(
+    "取舍：标准化后的 0 不算反对票",
+    dropRejectedIndexes([0, 1], [{ ok: true, scores: [0.85, 0.9] }]),
+    [0, 1],
+  );
+  eq(
+    "取舍：弃权那一路不参与判反对",
+    dropRejectedIndexes([0, 1], [{ ok: true, scores: [0.2, 0.8] }, { ok: false, abstained: true, scores: [0, 0] }]),
+    [0, 1],
+  );
+
+  // ---- 没配置通道时退回旧的 rerankPrompt / rerankModel 那一路 ----
+  const legacy = rerankChannelsOf({
+    rerankChannels: [],
+    rerankModel: "p1/m1",
+    rerankPrompt: "",
+  });
+  eq("空通道退回一路兜底", legacy.length, 1);
+  eq("兜底是 model 通道", [legacy[0].type, legacy[0].legacy], ["model", true]);
+  eq("兜底沿用 rerankModel", legacy[0].model, "p1/m1");
+  eq("兜底权重为 1", legacy[0].weight, 1);
+  eq(
+    "全部通道都停用时也退回兜底",
+    rerankChannelsOf({
+      rerankChannels: [
+        { type: "rerank", url: "http://h", model: "m", weight: 1, enabled: false },
+      ],
+    })[0].legacy,
+    true,
+  );
+  const configured = rerankChannelsOf({
+    rerankChannels: [{ type: "model", model: "", weight: 4, enabled: true }],
+  });
+  eq("有启用通道就按配置跑", [configured.length, configured[0].weight], [1, 4]);
+  eq("配置通道不带 legacy 标记", configured[0].legacy, undefined);
+
+  const dir = path.join(import.meta.dirname, ".tmp-rerank-channels");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const items = [{ text: "甲".repeat(900) }, { text: "乙" }, { text: "丙" }];
+  const okBody = {
+    results: [
+      { index: 0, relevance_score: 0.9 },
+      { index: 1, relevance_score: 0.25 },
+      { index: 2, relevance_score: 0 },
+    ],
+  };
+
+  // ---- rerank 请求形状 ----
+  {
+    resetRuntimeTransport();
+    const calls = [];
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify(okBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        {
+          type: "rerank",
+          name: "本地 rerank",
+          url: "http://127.0.0.1:9999",
+          model: "bge-reranker",
+          weight: 1,
+          enabled: true,
+        },
+      ],
+    });
+    eq("rerank 只发一条请求", calls.length, 1);
+    eq("rerank 端点拼接 /v1/rerank", calls[0].url, "http://127.0.0.1:9999/v1/rerank");
+    eq("rerank 用 POST", calls[0].init.method, "POST");
+    eq(
+      "rerank body 带 model / query / documents",
+      [calls[0].body.model, calls[0].body.query, calls[0].body.documents.length],
+      ["bge-reranker", "用户问题", 3],
+    );
+    eq(
+      "rerank documents 截到 800 字",
+      Array.from(calls[0].body.documents[0]).length,
+      RERANK_DOCUMENT_CHARS,
+    );
+    eq("rerank 分数按 relevance_score 读", outcome.channels[0].scores, [0.9, 0.25, 0]);
+    eq(
+      "rerank 标准化后合并（0.9/0.25/0 拉成 1/0.28/0）",
+      outcome.merged.map((value) => Number(value.toFixed(2))),
+      [1, 0.28, 0],
+    );
+    eq(
+      "探针同时留下标准化分",
+      outcome.channels[0].normalized.map((value) => Number(value.toFixed(2))),
+      [1, 0.28, 0],
+    );
+    eq("rerank 0 分候选被丢掉", outcome.indexes, [0, 1]);
+  }
+
+  // ---- 通道走受管运行时出口：URL 由通道自己给，不锁死一个 origin ----
+  {
+    const calls = [];
+    setRuntimeTransport({
+      send: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return { ok: true, status: 200, headers: {}, data: okBody };
+      },
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        {
+          type: "rerank",
+          name: "远端",
+          url: "http://10.0.0.5:8080",
+          model: "m",
+          weight: 1,
+          timeoutMs: 321,
+        },
+      ],
+    });
+    eq("通道走受管运行时出口", calls.length, 1);
+    eq("运行时出口接收通道自己的 URL", calls[0].url, "http://10.0.0.5:8080/v1/rerank");
+    eq("运行时信封带这一路的超时", calls[0].init.timeoutMs, 321);
+    eq("运行时信封 body 仍是 rerank 形状", calls[0].body.model, "m");
+    eq(
+      "运行时返回值被读成分数",
+      outcome.merged.map((value) => Number(value.toFixed(2))),
+      [1, 0.28, 0],
+    );
+    resetRuntimeTransport();
+  }
+
+  // ---- systemone：全部候选拼进同一个 state，一次请求问回全部概率 ----
+  {
+    const calls = [];
+    setRuntimeTransport({
+      send: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return {
+          ok: true,
+          status: 200,
+          headers: {},
+          data: { answers: { r1: { noul: 0.6 }, r2: { noul: 0.9 } } },
+        };
+      },
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items: [{ text: "甲" }, { text: "乙" }],
+      channels: [
+        {
+          type: "systemone",
+          name: "",
+          url: "http://127.0.0.1:8080/",
+          model: "small",
+          weight: 1,
+          enabled: true,
+        },
+      ],
+    });
+    // 批量：两条候选只发一条请求。
+    eq("systemone 一次请求覆盖全部候选", calls.length, 1);
+    eq("systemone 端点拼接 /v1/systemone", calls[0].url, "http://127.0.0.1:8080/v1/systemone");
+    eq("systemone body.model", calls[0].body.model, "small");
+    eq(
+      "systemone state 带用户问题与编号候选列表",
+      calls[0].body.state,
+      "用户问题：用户问题\n候选列表：\n1. 甲\n2. 乙",
+    );
+    eq("systemone questions 是对象且键为 r1..rN", Object.keys(calls[0].body.questions), ["r1", "r2"]);
+    eq(
+      "systemone 每题都是 noul 且带序号",
+      calls[0].body.questions.r1,
+      { type: "noul", instructions: "第 1 条候选能帮助回答用户的问题吗" },
+    );
+    eq("systemone 序号跟着候选走", calls[0].body.questions.r2.instructions, systemoneInstructions(2));
+    eq("systemone answers.rN 还原到候选下标", outcome.channels[0].scores, [0.6, 0.9]);
+    eq("systemone 标准化后拉平", outcome.merged, [0, 1]);
+    eq("systemone 走默认 2500ms 超时", calls[0].init.timeoutMs, 2500);
+    resetRuntimeTransport();
+  }
+
+  // ---- systemone：某条缺项记 null，不参与这一路的标准化 ----
+  {
+    setRuntimeTransport({
+      send: async () => ({
+        ok: true,
+        status: 200,
+        headers: {},
+        // 只回了 r1 / r2，r3 缺失；3 条里缺 1 条不算过半。
+        data: { answers: { r1: { noul: 0.2 }, r2: { noul: 0.8 } } },
+      }),
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items: [{ text: "甲" }, { text: "乙" }, { text: "丙" }],
+      channels: [
+        { type: "systemone", name: "", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
+      ],
+    });
+    check(
+      "systemone 少量缺项不弃权",
+      outcome.channels[0].ok === true && outcome.channels[0].abstained === false,
+      JSON.stringify(outcome.channels[0]),
+    );
+    eq("systemone 缺 r3 时该条为 null", outcome.channels[0].scores, [0.2, 0.8, null]);
+    eq("systemone 缺项不参与标准化", outcome.channels[0].normalized, [0, 1, null]);
+    eq("systemone 缺项仍占位（只有这一路时排末位）", outcome.merged, [0, 1, 0]);
+    eq(
+      "缺项那条只由另一路定夺",
+      mergeRerankScores(
+        [
+          { ok: true, weight: 1, normalized: [0, 1, null] },
+          { ok: true, weight: 1, normalized: [1, 1, 1] },
+        ],
+        3,
+      ),
+      [0.5, 1, 1],
+    );
+    eq(
+      "没人打分的那条不算反对票",
+      dropRejectedIndexes([0, 1, 2], [{ ok: true, scores: [0.2, 0.8, null] }]),
+      [0, 1, 2],
+    );
+    resetRuntimeTransport();
+  }
+
+  // ---- systemone：超过一半缺失 -> 整路弃权 ----
+  {
+    setRuntimeTransport({
+      send: async () => ({
+        ok: true,
+        status: 200,
+        headers: {},
+        // r1 有数，r2 是 null（不是数字），r3 干脆没有：3 条缺 2 条，过半。
+        data: { answers: { r1: { noul: 0.5 }, r2: { noul: null } } },
+      }),
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items: [{ text: "甲" }, { text: "乙" }, { text: "丙" }],
+      channels: [
+        { type: "systemone", name: "", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
+      ],
+    });
+    eq("systemone 超过一半缺失整路弃权", outcome.channels[0].ok, false);
+    check(
+      "systemone 弃权原因写明清点",
+      /2\/3/.test(String(outcome.channels[0].error)),
+      String(outcome.channels[0].error),
+    );
+    eq("systemone 全部弃权时原样保留", [outcome.fallback, outcome.indexes], [true, [0, 1, 2]]);
+    resetRuntimeTransport();
+  }
+
+  // ---- systemone：只问前 8 条，超出的按未打分处理 ----
+  {
+    const calls = [];
+    const answers = {};
+    for (let position = 1; position <= SYSTEMONE_MAX_CANDIDATES; position += 1) {
+      answers[`r${position}`] = { noul: position / 10 };
+    }
+    setRuntimeTransport({
+      send: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return { ok: true, status: 200, headers: {}, data: { answers } };
+      },
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const nine = Array.from({ length: SYSTEMONE_MAX_CANDIDATES + 1 }, (_, index) => ({
+      text: `候选${index + 1}`,
+    }));
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items: nine,
+      channels: [
+        { type: "systemone", name: "", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
+      ],
+    });
+    eq("systemone 只问前 8 条", Object.keys(calls[0].body.questions).length, SYSTEMONE_MAX_CANDIDATES);
+    check(
+      "systemone state 只列前 8 条",
+      calls[0].body.state.includes("8. 候选8") && !calls[0].body.state.includes("9. 候选9"),
+      calls[0].body.state.split("\n").slice(-1)[0],
+    );
+    eq(
+      "systemone 超出的候选记为 null",
+      outcome.channels[0].scores,
+      [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, null],
+    );
+    eq("systemone 候选上限是 8", SYSTEMONE_MAX_CANDIDATES, 8);
+    resetRuntimeTransport();
+  }
+
+  // ---- systemone：超时可配，上限 5000 ----
+  {
+    for (const [given, expected] of [[1200, 1200], [9999, 5000]]) {
+      const calls = [];
+      setRuntimeTransport({
+        send: async (url, init) => {
+          calls.push({ url, init, body: JSON.parse(init.body) });
+          return {
+            ok: true,
+            status: 200,
+            headers: {},
+            data: { answers: { r1: { noul: 0.1 }, r2: { noul: 0.9 } } },
+          };
+        },
+      });
+      const sdk = recallSdk({ values: {}, dataDir: dir });
+      await runRerankChannels({
+        sdk,
+        switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+        query: "用户问题",
+        items: [{ text: "甲" }, { text: "乙" }],
+        channels: [
+          {
+            type: "systemone",
+            name: "",
+            url: "http://127.0.0.1:8080",
+            model: "small",
+            weight: 1,
+            enabled: true,
+            timeoutMs: given,
+          },
+        ],
+      });
+      eq(`systemone 超时可配：${given} -> ${expected}`, calls[0].init.timeoutMs, expected);
+      resetRuntimeTransport();
+    }
+    eq("systemone 默认 2500ms 超时常量", SYSTEMONE_CHANNEL_TIMEOUT_MS, 2500);
+    eq("systemone 超时上限 5000ms", SYSTEMONE_TIMEOUT_MAX_MS, 5000);
+    eq("rerank 默认仍是 800ms", RERANK_CHANNEL_TIMEOUT_MS, 800);
+    eq("model 默认仍是 1500ms", RERANK_MODEL_CHANNEL_TIMEOUT_MS, 1500);
+  }
+
+  // ---- systemone：state 拼装的两条边界（单条 500 字、总长 12000） ----
+  {
+    const single = buildSystemOneState("问题", [{ text: "甲".repeat(900) }]);
+    eq(
+      "state 单条候选截到 500 字",
+      [single.count, Array.from(single.state).length],
+      [1, Array.from("用户问题：问题\n候选列表：\n1. ").length + SYSTEMONE_DOCUMENT_CHARS],
+    );
+    eq("state 单条候选正文上限是 500", SYSTEMONE_DOCUMENT_CHARS, 500);
+    const many = buildSystemOneState(
+      "问题",
+      Array.from({ length: 40 }, () => ({ text: "乙".repeat(600) })),
+    );
+    check(
+      "state 总长不超过 12000 字符",
+      Array.from(many.state).length <= SYSTEMONE_STATE_MAX_CHARS,
+      String(Array.from(many.state).length),
+    );
+    check("state 装不下时只截断尾部", many.count > 0 && many.count < 40, String(many.count));
+  }
+
+  // ---- model 通道请求形状：沿用编号清单 ----
+  {
+    resetRuntimeTransport();
+    const fake = modelSdk({ utility: () => ({ text: "2" }) });
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      models: fake.models,
+      fetchImpl: async () => {
+        throw new Error("model 通道不该发 HTTP");
+      },
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        { type: "model", name: "宿主", url: "", model: "", weight: 1, enabled: true },
+      ],
+    });
+    eq("model 通道只问一次宿主", fake.calls.utility.length, 1);
+    const request = fake.calls.utility[0];
+    check(
+      "model 通道列编号候选",
+      request.messages[0].content.includes("1. 甲") &&
+        request.messages[0].content.includes("3. 丙"),
+      request.messages[0].content,
+    );
+    eq("model 通道挑中为 1、未挑中为 0", outcome.merged, [0, 1, 0]);
+    eq("model 通道只保留挑中的", outcome.indexes, [1]);
+    eq("model 通道默认超时常量", RERANK_MODEL_CHANNEL_TIMEOUT_MS, 1500);
+  }
+
+  // ---- 任一路超时不影响另一路 ----
+  {
+    resetRuntimeTransport();
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url) => {
+        if (url.includes("slow")) return new Promise(() => {});
+        return new Response(JSON.stringify(okBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const started = Date.now();
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        { type: "rerank", name: "slow", url: "http://slow.test", model: "m", weight: 1, enabled: true },
+        { type: "rerank", name: "fast", url: "http://fast.test", model: "m", weight: 1, enabled: true },
+      ],
+    });
+    const elapsed = Date.now() - started;
+    const slow = outcome.channels.find((channel) => channel.name === "slow");
+    const fast = outcome.channels.find((channel) => channel.name === "fast");
+    eq("超时那一路弃权", slow.ok, false);
+    check("超时原因写进探针", String(slow.error).includes("TIMEOUT"), slow.error);
+    check("超时原因是统一的 TIMEOUT 句（不随出口变）", String(slow.error).startsWith("TIMEOUT "), slow.error);
+    eq("另一路照常成功", fast.ok, true);
+    eq("合并只算成功的那一路", outcome.merged.map((value) => Number(value.toFixed(2))), [1, 0.28, 0]);
+    eq("不是全部弃权", outcome.fallback, false);
+    check("一路超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
+  }
+
+  // ---- 直连出口的超时：AbortSignal 先手时也要说人话 ----
+  {
+    resetRuntimeTransport();
+    const abortError = Object.assign(new Error("The operation was aborted due to timeout"), {
+      name: "TimeoutError",
+    });
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async () => {
+        throw abortError;
+      },
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [{ type: "rerank", name: "abort", url: "http://abort.test", model: "m", weight: 1, enabled: true }],
+    });
+    const abort = outcome.channels.find((channel) => channel.name === "abort");
+    check("直连超时也标成 TIMEOUT", String(abort.error).startsWith("TIMEOUT "), abort.error);
+    eq("直连超时整路弃权", [abort.ok, outcome.fallback], [false, true]);
+  }
+
+  // ---- 一路分数全相同：这一路弃权，不影响另一路 ----
+  {
+    resetRuntimeTransport();
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url) =>
+        new Response(
+          JSON.stringify(
+            url.includes("flat")
+              ? { results: [
+                  { index: 0, relevance_score: 0.5 },
+                  { index: 1, relevance_score: 0.5 },
+                  { index: 2, relevance_score: 0.5 },
+                ] }
+              : okBody,
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        { type: "rerank", name: "flat", url: "http://flat.test", model: "m", weight: 3, enabled: true },
+        { type: "rerank", name: "live", url: "http://live.test", model: "m", weight: 1, enabled: true },
+      ],
+    });
+    const flat = outcome.channels.find((channel) => channel.name === "flat");
+    const live = outcome.channels.find((channel) => channel.name === "live");
+    eq("同分那一路标成弃权", [flat.ok, flat.abstained], [false, true]);
+    check("弃权原因写进探针", String(flat.error).includes("同分"), flat.error);
+    eq("另一路照常成功", live.ok, true);
+    eq("合并等于另一路的标准化分", outcome.merged.map((value) => Number(value.toFixed(2))), [1, 0.28, 0]);
+    eq("同分的路不拉低排序", outcome.indexes, [0, 1]);
+    eq("不是全部弃权", outcome.fallback, false);
+  }
+
+  // ---- 全部弃权：不排序，原样保留 ----
+  {
+    resetRuntimeTransport();
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async () => new Response("bad", { status: 500 }),
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        { type: "rerank", name: "", url: "http://bad.test", model: "m", weight: 1, enabled: true },
+      ],
+    });
+    eq("全部弃权回 fallback", outcome.fallback, true);
+    eq("全部弃权时索引原样", outcome.indexes, [0, 1, 2]);
+    eq("全部弃权时保留全部", outcome.kept.length, 3);
+  }
+
+  // ---- 最近一轮候选样本：测试按钮的数据源 ----
+  {
+    writeRerankSample({ dataDir: dir }, "sample-session", { query: "问过什么", items });
+    const sample = readRerankSample({ dataDir: dir }, "sample-session");
+    eq("样本读出查询", sample.query, "问过什么");
+    eq("样本读出候选条数", sample.items.length, 3);
+    eq("样本候选仍是正文", sample.items[0].text.length, RERANK_DOCUMENT_CHARS);
+    eq("没有样本时回 null", readRerankSample({ dataDir: dir }, "missing-session"), null);
   }
 
   fs.rmSync(dir, { recursive: true, force: true });

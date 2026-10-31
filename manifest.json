@@ -92,10 +92,16 @@
           "rerank": {
             "type": "string",
             "title": "结果重排",
-            "description": "off 原样注入；llm 用宿主模型从召回结果中挑出真正有用的候选。解析失败、超时或没权限时一律全保留。",
+            "description": "off 原样注入；llm 按 rerankChannels 配置的通道做精排。任一路失败只弃权，全部弃权时原样保留。",
             "default": "off",
             "enum": ["off", "llm"],
-            "ui": { "enumLabels": ["关", "模型判断"] }
+            "ui": { "enumLabels": ["关", "开启"] }
+          },
+          "rerankChannels": {
+            "type": "string",
+            "title": "精排通道",
+            "description": "JSON 数组，每项 {type: rerank|systemone|model, name, url, model, weight, enabled}，最多 8 路。留空时退回 rerankPrompt / rerankModel 那一路。",
+            "default": ""
           },
           "rerankPrompt": {
             "type": "string",
