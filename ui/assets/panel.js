@@ -18,6 +18,8 @@
 
 import { hana } from "./sdk.js";
 import { sessionKeyOf } from "./session-key.js";
+// 三页标签与「上次停在哪一页」的记忆：纯逻辑单独一份，冒烟直接验。
+import { DEFAULT_TAB, TABS, normalizeTab, readTab, writeTab } from "./tabs.js";
 // 状态档位（ok / muted / bad）单独一份：父项与 details 共用，测试也能直接验。
 import { statusTone } from "./check-tone.js";
 // 服务端检查项的摘要与状态词：纯函数，冒烟直接验。
@@ -61,6 +63,32 @@ import {
 const $ = (id) => document.getElementById(id);
 
 const SWITCH_KEYS = ["skillRouting", "probe"];
+
+// localStorage 只在浏览器里有；取不到（隐私模式 / 被禁）就当没有记忆。
+function safeLocalStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// 标签页只决定哪一块可见：不改渲染，也不触发写入。
+function selectTab(name, { persist = false } = {}) {
+  const active = normalizeTab(name ?? DEFAULT_TAB);
+  for (const tab of TABS) {
+    const button = $(`tab-${tab}`);
+    const panel = $(`panel-${tab}`);
+    const selected = tab === active;
+    if (button) {
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+      button.tabIndex = selected ? 0 : -1;
+    }
+    if (panel) panel.hidden = !selected;
+  }
+  if (persist) writeTab(safeLocalStorage(), active);
+  return active;
+}
 
 // 中枢里 peer 多的时候列表内部滚动，不截断、不折叠成 +N。
 // 一屏放得下 8 行（行高 + 间距），超出的部分靠 CSS 的 max-height 滚。
@@ -1217,6 +1245,33 @@ $("logToggle").addEventListener("click", () => {
   $("logBody").hidden = !logOpen;
   $("logToggle").textContent = logOpen ? "收起" : "展开";
 });
+
+// 标签：点击切换并记住；左右方向键 / Home / End 也能换，焦点跟着走。
+for (const tab of TABS) {
+  const node = $(`tab-${tab}`);
+  if (!node) continue;
+  node.addEventListener("click", () => selectTab(tab, { persist: true }));
+  node.addEventListener("keydown", (event) => {
+    const index = TABS.indexOf(tab);
+    const next =
+      event.key === "ArrowRight"
+        ? TABS[(index + 1) % TABS.length]
+        : event.key === "ArrowLeft"
+          ? TABS[(index - 1 + TABS.length) % TABS.length]
+          : event.key === "Home"
+            ? TABS[0]
+            : event.key === "End"
+              ? TABS[TABS.length - 1]
+              : null;
+    if (!next) return;
+    event.preventDefault();
+    selectTab(next, { persist: true });
+    $(`tab-${next}`)?.focus();
+  });
+}
+
+// 先把上次停的那页摆好，再开始读数据：默认页是 global，读不到也一样。
+selectTab(readTab(safeLocalStorage()), { persist: false });
 
 hana.ready();
 refresh();

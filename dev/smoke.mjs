@@ -138,6 +138,15 @@ import {
 } from "../src/state/session.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui/assets/session-key.js";
+// 面板三页标签与记忆键：纯逻辑，node 直接验。
+import {
+  DEFAULT_TAB,
+  TAB_KEY,
+  TABS,
+  normalizeTab,
+  readTab,
+  writeTab,
+} from "../ui/assets/tabs.js";
 // checks 归一化的唯一实现：路由与工具共用，这里直接验同一份输入过两处。
 import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
 // check 状态 -> 颜色档位，前端与详情行共用。
@@ -927,11 +936,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const peerIdx = html.indexOf('id="peerList"');
   const peerCountIdx = html.indexOf('id="peerCount"');
   const logsIdx = html.indexOf('<section class="card logs"');
+  const memoryStart = html.indexOf('id="panel-memory"');
+  const skillStart = html.indexOf('id="panel-skill"');
   const summaryIdx = html.indexOf('id="checksSummary"');
   check("两栏与日志区都找得到", colsStart > 0 && colsEnd > colsStart && logsIdx > colsEnd);
   check("peer 列表不在中枢卡 / 两栏里", peerIdx > colsEnd, `peerIdx=${peerIdx} colsEnd=${colsEnd}`);
   check("peer 计数也跟着搬出两栏", peerCountIdx > colsEnd);
-  check("peer 栏在两栏之后、日志之前", peerIdx < logsIdx);
+  check("peer 栏在记忆页里", peerIdx > memoryStart && peerIdx < skillStart,
+    `peer=${peerIdx} memory=${memoryStart}..${skillStart}`);
   check("摘要行留在中枢卡里", summaryIdx > colsStart && summaryIdx < colsEnd);
   check("中枢卡里不再有 peer 列表", html.slice(colsStart, colsEnd).indexOf('id="peerList"') === -1);
 
@@ -2002,6 +2014,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const colsStart = html.indexOf('<section class="cols">');
   const colsEnd = html.indexOf("</section>", colsStart);
   const logsIdx = html.indexOf('<section class="card logs"');
+  const globalPanelStart = html.indexOf('id="panel-global"');
+  const memoryPanelStart = html.indexOf('id="panel-memory"');
+  const skillPanelStart = html.indexOf('id="panel-skill"');
+  const footStart = html.indexOf('<footer id="foot"');
+  const scopedIdx = html.indexOf('class="scoped-note"');
   const recallStart = html.indexOf('<section class="card recall"');
   const recallEnd = html.indexOf("</section>", recallStart);
   const peerIdx = html.indexOf('id="peerList"');
@@ -2009,7 +2026,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("召回管理一栏找得到", recallStart > 0 && recallEnd > recallStart,
     `recall=${recallStart}..${recallEnd}`);
   check("召回管理在两栏之后", recallStart > colsEnd, `recall=${recallStart} colsEnd=${colsEnd}`);
-  check("召回管理在日志之前", recallEnd < logsIdx, `recallEnd=${recallEnd} logs=${logsIdx}`);
+  check(
+    "日志在全局页、召回管理在记忆页",
+    logsIdx > globalPanelStart && logsIdx < memoryPanelStart &&
+      recallStart > memoryPanelStart && recallStart < skillPanelStart,
+    `logs=${logsIdx} global=${globalPanelStart}..${memoryPanelStart} recall=${recallStart} skill=${skillPanelStart}`,
+  );
   const hubIdx = html.indexOf(">中枢<");
   const identIdx = html.indexOf(">身份<");
   check(
@@ -2091,21 +2113,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("召回管理在前置之后", recallStart > preludeEnd, `recall=${recallStart} preludeEnd=${preludeEnd}`);
 
   const logsStart = html.indexOf('<section class="card logs"');
-  const order = [masterStart, preludeStart, recallStart, skillRouteStart, logsStart];
+  const globalOrder = [masterStart, preludeStart, colsStart, logsStart];
   check(
-    "五块的 DOM 顺序：总闸 → 前置 → 召回 → 技能路由 → 日志",
-    order.every((value, index) => value > 0 && (index === 0 || value > order[index - 1])),
-    order.join(" < "),
+    "全局页内顺序：总闸 → 前置 → 两栏 → 日志",
+    globalOrder.every((value, index) =>
+      value > globalPanelStart && value < memoryPanelStart &&
+      (index === 0 || value > globalOrder[index - 1]),
+    ),
+    globalOrder.join(" < "),
+  );
+  check(
+    "记忆页顺序：按会话说明 → 召回管理",
+    memoryPanelStart < scopedIdx && scopedIdx < recallStart &&
+      recallStart < recallEnd && recallEnd < skillPanelStart,
+    `memory=${memoryPanelStart} scoped=${scopedIdx} recall=${recallStart}..${recallEnd} skill=${skillPanelStart}`,
+  );
+  check(
+    "技能页位置：技能路由在记忆页之后、页脚之前",
+    skillRouteStart > skillPanelStart && skillRouteEnd < footStart,
+    `skill=${skillRouteStart}..${skillRouteEnd} panel=${skillPanelStart} foot=${footStart}`,
   );
 
   // ---- 打分服务：总闸下面、按会话说明之前，占满整行 ----
   const scoringIdx = html.indexOf('id="scoringServices"');
-  const scopedIdx = html.indexOf('class="scoped-note"');
   check("打分服务一块存在", scoringIdx > 0);
   check(
-    "打分服务在前置卡里、scoped-note 之前",
-    scoringIdx > preludeStart && scoringIdx < scopedIdx,
-    `scoring=${scoringIdx} prelude=${preludeStart} scoped=${scopedIdx}`,
+    "打分服务在前置卡里、仍在全局页，scoped-note 已搬到记忆页",
+    scoringIdx > preludeStart && scoringIdx > globalPanelStart &&
+      scoringIdx < memoryPanelStart && scoringIdx < scopedIdx &&
+      scopedIdx > memoryPanelStart,
+    `scoring=${scoringIdx} prelude=${preludeStart} global=${globalPanelStart} memory=${memoryPanelStart} scoped=${scopedIdx}`,
   );
   check(
     "打分服务不在两栏里",
@@ -2132,7 +2169,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const systemoneGroupStart = html.indexOf('data-kind="systemone"');
   check("两组服务都有 data-kind 标记", rerankGroupStart > 0 && systemoneGroupStart > rerankGroupStart);
   const rerankGroup = html.slice(rerankGroupStart, systemoneGroupStart);
-  const systemoneGroup = html.slice(systemoneGroupStart, html.indexOf('class="scoped-note"'));
+  const systemoneGroup = html.slice(systemoneGroupStart, preludeEnd);
   for (const [name, group] of [
     ["精排服务", rerankGroup],
     ["决策服务", systemoneGroup],
@@ -2471,6 +2508,268 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     Object.keys(DEFAULTS).filter((key) => props[key] === undefined).join(", "),
   );
   check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
+}
+
+// ================= ui: 面板标签页 =================
+{
+  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
+  const html = read("panel.html");
+  const panelJs = read("assets/panel.js");
+  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const globalStart = html.indexOf('id="panel-global"');
+  const memoryStart = html.indexOf('id="panel-memory"');
+  const skillStart = html.indexOf('id="panel-skill"');
+  const footStart = html.indexOf('<footer id="foot"');
+  const globalPanel = html.slice(globalStart, memoryStart);
+  const memoryPanel = html.slice(memoryStart, skillStart);
+  const skillPanel = html.slice(skillStart, footStart);
+  const panelTag = (name) =>
+    new RegExp(`<div[^>]*id="panel-${name}"[^>]*>`).exec(html)?.[0] ?? "";
+
+  // ---- 标签按钮 ----
+  check("标签栏只有一个 tablist", (html.match(/role="tablist"/g) || []).length === 1);
+  check(
+    "三个标签都在",
+    ["global", "memory", "skill"].every((name) => html.includes(`id="tab-${name}"`)),
+  );
+  eq("role=tab 恰好三枚", (html.match(/role="tab"/g) || []).length, 3);
+  check(
+    "data-tab 三值齐全",
+    ["global", "memory", "skill"].every((name) => html.includes(`data-tab="${name}"`)),
+  );
+  eq("aria-selected=true 恰好一枚", (html.match(/aria-selected="true"/g) || []).length, 1);
+  const globalTabTag = /<button[^>]*id="tab-global"[^>]*>/.exec(html)?.[0] ?? "";
+  check(
+    "默认选中全局页且可聚焦",
+    /aria-selected="true"/.test(globalTabTag) && /tabindex="0"/.test(globalTabTag),
+    globalTabTag,
+  );
+  for (const name of ["memory", "skill"]) {
+    const tag = new RegExp(`<button[^>]*id="tab-${name}"[^>]*>`).exec(html)?.[0] ?? "";
+    check(
+      `未选中的 ${name} 标签 aria-selected=false / tabindex=-1`,
+      /aria-selected="false"/.test(tag) && /tabindex="-1"/.test(tag),
+      tag,
+    );
+  }
+  for (const name of ["global", "memory", "skill"]) {
+    check(
+      `${name} 标签 aria-controls 指向内容块`,
+      new RegExp(`aria-controls="panel-${name}"`).test(html),
+    );
+  }
+
+  // ---- tabpanel ----
+  eq("role=tabpanel 恰好三块", (html.match(/role="tabpanel"/g) || []).length, 3);
+  for (const name of ["global", "memory", "skill"]) {
+    check(
+      `${name} 内容块用对应 tab 标注`,
+      panelTag(name).includes(`aria-labelledby="tab-${name}"`),
+      panelTag(name),
+    );
+    check(`${name} 内容块有 tab-panel 类`, /class="tab-panel"/.test(panelTag(name)), panelTag(name));
+  }
+  check("初始只显示全局页", panelTag("global").includes("hidden") === false, panelTag("global"));
+  check("初始隐藏记忆页", /\shidden(?:\s|>)/.test(panelTag("memory")), panelTag("memory"));
+  check("初始隐藏技能页", /\shidden(?:\s|>)/.test(panelTag("skill")), panelTag("skill"));
+
+  // ---- 内容归属 ----
+  for (const needle of [
+    'id="swEnabled"',
+    'id="prelude"',
+    'id="scoringServices"',
+    'class="cols"',
+    'class="card logs"',
+  ]) {
+    check(`全局页包含 ${needle}`, globalPanel.includes(needle), needle);
+  }
+  for (const needle of [
+    'class="scoped-note"',
+    'class="card recall"',
+    'id="recallGate"',
+    'id="queryMode"',
+    'id="rerank"',
+    'id="peerList"',
+  ]) {
+    check(`记忆页包含 ${needle}`, memoryPanel.includes(needle), needle);
+  }
+  check(
+    "scoped-note 在记忆页顶部、召回管理之前",
+    memoryPanel.indexOf('class="scoped-note"') > 0 &&
+      memoryPanel.indexOf('class="scoped-note"') < memoryPanel.indexOf('class="card recall"'),
+  );
+  for (const needle of ['id="skillRoute"', 'data-key="skillRouting"']) {
+    check(`技能页包含 ${needle}`, skillPanel.includes(needle), needle);
+  }
+  for (const needle of ["recallGate", "peerList", "skillRouting"]) {
+    check(`全局页不包含 ${needle}`, globalPanel.includes(needle) === false, needle);
+  }
+
+  // ---- 切换接线与日志折叠（三页共用顶部 / 页脚） ----
+  check(
+    "selectTab 同时改 aria-selected / tabindex / hidden",
+    panelJs.includes('button.setAttribute("aria-selected"') &&
+      panelJs.includes("button.tabIndex = selected ? 0 : -1") &&
+      panelJs.includes("panel.hidden = !selected"),
+  );
+  check(
+    "启动时先摆好上次停的页再读数据",
+    panelJs.includes("selectTab(readTab(safeLocalStorage()), { persist: false })"),
+  );
+  check(
+    "点击标签会持久化并带键盘切换",
+    /node\.addEventListener\("click", \(\) => selectTab\(tab, \{ persist: true \}\)\)/.test(panelJs) &&
+      panelJs.includes("event.key === \"ArrowRight\"") &&
+      panelJs.includes("event.key === \"Home\""),
+  );
+  check(
+    "日志折叠仍在全局页",
+    globalPanel.includes('id="logToggle"') && globalPanel.includes('id="logBody"'),
+  );
+  check("日志正文默认隐藏", /id="logBody"[^>]*hidden/.test(html));
+  check(
+    "折叠按钮仍只切隐藏与文案",
+    /\$\("logToggle"\)\.addEventListener\("click"/.test(panelJs) &&
+      panelJs.includes('$("logBody").hidden = !logOpen') &&
+      panelJs.includes('logOpen ? "收起" : "展开"'),
+  );
+
+  // ---- localStorage 键与归一化 ----
+  eq("tab 记忆键", TAB_KEY, "hanako-openviking:tab");
+  check("tab 记忆键带 app 前缀", TAB_KEY.startsWith("hanako-openviking:"));
+  eq("默认页", DEFAULT_TAB, "global");
+  eq("三个页名", TABS, ["global", "memory", "skill"]);
+  for (const value of [null, undefined, "", "nope", "Global", "MEMORY", " memory "]) {
+    eq(`非法值 ${JSON.stringify(value)} 回默认页`, normalizeTab(value), "global");
+  }
+  for (const value of ["global", "memory", "skill"]) {
+    eq(`合法值 ${value} 原样返回`, normalizeTab(value), value);
+  }
+  eq("空 storage 回默认页", readTab(null), "global");
+  eq("storage 读不到回默认页", readTab({ getItem: () => null }), "global");
+  eq("storage 读到合法值", readTab({ getItem: () => "memory" }), "memory");
+  eq("storage 读到非法值回默认页", readTab({ getItem: () => "xx" }), "global");
+  eq(
+    "storage 读抛错不崩、回默认页",
+    readTab({
+      getItem: () => {
+        throw new Error("denied");
+      },
+    }),
+    "global",
+  );
+  {
+    const store = new Map();
+    const fake = {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, value),
+    };
+    writeTab(fake, "skill");
+    eq("writeTab 写入正确的键值", [store.get(TAB_KEY), store.size], ["skill", 1]);
+    eq("writeTab 后 readTab 能读回", readTab(fake), "skill");
+  }
+  eq(
+    "writeTab 在 setItem 抛错时不崩",
+    (() => {
+      try {
+        writeTab(
+          {
+            setItem: () => {
+              throw new Error("quota");
+            },
+          },
+          "memory",
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+    true,
+  );
+
+  // ---- 置灰覆盖三页 ----
+  const dimSource = panelJs.slice(
+    panelJs.indexOf("function paintDim("),
+    panelJs.indexOf("function renderStatus("),
+  );
+  const dimSelector = dimSource.match(/querySelectorAll\(\s*"([^"]+)"/)?.[1] ?? "";
+  check("paintDim 选择器取到了", dimSelector.length > 0, dimSource.slice(0, 120));
+  for (const selector of [
+    ".toggle",
+    "#scoringServices",
+    ".recall-grid",
+    ".gate-advanced",
+    ".skill-route",
+  ]) {
+    check(`置灰覆盖 ${selector}`, dimSelector.includes(selector), dimSelector);
+  }
+  check(
+    "全局页有可置灰节点",
+    /class="toggle"/.test(globalPanel) && globalPanel.includes('id="scoringServices"'),
+  );
+  check(
+    "记忆页有可置灰节点",
+    memoryPanel.includes('class="recall-grid"') && memoryPanel.includes('class="gate-advanced"'),
+  );
+  check("技能页有可置灰节点", skillPanel.includes("skill-route"));
+  check(
+    "paintDim 没有限定在单个面板",
+    ["panel-global", "panel-memory", "panel-skill"].every(
+      (name) => dimSelector.includes(name) === false,
+    ),
+    dimSelector,
+  );
+
+  // ---- 跨页重算：改服务 -> 保存 -> 重画通道类型，不需要切页/刷新 ----
+  const applySource = panelJs.match(/\nfunction applyLayers\([\s\S]*?\n\}/)?.[0] ?? "";
+  check("applyLayers 会重画通道行", applySource.includes("renderRerankChannels"), applySource.slice(0, 120));
+  const renderSource = panelJs.match(/\nfunction renderRerankChannels\([\s\S]*?\n\}/)?.[0] ?? "";
+  check(
+    "renderRerankChannels 用 channelTypeOptions(layers)",
+    renderSource.includes("channelTypeOptions(layers)"),
+    renderSource.slice(0, 120),
+  );
+  check(
+    "服务字段 change 仍走 saveLayers",
+    /\$\(id\)\.addEventListener\("change"[\s\S]{0,240}saveLayers\(\)/.test(panelJs),
+  );
+  check(
+    "saveLayers 仍走 commitLayers 的 apply 链",
+    /apply:\s*applyLayers/.test(panelJs) && panelJs.includes("commitLayers"),
+  );
+  const selectSource = panelJs.match(/\nfunction selectTab\([\s\S]*?\n\}/)?.[0] ?? "";
+  check("selectTab 函数取到了", selectSource.length > 0, panelJs.slice(0, 80));
+  check(
+    "selectTab 不触发重算或写入",
+    ["renderRerankChannels", "applyLayers", "saveLayers", "refresh"].every(
+      (name) => selectSource.includes(name) === false,
+    ),
+    selectSource,
+  );
+  check(
+    "记忆页的通道下拉节点还在（隐藏面板不删节点）",
+    memoryPanel.includes('id="rerankChannelList"'),
+  );
+
+  // ---- CSS ----
+  check("标签栏样式存在", /\n\.tabs \{/.test(css));
+  check("选中标签样式存在", /\n\.tab\[aria-selected="true"\] \{/.test(css));
+  check("内容块样式存在", /\n\.tab-panel \{/.test(css));
+  const tabsRule = css.slice(css.indexOf(".tabs {"), css.indexOf("}", css.indexOf(".tabs {")));
+  check("标签栏一行不换行", /flex-wrap:\s*nowrap/.test(tabsRule), tabsRule);
+  const panelRule = css.slice(
+    css.indexOf(".tab-panel {"),
+    css.indexOf("}", css.indexOf(".tab-panel {")),
+  );
+  check(
+    "内容块是 grid + 14px 间距",
+    /display:\s*grid/.test(panelRule) && /gap:\s*14px/.test(panelRule),
+    panelRule,
+  );
+  const tabRule = css.slice(css.indexOf(".tab {"), css.indexOf("}", css.indexOf(".tab {")));
+  check("标签字号沿用 12px", /font-size:\s*12px/.test(tabRule), tabRule);
 }
 
 // ================= ui: 召回下拉的收笔逻辑 =================

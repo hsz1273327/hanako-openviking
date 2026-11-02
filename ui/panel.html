@@ -27,257 +27,272 @@
       </div>
     </header>
 
-    <section id="masterCard" class="master">
-      <div class="master-copy">
-        <h2 class="master-title">总闸</h2>
-        <p id="masterHint" class="master-hint">关着等于没装。打开之后，下面这些开关才有意义。</p>
-      </div>
-      <button id="swEnabled" class="switch" type="button" role="switch" aria-checked="false" aria-label="总闸">
-        <span class="knob"></span>
-      </button>
-    </section>
+    <!-- 三页共用顶部身份条与页脚；标签只决定中间哪一块可见，不引入路由。 -->
+    <div class="tabs" role="tablist" aria-label="配置分类">
+      <button id="tab-global" class="tab" type="button" role="tab" data-tab="global"
+        aria-selected="true" tabindex="0" aria-controls="panel-global">全局配置</button>
+      <button id="tab-memory" class="tab" type="button" role="tab" data-tab="memory"
+        aria-selected="false" tabindex="-1" aria-controls="panel-memory">记忆配置</button>
+      <button id="tab-skill" class="tab" type="button" role="tab" data-tab="skill"
+        aria-selected="false" tabindex="-1" aria-controls="panel-skill">共享技能</button>
+    </div>
 
-    <!-- 前置：不管宏观行为，只管「下面那些能力有没有底座」。
-         探针决定日志记不记钩子事实，打分服务决定精排通道能不能选那两类。 -->
-    <section id="prelude" class="card prelude" aria-label="前置">
-      <h2 class="card-title">前置</h2>
-
-      <div class="toggle" data-key="probe">
-        <div class="toggle-copy">
-          <b>探针</b>
-          <span>把钩子事实记进日志</span>
+    <div id="panel-global" class="tab-panel" role="tabpanel" aria-labelledby="tab-global">
+      <section id="masterCard" class="master">
+        <div class="master-copy">
+          <h2 class="master-title">总闸</h2>
+          <p id="masterHint" class="master-hint">关着等于没装。打开之后，下面这些开关才有意义。</p>
         </div>
-        <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
-      </div>
+        <button id="swEnabled" class="switch" type="button" role="switch" aria-checked="false" aria-label="总闸">
+          <span class="knob"></span>
+        </button>
+      </section>
 
-      <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
-           每组是「地址 + 模型 + 超时 + 测试」四项：地址与模型成对（配了地址就要填模型名），
-           超时留空就用该类型的默认值（placeholder 里写着那个数）。
-           两块都留空时，通道里就只剩「宿主模型」这一类。 -->
-      <div id="scoringServices" class="services">
-        <div class="service-grid">
-          <div class="service" data-kind="rerank">
-            <div class="service-title">精排服务</div>
-            <div class="service-fields">
-              <div class="field">
-                <label for="rerankServiceUrl">地址</label>
-                <input id="rerankServiceUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8098">
+      <!-- 前置：不管宏观行为，只管「下面那些能力有没有底座」。
+           探针决定日志记不记钩子事实，打分服务决定精排通道能不能选那两类。 -->
+      <section id="prelude" class="card prelude" aria-label="前置">
+        <h2 class="card-title">前置</h2>
+
+        <div class="toggle" data-key="probe">
+          <div class="toggle-copy">
+            <b>探针</b>
+            <span>把钩子事实记进日志</span>
+          </div>
+          <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
+        </div>
+
+        <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
+             每组是「地址 + 模型 + 超时 + 测试」四项：地址与模型成对（配了地址就要填模型名），
+             超时留空就用该类型的默认值（placeholder 里写着那个数）。
+             两块都留空时，通道里就只剩「宿主模型」这一类。 -->
+        <div id="scoringServices" class="services">
+          <div class="service-grid">
+            <div class="service" data-kind="rerank">
+              <div class="service-title">精排服务</div>
+              <div class="service-fields">
+                <div class="field">
+                  <label for="rerankServiceUrl">地址</label>
+                  <input id="rerankServiceUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8098">
+                </div>
+                <div class="field">
+                  <label for="rerankServiceModel">模型</label>
+                  <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
+                </div>
+                <div class="field narrow">
+                  <label for="rerankServiceTimeoutMs">超时</label>
+                  <input id="rerankServiceTimeoutMs" type="number" min="100" max="10000" step="100" placeholder="800 ms">
+                </div>
+                <div class="field service-test">
+                  <button id="rerankServiceTest" class="btn ghost sm" type="button">测试</button>
+                </div>
               </div>
-              <div class="field">
-                <label for="rerankServiceModel">模型</label>
-                <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
-              </div>
-              <div class="field narrow">
-                <label for="rerankServiceTimeoutMs">超时</label>
-                <input id="rerankServiceTimeoutMs" type="number" min="100" max="10000" step="100" placeholder="800 ms">
-              </div>
-              <div class="field service-test">
-                <button id="rerankServiceTest" class="btn ghost sm" type="button">测试</button>
-              </div>
+              <p id="rerankServiceResult" class="service-result" hidden></p>
+              <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 800 ms。</p>
             </div>
-            <p id="rerankServiceResult" class="service-result" hidden></p>
-            <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 800 ms。</p>
-          </div>
-          <div class="service" data-kind="systemone">
-            <div class="service-title">决策服务</div>
-            <div class="service-fields">
-              <div class="field">
-                <label for="systemoneServiceUrl">地址</label>
-                <input id="systemoneServiceUrl" type="url" spellcheck="false" placeholder="http://192.168.50.142:8097">
+            <div class="service" data-kind="systemone">
+              <div class="service-title">决策服务</div>
+              <div class="service-fields">
+                <div class="field">
+                  <label for="systemoneServiceUrl">地址</label>
+                  <input id="systemoneServiceUrl" type="url" spellcheck="false" placeholder="http://192.168.50.142:8097">
+                </div>
+                <div class="field">
+                  <label for="systemoneServiceModel">模型</label>
+                  <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
+                </div>
+                <div class="field narrow">
+                  <label for="systemoneServiceTimeoutMs">超时</label>
+                  <input id="systemoneServiceTimeoutMs" type="number" min="100" max="15000" step="100" placeholder="3500 ms">
+                </div>
+                <div class="field service-test">
+                  <button id="systemoneServiceTest" class="btn ghost sm" type="button">测试</button>
+                </div>
               </div>
-              <div class="field">
-                <label for="systemoneServiceModel">模型</label>
-                <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
-              </div>
-              <div class="field narrow">
-                <label for="systemoneServiceTimeoutMs">超时</label>
-                <input id="systemoneServiceTimeoutMs" type="number" min="100" max="15000" step="100" placeholder="3500 ms">
-              </div>
-              <div class="field service-test">
-                <button id="systemoneServiceTest" class="btn ghost sm" type="button">测试</button>
-              </div>
+              <p id="systemoneServiceResult" class="service-result" hidden></p>
+              <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 3500 ms。</p>
             </div>
-            <p id="systemoneServiceResult" class="service-result" hidden></p>
-            <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 3500 ms。</p>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <p class="scoped-note">
-      记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
-    </p>
-
-    <section class="cols">
-      <article class="card">
-        <h2 class="card-title">中枢</h2>
-        <div class="field">
-          <label for="serverUrl">地址</label>
-          <input id="serverUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8000">
-        </div>
-        <div class="field">
-          <label for="apiKey">API Key</label>
-          <input id="apiKey" type="text" autocomplete="off" spellcheck="false" placeholder="未填写">
-        </div>
-        <div class="facts">
-          <div class="fact"><span>往返</span><b id="latency">—</b></div>
-          <div class="fact"><span>版本</span><b id="version">—</b></div>
-          <div class="fact"><span>出口</span><b id="transport">—</b></div>
-        </div>
-        <!-- 五个检查项平时不占地方：全绿时只有一行静态文字「服务端就绪 5/5」，
-             有问题才在下面平铺列出不对的那几项。不可点、不折叠。 -->
-        <div id="checksBlock" class="checks-block" hidden>
-          <div id="checksSummary" class="checks-summary"></div>
-          <ul id="checks" class="checks" hidden></ul>
-        </div>
-        <p id="reachError" class="err" hidden></p>
-        <p id="saveHint" class="save-hint"></p>
-      </article>
-
-      <article class="card">
-        <h2 class="card-title">身份</h2>
-        <div class="field">
-          <label for="peerPrefix">门牌前缀</label>
-          <input id="peerPrefix" type="text" spellcheck="false" placeholder="可留空">
-          <span class="field-hint">这一段对话算谁的，看右侧卡里的 peer。</span>
-        </div>
-        <div class="field pair">
-          <label for="timeoutMs">超时（ms）</label>
-          <label for="budgetTokens">注入预算（token）</label>
-          <input id="timeoutMs" type="number" min="200" max="30000" step="100">
-          <input id="budgetTokens" type="number" min="200" max="32000" step="100">
-        </div>
-      </article>
-    </section>
-
-    <!-- 召回相关的两件事合成一栏：上面两个下拉定「什么算该查、拿什么查」，
-         下面名单定「谁能进候选池」。下拉跟上面两个开关一样按整台机器算、改了
-         就生效，没有保存按钮；第三层（召回范围）是按会话的，仍在右侧卡片里。
-         占满整行是因为名单需要整行宽度。 -->
-    <section class="card recall" aria-label="召回管理">
-      <header class="recall-head">
-        <h2 class="card-title">召回管理</h2>
-        <span id="peerCount" class="peer-count"></span>
-      </header>
-
-      <div class="recall-grid">
-        <div class="field">
-          <label for="recallGate">召回判断</label>
-          <select id="recallGate">
-            <option value="off">不判断（每轮都召回）</option>
-            <option value="rules">规则跳过（极短的纯操作指令）</option>
-            <option value="llm">模型判断（用宿主模型）</option>
-          </select>
-          <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令；模型判断失败或超时会照常召回。</span>
-        </div>
-        <div class="field">
-          <label for="queryMode">召回查询</label>
-          <select id="queryMode">
-            <option value="last">最后一句</option>
-            <option value="context">带上文（最近三条）</option>
-          </select>
-          <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
-        </div>
-        <div class="field">
-          <label for="rerank">结果重排</label>
-          <select id="rerank">
-            <option value="off">关</option>
-            <option value="llm">开启</option>
-          </select>
-          <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
-        </div>
-      </div>
-
-      <!-- 只有 recallGate=llm 时才展开。提示词框里放的就是当前生效的提示词：
-           配置为空时把默认提示词整段填进去当草稿，而不是一个敲一下就消失的 placeholder。
-           判断模型是一个下拉，首项默认，其余是目录里的模型。 -->
-      <div id="gateAdvanced" class="gate-advanced" hidden>
-        <div class="field">
-          <div class="prompt-head">
-            <label for="gatePrompt">判断提示词</label>
-            <span id="gatePromptStatus" class="prompt-status"></span>
-            <button id="gateResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
+      <section class="cols">
+        <article class="card">
+          <h2 class="card-title">中枢</h2>
+          <div class="field">
+            <label for="serverUrl">地址</label>
+            <input id="serverUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8000">
           </div>
-          <textarea id="gatePrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
-          <!-- 提示词是模板：占位符处填当前这条用户消息，渲染后整段作为单条用户消息发给模型。 -->
-          <span class="field-hint">用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
-        </div>
-
-        <div class="field">
-          <label for="gateModel">判断模型</label>
-          <!-- 一个下拉选到底：首项是默认（走宿主辅助模型），其余就是目录里的每个模型。
-               不再有“默认 / 自选”两个单选，也就没有中间那层要展开的 provider + 模型。 -->
-          <select id="gateModel">
-            <option value="">默认（宿主辅助模型）</option>
-          </select>
-          <span id="gateModelsHint" class="field-hint" hidden></span>
-        </div>
-      </div>
-
-      <!-- 只有 rerank=llm 时才展开。与 gate 共用 gate-advanced / prompt-head 组件；
-           默认模板不写进 HTML，由脚本从 recall-layers.js 里填，避免两份字面量走样。 -->
-      <div id="rerankAdvanced" class="gate-advanced" hidden>
-        <div class="field">
-          <div class="prompt-head">
-            <label for="rerankPrompt">重排提示词</label>
-            <span id="rerankPromptStatus" class="prompt-status"></span>
-            <button id="rerankResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
+          <div class="field">
+            <label for="apiKey">API Key</label>
+            <input id="apiKey" type="text" autocomplete="off" spellcheck="false" placeholder="未填写">
           </div>
-          <textarea id="rerankPrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
-          <span class="field-hint">用 {{message}} 表示当前这条用户消息，用 {{candidates}} 表示候选清单；没写 {{candidates}} 的话，清单会自动接在末尾。</span>
-        </div>
-
-        <div class="field">
-          <label for="rerankModel">兜底模型（无启用通道时）</label>
-          <select id="rerankModel">
-            <option value="">默认（宿主辅助模型）</option>
-          </select>
-          <span id="rerankModelsHint" class="field-hint" hidden></span>
-        </div>
-
-        <!-- 多路精排通道。通道行由脚本按配置渲染；列表为空时只显示一句空态文案。
-             静态 HTML 里不放下拉，避免与“重排展开区只有一个模型下拉”的结构约束打架。 -->
-        <div class="field channel-field">
-          <div class="prompt-head">
-            <label>精排通道</label>
-            <span id="rerankChannelsCount" class="prompt-status"></span>
-            <button id="rerankTestBtn" class="btn ghost sm" type="button">测试</button>
+          <div class="facts">
+            <div class="fact"><span>往返</span><b id="latency">—</b></div>
+            <div class="fact"><span>版本</span><b id="version">—</b></div>
+            <div class="fact"><span>出口</span><b id="transport">—</b></div>
           </div>
-          <p id="rerankChannelsEmpty" class="field-hint">还没有通道，精排不会生效</p>
-          <div id="rerankChannelList" class="channel-list"></div>
-          <div class="channel-actions">
-            <span id="rerankChannelHint" class="field-hint" hidden>先在上面配好打分服务</span>
-            <button id="rerankAddChannel" class="btn ghost sm" type="button">添加通道</button>
+          <!-- 五个检查项平时不占地方：全绿时只有一行静态文字「服务端就绪 5/5」，
+               有问题才在下面平铺列出不对的那几项。不可点、不折叠。 -->
+          <div id="checksBlock" class="checks-block" hidden>
+            <div id="checksSummary" class="checks-summary"></div>
+            <ul id="checks" class="checks" hidden></ul>
           </div>
-          <pre id="rerankTestResult" class="channel-result" hidden></pre>
-          <span class="field-hint">精排 / 决策两类走上面「打分服务」配的地址；宿主模型走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。通道自带的地址与模型成对生效，只填一半就整对改用服务配置。超时优先级：通道自带 &gt; 服务配置 &gt; 类型默认值；systemone 没配超时时按候选数自适应（3500ms 起，候选越多越慢，默认 5 条，一次问完全部候选，超过 5 条的按未打分处理）。</span>
+          <p id="reachError" class="err" hidden></p>
+          <p id="saveHint" class="save-hint"></p>
+        </article>
+
+        <article class="card">
+          <h2 class="card-title">身份</h2>
+          <div class="field">
+            <label for="peerPrefix">门牌前缀</label>
+            <input id="peerPrefix" type="text" spellcheck="false" placeholder="可留空">
+            <span class="field-hint">这一段对话算谁的，看右侧卡里的 peer。</span>
+          </div>
+          <div class="field pair">
+            <label for="timeoutMs">超时（ms）</label>
+            <label for="budgetTokens">注入预算（token）</label>
+            <input id="timeoutMs" type="number" min="200" max="30000" step="100">
+            <input id="budgetTokens" type="number" min="200" max="32000" step="100">
+          </div>
+        </article>
+      </section>
+
+      <section class="card logs">
+        <header class="logs-head">
+          <h2 class="card-title">日志</h2>
+          <div id="logChips" class="chips"></div>
+          <button id="logToggle" class="btn ghost sm" type="button">展开</button>
+        </header>
+        <pre id="logBody" class="log" hidden>（还没有记录）</pre>
+      </section>
+    </div>
+
+    <div id="panel-memory" class="tab-panel" role="tabpanel" aria-labelledby="tab-memory" hidden>
+      <p class="scoped-note">
+        记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
+      </p>
+
+      <!-- 召回相关的两件事合成一栏：上面两个下拉定「什么算该查、拿什么查」，
+           下面名单定「谁能进候选池」。下拉跟上面两个开关一样按整台机器算、改了
+           就生效，没有保存按钮；第三层（召回范围）是按会话的，仍在右侧卡片里。
+           占满整行是因为名单需要整行宽度。 -->
+      <section class="card recall" aria-label="召回管理">
+        <header class="recall-head">
+          <h2 class="card-title">召回管理</h2>
+          <span id="peerCount" class="peer-count"></span>
+        </header>
+
+        <div class="recall-grid">
+          <div class="field">
+            <label for="recallGate">召回判断</label>
+            <select id="recallGate">
+              <option value="off">不判断（每轮都召回）</option>
+              <option value="rules">规则跳过（极短的纯操作指令）</option>
+              <option value="llm">模型判断（用宿主模型）</option>
+            </select>
+            <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令；模型判断失败或超时会照常召回。</span>
+          </div>
+          <div class="field">
+            <label for="queryMode">召回查询</label>
+            <select id="queryMode">
+              <option value="last">最后一句</option>
+              <option value="context">带上文（最近三条）</option>
+            </select>
+            <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
+          </div>
+          <div class="field">
+            <label for="rerank">结果重排</label>
+            <select id="rerank">
+              <option value="off">关</option>
+              <option value="llm">开启</option>
+            </select>
+            <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
+          </div>
         </div>
-      </div>
 
-      <div class="recall-sep" aria-hidden="true"></div>
+        <!-- 只有 recallGate=llm 时才展开。提示词框里放的就是当前生效的提示词：
+             配置为空时把默认提示词整段填进去当草稿，而不是一个敲一下就消失的 placeholder。
+             判断模型是一个下拉，首项默认，其余是目录里的模型。 -->
+        <div id="gateAdvanced" class="gate-advanced" hidden>
+          <div class="field">
+            <div class="prompt-head">
+              <label for="gatePrompt">判断提示词</label>
+              <span id="gatePromptStatus" class="prompt-status"></span>
+              <button id="gateResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
+            </div>
+            <textarea id="gatePrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
+            <!-- 提示词是模板：占位符处填当前这条用户消息，渲染后整段作为单条用户消息发给模型。 -->
+            <span class="field-hint">用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
+          </div>
 
-      <div id="peerList" class="peer-list empty">正在读取</div>
-      <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与上面的召回，再点恢复。</p>
-    </section>
+          <div class="field">
+            <label for="gateModel">判断模型</label>
+            <!-- 一个下拉选到底：首项是默认（走宿主辅助模型），其余就是目录里的每个模型。
+                 不再有“默认 / 自选”两个单选，也就没有中间那层要展开的 provider + 模型。 -->
+            <select id="gateModel">
+              <option value="">默认（宿主辅助模型）</option>
+            </select>
+            <span id="gateModelsHint" class="field-hint" hidden></span>
+          </div>
+        </div>
 
-    <!-- 能力：和召回同级的一块。现在只有一个开关，内容就是标题 + 开关 + 一行说明。
-         放在召回之后、日志之前。 -->
-    <section id="skillRoute" class="card skill-route" aria-label="技能路由">
-      <header class="skill-route-head">
-        <h2 class="card-title">技能路由</h2>
-        <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
-      </header>
-      <p class="skill-route-hint">把共享技能交给助手按需调用</p>
-    </section>
+        <!-- 只有 rerank=llm 时才展开。与 gate 共用 gate-advanced / prompt-head 组件；
+             默认模板不写进 HTML，由脚本从 recall-layers.js 里填，避免两份字面量走样。 -->
+        <div id="rerankAdvanced" class="gate-advanced" hidden>
+          <div class="field">
+            <div class="prompt-head">
+              <label for="rerankPrompt">重排提示词</label>
+              <span id="rerankPromptStatus" class="prompt-status"></span>
+              <button id="rerankResetPrompt" class="btn ghost sm" type="button">恢复默认</button>
+            </div>
+            <textarea id="rerankPrompt" rows="4" maxlength="2000" spellcheck="false"></textarea>
+            <span class="field-hint">用 {{message}} 表示当前这条用户消息，用 {{candidates}} 表示候选清单；没写 {{candidates}} 的话，清单会自动接在末尾。</span>
+          </div>
 
-    <section class="card logs">
-      <header class="logs-head">
-        <h2 class="card-title">日志</h2>
-        <div id="logChips" class="chips"></div>
-        <button id="logToggle" class="btn ghost sm" type="button">展开</button>
-      </header>
-      <pre id="logBody" class="log" hidden>（还没有记录）</pre>
-    </section>
+          <div class="field">
+            <label for="rerankModel">兜底模型（无启用通道时）</label>
+            <select id="rerankModel">
+              <option value="">默认（宿主辅助模型）</option>
+            </select>
+            <span id="rerankModelsHint" class="field-hint" hidden></span>
+          </div>
+
+          <!-- 多路精排通道。通道行由脚本按配置渲染；列表为空时只显示一句空态文案。
+               静态 HTML 里不放下拉，避免与“重排展开区只有一个模型下拉”的结构约束打架。 -->
+          <div class="field channel-field">
+            <div class="prompt-head">
+              <label>精排通道</label>
+              <span id="rerankChannelsCount" class="prompt-status"></span>
+              <button id="rerankTestBtn" class="btn ghost sm" type="button">测试</button>
+            </div>
+            <p id="rerankChannelsEmpty" class="field-hint">还没有通道，精排不会生效</p>
+            <div id="rerankChannelList" class="channel-list"></div>
+            <div class="channel-actions">
+              <span id="rerankChannelHint" class="field-hint" hidden>先在上面配好打分服务</span>
+              <button id="rerankAddChannel" class="btn ghost sm" type="button">添加通道</button>
+            </div>
+            <pre id="rerankTestResult" class="channel-result" hidden></pre>
+            <span class="field-hint">精排 / 决策两类走上面「打分服务」配的地址；宿主模型走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。通道自带的地址与模型成对生效，只填一半就整对改用服务配置。超时优先级：通道自带 &gt; 服务配置 &gt; 类型默认值；systemone 没配超时时按候选数自适应（3500ms 起，候选越多越慢，默认 5 条，一次问完全部候选，超过 5 条的按未打分处理）。</span>
+          </div>
+        </div>
+
+        <div class="recall-sep" aria-hidden="true"></div>
+
+        <div id="peerList" class="peer-list empty">正在读取</div>
+        <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与上面的召回，再点恢复。</p>
+      </section>
+    </div>
+
+    <!-- 能力：和召回同级的一块。现在只有一个开关，内容就是标题 + 开关 + 一行说明。 -->
+    <div id="panel-skill" class="tab-panel" role="tabpanel" aria-labelledby="tab-skill" hidden>
+      <section id="skillRoute" class="card skill-route" aria-label="技能路由">
+        <header class="skill-route-head">
+          <h2 class="card-title">技能路由</h2>
+          <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
+        </header>
+        <p class="skill-route-hint">把共享技能交给助手按需调用</p>
+      </section>
+    </div>
 
     <footer id="foot" class="foot"></footer>
   </main>
