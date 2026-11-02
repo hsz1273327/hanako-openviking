@@ -32,6 +32,7 @@ import {
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  SCORING_SERVICES,
   SYSTEMONE_MAX_CANDIDATES,
   SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_MAX,
@@ -54,6 +55,7 @@ import {
   rerankChannelsText,
   rerankPromptDraft,
   rerankPromptStatus,
+  scoringServiceLayout,
   serviceTestBody,
   serviceTestReady,
   serviceTestView,
@@ -677,11 +679,11 @@ function paintServiceResult(box, view) {
   box.textContent = view.text;
 }
 
-/** 改了地址 / 模型 / 超时，上一次的结果就不再可信，直接收掉。 */
+/** 改了地址 / 模型 / 超时，上一次的结果就不再可信，直接收掉。
+ * 空着也保留这一行的高度（不设 hidden），避免结果出现 / 消失时整页抖一下。 */
 function clearServiceResult(kind) {
   const box = $(`${kind}ServiceResult`);
   if (!box) return;
-  box.hidden = true;
   box.className = "service-result";
   box.textContent = "";
 }
@@ -693,14 +695,17 @@ function clearServiceResult(kind) {
  * 不碰任何状态，所以点多少次都不会把配置写成半截。
  */
 async function runServiceTest(kind) {
+  // 输入框的 id 来自描述表，不再按 kind 拼字符串。
+  const service = SCORING_SERVICES.find((item) => item.kind === kind);
+  if (!service) return;
   const button = $(`${kind}ServiceTest`);
   const box = $(`${kind}ServiceResult`);
   if (!button || !box || serviceTestPending.has(kind)) return;
 
   const draft = {
-    url: $(`${kind}ServiceUrl`).value,
-    model: $(`${kind}ServiceModel`).value,
-    timeoutMs: $(`${kind}ServiceTimeoutMs`).value,
+    url: $(service.urlKey).value,
+    model: $(service.modelKey).value,
+    timeoutMs: $(service.timeoutKey).value,
   };
   const body = serviceTestBody(kind, draft);
 
@@ -972,6 +977,146 @@ async function patchControls(body) {
   }
 }
 
+/* ---------------- 打分服务 ---------------- */
+
+// 一行服务的三格输入 + 测试按钮，字段的 id / 类型 / 边界全部来自描述表。
+function serviceFieldNode(field) {
+  const wrap = document.createElement("div");
+  wrap.className = field.narrow ? "field narrow" : "field";
+
+  const label = document.createElement("label");
+  label.htmlFor = field.id;
+  label.textContent = field.label;
+
+  const input = document.createElement("input");
+  input.id = field.id;
+  input.type = field.type;
+  if (field.spellcheck === false) input.spellcheck = false;
+  if (field.placeholder) input.placeholder = field.placeholder;
+  if (field.min != null) input.min = String(field.min);
+  if (field.max != null) input.max = String(field.max);
+  if (field.step != null) input.step = String(field.step);
+
+  wrap.append(label, input);
+  return wrap;
+}
+
+/**
+ * 把描述表落到 #scoringServices：标题、一行一个服务、列表下方一段总说明。
+ * 静态 HTML 里只有一个空容器，加第三种服务不用改这里，也不用改 HTML。
+ */
+function renderScoringServices(services = SCORING_SERVICES) {
+  const box = $("scoringServices");
+  if (!box) return;
+  const layout = scoringServiceLayout(services);
+  box.textContent = "";
+
+  const title = document.createElement("div");
+  title.className = "services-title";
+  title.textContent = layout.title;
+
+  const list = document.createElement("div");
+  list.className = "service-list";
+  for (const row of layout.rows) {
+    const item = document.createElement("div");
+    item.className = "service-row";
+    item.dataset.kind = row.kind;
+
+    const name = document.createElement("div");
+    name.className = "service-name";
+    name.textContent = row.label;
+
+    const test = document.createElement("div");
+    test.className = "field service-test";
+    const button = document.createElement("button");
+    button.id = row.testId;
+    button.className = "btn ghost sm";
+    button.type = "button";
+    button.textContent = "测试";
+    test.appendChild(button);
+
+    // 结果行常驻：空着也占一行高度，出现结果时不会把整页顶一下。
+    const result = document.createElement("p");
+    result.id = row.resultId;
+    result.className = "service-result";
+
+    item.append(
+      name,
+      serviceFieldNode(row.url),
+      serviceFieldNode(row.model),
+      serviceFieldNode(row.timeout),
+      test,
+      result,
+    );
+    list.appendChild(item);
+  }
+
+  const note = document.createElement("p");
+  note.className = "services-note";
+  note.textContent = layout.note;
+
+  box.append(title, list, note);
+}
+
+// 字段 / 配对 / 测试按钮都从描述表推出来：加服务只加一行数据。
+const SERVICE_FIELDS = SCORING_SERVICES.flatMap((service) => [
+  [service.urlKey, service.urlKey],
+  [service.modelKey, service.modelKey],
+  [service.timeoutKey, service.timeoutKey],
+]);
+
+const SERVICE_PAIRS = SCORING_SERVICES.map((service) => [service.urlKey, service.modelKey]);
+
+function scoringServiceOfField(id) {
+  return SCORING_SERVICES.find(
+    (service) =>
+      service.urlKey === id || service.modelKey === id || service.timeoutKey === id,
+  );
+}
+
+/** 一个输入框属于哪一类服务：按字段名反查描述表，各类型的超时边界不同。 */
+function kindOfServiceField(id) {
+  return scoringServiceOfField(id)?.kind || "rerank";
+}
+
+/** 输入框 id 的另一半；超时框没有配对，返回空串。 */
+function servicePartnerOf(id) {
+  for (const [urlId, modelId] of SERVICE_PAIRS) {
+    if (id === urlId) return modelId;
+    if (id === modelId) return urlId;
+  }
+  return "";
+}
+
+/** 本地的这一对是不是半对（正在填的草稿）：半对不发服务端，等填齐再整对提交。 */
+function servicePairHalfFilled(id) {
+  const partner = servicePartnerOf(id);
+  if (!partner) return false;
+  return Boolean($(id).value.trim()) !== Boolean($(partner).value.trim());
+}
+
+/** 清空一半时把另一半也清掉，不留下孤立值。 */
+function clearServicePartner(id) {
+  const service = scoringServiceOfField(id);
+  if (!service || service.timeoutKey === id || $(id).value.trim()) return;
+  const partner = servicePartnerOf(id);
+  if (partner) $(partner).value = "";
+}
+
+/** 读一对服务字段：两边都有或两边都空才提交，半对留在界面上继续编辑。 */
+function readServicePair(urlId, modelId) {
+  const url = $(urlId).value.trim();
+  const model = $(modelId).value.trim();
+  if (Boolean(url) !== Boolean(model)) return {};
+  return { [urlId]: url, [modelId]: model };
+}
+
+// 各服务的「测试」按钮：kind -> 按钮 id。结果行 id 按 kind 推出来。
+const SERVICE_TESTS = SCORING_SERVICES.map((service) => [
+  service.kind,
+  `${service.kind}ServiceTest`,
+]);
+
 /* ---------------- 召回策略 ---------------- */
 
 // 控件只回写、不重算：服务端存下什么就显示什么，脏值已在 paintRecallConfig 收敛。
@@ -996,17 +1141,30 @@ function applyLayers(next) {
   // 打分服务：正在输入的那一格不被一次刷新抢走光标与内容。
   // 半对是还没填完的草稿，服务端不会回这种值，也不拿刷新把它抹掉。
   for (const [id, key] of SERVICE_FIELDS) {
+    const service = scoringServiceOfField(id);
     if (document.activeElement === $(id)) continue;
-    if (!id.endsWith("TimeoutMs") && servicePairHalfFilled(id)) continue;
-    $(id).value = id.endsWith("TimeoutMs")
-      ? serviceTimeoutInput(layers[key], kindOfServiceField(id))
-      : layers[key] || "";
+    if (service?.timeoutKey !== id && servicePairHalfFilled(id)) continue;
+    $(id).value =
+      service?.timeoutKey === id
+        ? serviceTimeoutInput(layers[key], service.kind)
+        : layers[key] || "";
   }
   renderRerankChannels([...layers.rerankChannels, ...pending]);
   paintModelSelect();
 }
 
 function readLayers() {
+  const scoring = {};
+  for (const service of SCORING_SERVICES) {
+    // 打分服务：原样发，合法性由服务端整单校验；被拒就整组回滚。
+    // 半对停在本地草稿里，两边填齐后一次提交（服务端两个方向都要求成对）。
+    Object.assign(scoring, readServicePair(service.urlKey, service.modelKey));
+    // 超时收成数字或 null，与服务端投影同形：否则「没改」与「改了」比不出来。
+    scoring[service.timeoutKey] = normalizeServiceTimeout(
+      $(service.timeoutKey).value,
+      service.kind,
+    );
+  }
   return {
     recallGate: $("recallGate").value,
     queryMode: $("queryMode").value,
@@ -1017,76 +1175,9 @@ function readLayers() {
     rerankModel: $("rerankModel").value,
     // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
     rerankChannels: rerankChannelsDraft.filter(isCompleteRerankChannel),
-    // 打分服务：原样发，合法性由服务端整单校验；被拒就整组回滚。
-    // 半对停在本地草稿里，两边填齐后一次提交（服务端两个方向都要求成对）。
-    ...readServicePair("rerankServiceUrl", "rerankServiceModel"),
-    ...readServicePair("systemoneServiceUrl", "systemoneServiceModel"),
-    // 超时收成数字或 null，与服务端投影同形：否则「没改」与「改了」比不出来。
-    rerankServiceTimeoutMs: normalizeServiceTimeout($("rerankServiceTimeoutMs").value, "rerank"),
-    systemoneServiceTimeoutMs: normalizeServiceTimeout(
-      $("systemoneServiceTimeoutMs").value,
-      "systemone",
-    ),
+    ...scoring,
   };
 }
-
-/** 一个输入框属于哪一类服务：按字段名前缀分，两类超时的边界不同。 */
-function kindOfServiceField(id) {
-  return id.startsWith("systemone") ? "systemone" : "rerank";
-}
-
-// 打分服务六字段与输入框 id 一一对应（id 与配置键同名）。
-const SERVICE_FIELDS = [
-  ["rerankServiceUrl", "rerankServiceUrl"],
-  ["rerankServiceModel", "rerankServiceModel"],
-  ["rerankServiceTimeoutMs", "rerankServiceTimeoutMs"],
-  ["systemoneServiceUrl", "systemoneServiceUrl"],
-  ["systemoneServiceModel", "systemoneServiceModel"],
-  ["systemoneServiceTimeoutMs", "systemoneServiceTimeoutMs"],
-];
-
-// 地址与模型是一对：服务端只接受两边都有或两边都空。
-const SERVICE_PAIRS = [
-  ["rerankServiceUrl", "rerankServiceModel"],
-  ["systemoneServiceUrl", "systemoneServiceModel"],
-];
-
-/** 输入框 id 的另一半；超时框没有配对，返回空串。 */
-function servicePartnerOf(id) {
-  for (const [urlId, modelId] of SERVICE_PAIRS) {
-    if (id === urlId) return modelId;
-    if (id === modelId) return urlId;
-  }
-  return "";
-}
-
-/** 本地的这一对是不是半对（正在填的草稿）：半对不发服务端，等填齐再整对提交。 */
-function servicePairHalfFilled(id) {
-  const partner = servicePartnerOf(id);
-  if (!partner) return false;
-  return Boolean($(id).value.trim()) !== Boolean($(partner).value.trim());
-}
-
-/** 清空一半时把另一半也清掉，不留下孤立值。 */
-function clearServicePartner(id) {
-  if (id.endsWith("TimeoutMs") || $(id).value.trim()) return;
-  const partner = servicePartnerOf(id);
-  if (partner) $(partner).value = "";
-}
-
-/** 读一对服务字段：两边都有或两边都空才提交，半对留在界面上继续编辑。 */
-function readServicePair(urlId, modelId) {
-  const url = $(urlId).value.trim();
-  const model = $(modelId).value.trim();
-  if (Boolean(url) !== Boolean(model)) return {};
-  return { [urlId]: url, [modelId]: model };
-}
-
-// 两组服务的「测试」按钮：kind -> 按钮 id。结果行 id 按 kind 推出来。
-const SERVICE_TESTS = [
-  ["rerank", "rerankServiceTest"],
-  ["systemone", "systemoneServiceTest"],
-];
 
 const LAYER_KEYS = [
   "recallGate",
@@ -1097,12 +1188,11 @@ const LAYER_KEYS = [
   "rerankPrompt",
   "rerankModel",
   "rerankChannels",
-  "rerankServiceUrl",
-  "rerankServiceModel",
-  "rerankServiceTimeoutMs",
-  "systemoneServiceUrl",
-  "systemoneServiceModel",
-  "systemoneServiceTimeoutMs",
+  ...SCORING_SERVICES.flatMap((service) => [
+    service.urlKey,
+    service.modelKey,
+    service.timeoutKey,
+  ]),
 ];
 
 function sameLayers(a, b) {
@@ -1175,6 +1265,9 @@ async function saveConnection() {
 }
 
 /* ---------------- 绑定 ---------------- */
+
+// 先按描述表把打分服务的行画出来，下面按 id 绑事件时才找得到输入框。
+renderScoringServices();
 
 $("swEnabled").addEventListener("click", () => flip("enabled", $("swEnabled")));
 

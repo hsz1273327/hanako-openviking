@@ -164,6 +164,7 @@ import {
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  SCORING_SERVICES,
   CHANNEL_PAIR_NOTE_MODEL as UI_CHANNEL_PAIR_NOTE_MODEL,
   CHANNEL_PAIR_NOTE_URL as UI_CHANNEL_PAIR_NOTE_URL,
   SERVICE_TEST_TEXT as UI_SERVICE_TEST_TEXT,
@@ -197,6 +198,9 @@ import {
   rerankPromptDraft,
   rerankPromptStatus,
   rerankChannelsText,
+  scoringServiceLayout,
+  scoringServiceRow,
+  scoringServicesNote,
 } from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
@@ -2150,95 +2154,47 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     scoringIdx > colsEnd,
     `scoring=${scoringIdx} cols=${colsStart}..${colsEnd}`,
   );
-  for (const id of [
-    "rerankServiceUrl",
-    "rerankServiceModel",
-    "rerankServiceTimeoutMs",
-    "rerankServiceTest",
-    "rerankServiceResult",
-    "systemoneServiceUrl",
-    "systemoneServiceModel",
-    "systemoneServiceTimeoutMs",
-    "systemoneServiceTest",
-    "systemoneServiceResult",
-  ]) {
-    check(`打分服务字段 ${id} 在`, new RegExp(`id="${id}"`).test(html));
-  }
-
-  // 每组服务四项：地址 / 模型 / 超时 / 测试。按两个组的切片数控件，不靠整页数。
-  const rerankGroupStart = html.indexOf('data-kind="rerank"');
-  const systemoneGroupStart = html.indexOf('data-kind="systemone"');
-  check("两组服务都有 data-kind 标记", rerankGroupStart > 0 && systemoneGroupStart > rerankGroupStart);
-  const rerankGroup = html.slice(rerankGroupStart, systemoneGroupStart);
-  const systemoneGroup = html.slice(systemoneGroupStart, preludeEnd);
-  for (const [name, group] of [
-    ["精排服务", rerankGroup],
-    ["决策服务", systemoneGroup],
-  ]) {
-    eq(`${name}三个输入框（地址 / 模型 / 超时）`, (group.match(/<input /g) || []).length, 3);
-    eq(`${name}一个测试按钮`, (group.match(/<button /g) || []).length, 1);
-    check(`${name}的测试按钮写着「测试」`, />测试<\/button>/.test(group), group.slice(0, 80));
-    eq(`${name}一个结果行`, (group.match(/class="service-result"/g) || []).length, 1);
-    check(`${name}的结果行默认隐藏`, /class="service-result" hidden/.test(group));
-    check(`${name}的超时输入框是数字框`, /type="number"/.test(group));
-  }
-  eq(
-    "精排超时 placeholder 写默认值与单位",
-    /id="rerankServiceTimeoutMs"[^>]*placeholder="800 ms"/.test(html),
-    true,
-  );
-  eq(
-    "决策超时 placeholder 写默认值与单位",
-    /id="systemoneServiceTimeoutMs"[^>]*placeholder="3500 ms"/.test(html),
-    true,
-  );
-  eq(
-    "两个超时输入框的上下限跟着各自类型",
-    [
-      /id="rerankServiceTimeoutMs"[^>]*max="10000"/.test(html),
-      /id="systemoneServiceTimeoutMs"[^>]*max="8000"/.test(html),
-    ],
-    [true, true],
-  );
+  // 静态 HTML 只放空容器：行、输入框、说明都由描述表渲染，不能写死两行。
+  const scoringInner = html.match(/<div id="scoringServices"[^>]*>([\s\S]*?)<\/div>/)?.[1];
+  eq("打分服务容器是空的", scoringInner, "");
   check(
-    "精排服务两个占位文案在",
-    html.includes('placeholder="http://127.0.0.1:8098"') &&
-      html.includes('placeholder="bge-reranker-v2-m3"'),
+    "HTML 里不写死服务行",
+    scoringInner !== undefined &&
+      /data-kind=/.test(scoringInner) === false &&
+      /ServiceUrl|ServiceModel|service-row/.test(scoringInner) === false,
+    scoringInner,
   );
-  check(
-    "决策服务两个占位文案在",
-    html.includes('placeholder="http://192.168.50.142:8097"') &&
-      html.includes('placeholder="kev-4b"'),
-  );
-  check(
-    "精排服务说明写清走 /v1/rerank 且留空不能选",
-    html.includes("交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。"),
-  );
-  check(
-    "决策服务说明写清走 /v1/systemone 且留空不能选",
-    html.includes("决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。"),
-  );
+  check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
   check("打分服务有样式", /\n\.services \{/.test(css));
-  check("服务两栏有栅格", /\n\.service-grid \{/.test(css) && /1fr 1fr/.test(css));
-  check("总闸关着时打分服务也置灰", panelJs.includes('#scoringServices'));
-  // 四项一排：地址 / 模型 / 窄的超时 / 测试。
+  check("服务行是竖向一条一条的栅格", /\n\.service-row \{/.test(css));
   check(
-    "服务行是四列栅格（超时窄、按钮自宽）",
-    /\n\.service-fields \{[\s\S]{0,200}grid-template-columns:\s*1\.4fr 1fr 0\.62fr auto/.test(css),
+    "服务行五列：固定宽服务名 + 四个控件列",
+    /\n\.service-row \{[\s\S]{0,260}grid-template-columns:\s*3\.2em[^\n]*1\.4fr[^\n]*1fr[^\n]*0\.62fr[^\n]*auto/.test(
+      css,
+    ),
   );
+  check("服务名固定宽度且右对齐", /\n\.service-name \{[\s\S]{0,120}text-align:\s*right/.test(css));
+  check("结果行独占第二行", /\.service-result \{[\s\S]{0,120}grid-column:\s*2 \/ -1/.test(css));
+  check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
+  check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
+  check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);
+  check("总闸关着时打分服务也置灰", panelJs.includes('#scoringServices'));
   check("测试按钮靠底对齐", /\.field\.service-test \{[\s\S]{0,120}align-items:\s*flex-end/.test(css));
   for (const tone of ["ok", "bad", "muted"]) {
     check(`结果行的 ${tone} 档有样式`, new RegExp(`\\.service-result\\.${tone} \\{`).test(css));
   }
   check("结果行样式存在", /\n\.service-result \{/.test(css));
   check("整对回退说明有样式", /\n\.channel-pair-note \{/.test(css));
+  check("面板按描述表渲染服务行", panelJs.includes("renderScoringServices()") &&
+    panelJs.includes("scoringServiceLayout(services)"));
 
   // 前端的接线点：新路由、测试函数、结果行与回退说明。
   check("面板往 service-test 发请求", panelJs.includes('/recall-mode/service-test'));
   check("面板有服务测试的执行函数", /async function runServiceTest\(kind\)/.test(panelJs));
   check("测试按钮进 loading 并禁用", /button\.disabled = true/.test(panelJs) &&
     panelJs.includes('"测试中…"'));
-  check("两个测试按钮都绑上了", /for \(const \[kind, buttonId\] of SERVICE_TESTS\)/.test(panelJs));
+  check("测试按钮由描述表推出并绑上", /for \(const \[kind, buttonId\] of SERVICE_TESTS\)/.test(panelJs) &&
+    /const SERVICE_TESTS = SCORING_SERVICES\.map/.test(panelJs));
   check("结果行按 tone 上色", /service-result \$\{view\.tone\}/.test(panelJs));
   check("通道行会画整对回退说明", panelJs.includes("channelPairNote(channel, layers)"));
 
@@ -3169,6 +3125,129 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("输入框：没配就是空串", uiServiceTimeoutInput(null, "rerank"), "");
   eq("输入框：配了就是数字串", uiServiceTimeoutInput(1200, "systemone"), "1200");
   eq("输入框：越界当没配", uiServiceTimeoutInput("99999", "rerank"), "");
+
+  // ---- 打分服务描述表：渲染完全由数据驱动 ----
+  eq("服务描述表恰好两项（精排 / 决策）", SCORING_SERVICES.map((service) => service.kind), [
+    "rerank",
+    "systemone",
+  ]);
+  for (const service of SCORING_SERVICES) {
+    const required = [
+      "kind",
+      "label",
+      "urlKey",
+      "modelKey",
+      "timeoutKey",
+      "defaultTimeoutMs",
+      "hint",
+    ];
+    check(
+      `${service.kind} 描述字段完整（kind / label / 三键 / 默认超时 / 说明）`,
+      required.every((key) => service[key] !== undefined && service[key] !== ""),
+      JSON.stringify(service),
+    );
+  }
+  eq("默认超时与后端边界同值", [
+    SCORING_SERVICES[0].defaultTimeoutMs,
+    SCORING_SERVICES[1].defaultTimeoutMs,
+  ], [800, 3500]);
+
+  const layout = scoringServiceLayout();
+  eq("渲染计划有标题", layout.title, "打分服务");
+  eq("渲染计划恰好两行，顺序与表一致", layout.rows.map((row) => row.kind), [
+    "rerank",
+    "systemone",
+  ]);
+  eq("两行的服务名", layout.rows.map((row) => row.label), ["精排", "决策"]);
+  eq("每行四个控件：地址 / 模型 / 超时 / 测试", [
+    layout.rows[0].url.label,
+    layout.rows[0].model.label,
+    layout.rows[0].timeout.label,
+    layout.rows[0].testId,
+  ], ["地址", "模型", "超时", "rerankServiceTest"]);
+  eq("行内 id 就是配置键（旧 id 不跑）", [
+    layout.rows.map((row) => row.url.id),
+    layout.rows.map((row) => row.model.id),
+    layout.rows.map((row) => row.timeout.id),
+  ], [
+    ["rerankServiceUrl", "systemoneServiceUrl"],
+    ["rerankServiceModel", "systemoneServiceModel"],
+    ["rerankServiceTimeoutMs", "systemoneServiceTimeoutMs"],
+  ]);
+  eq(
+    "超时的 placeholder 与上下限跟着类型",
+    layout.rows.map((row) => [row.timeout.placeholder, row.timeout.min, row.timeout.max]),
+    [
+      ["800 ms", 100, 10000],
+      ["3500 ms", 100, 8000],
+    ],
+  );
+  eq(
+    "列表下方只有一段总说明",
+    layout.note,
+    "交叉编码器走 /v1/rerank，决策模型走 /v1/systemone。地址与模型成对；超时留空用默认（精排 800ms、决策 3500ms）。留空的类型不会出现在精排通道里。",
+  );
+  eq("说明在渲染计划里只出现一次（不重复到每行）",
+    JSON.stringify(layout).split(layout.note).length - 1, 1);
+
+  // 往表里临时插一项假服务：行数变三，证明渲染确实按表走。
+  const fakeService = {
+    kind: "fake",
+    label: "假服务",
+    urlKey: "fakeServiceUrl",
+    modelKey: "fakeServiceModel",
+    timeoutKey: "fakeServiceTimeoutMs",
+    defaultTimeoutMs: 1234,
+    hint: "假服务走 /v1/fake",
+    urlPlaceholder: "http://fake:1",
+    modelPlaceholder: "fake-model",
+  };
+  const withFake = scoringServiceLayout([...SCORING_SERVICES, fakeService]);
+  eq("插一行假服务就渲染出三行", withFake.rows.map((row) => row.kind), [
+    "rerank",
+    "systemone",
+    "fake",
+  ]);
+  eq(
+    "假服务行自动拿到 id / 默认超时 / 测试位",
+    [
+      withFake.rows[2].url.id,
+      withFake.rows[2].timeout.placeholder,
+      withFake.rows[2].testId,
+      withFake.rows[2].resultId,
+    ],
+    ["fakeServiceUrl", "1234 ms", "fakeServiceTest", "fakeServiceResult"],
+  );
+  check("假服务也会进那一段总说明", withFake.note.includes("假服务走 /v1/fake") &&
+    withFake.note.includes("假服务 1234ms"));
+  eq("临时插行不改原表", SCORING_SERVICES.length, 2);
+  eq("总说明也可以单独生成", scoringServicesNote(SCORING_SERVICES), layout.note);
+  eq("单行渲染与整表渲染同源", scoringServiceRow(SCORING_SERVICES[0]).kind, "rerank");
+  eq(
+    "每行固定四个控件（地址 / 模型 / 超时 / 测试）",
+    layout.rows.map((row) => [row.url, row.model, row.timeout].filter(Boolean).length + 1),
+    [4, 4],
+  );
+  eq(
+    "每行的测试位与结果位互不重复",
+    new Set(layout.rows.flatMap((row) => [row.testId, row.resultId])).size,
+    4,
+  );
+  eq(
+    "每行都带了地址 / 模型 / 超时的 placeholder",
+    layout.rows.every(
+      (row) => row.url.placeholder && row.model.placeholder && row.timeout.placeholder,
+    ),
+    true,
+  );
+  eq("成对规则在总说明里只说一次", layout.note.split("地址与模型成对").length - 1, 1);
+  eq(
+    "反转描述表，行的顺序跟着反转",
+    scoringServiceLayout([...SCORING_SERVICES].reverse()).rows.map((row) => row.kind),
+    ["systemone", "rerank"],
+  );
+  check("临时插入的假服务不会溜进原表渲染", layout.rows.every((row) => row.kind !== "fake"));
+
 
   // ---- 「测试」按钮的两件纯逻辑：发什么、怎么显示 ----
   eq(

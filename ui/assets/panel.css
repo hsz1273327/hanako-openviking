@@ -353,7 +353,8 @@ html, body {
 /* ---------- 打分服务（通道引用的端点） ---------- */
 
 /* 前置卡里面的一块：先声明「有哪些打分服务」，下面的精排通道只选类型。
-   两个服务并排，窄屏自动落成一列。 */
+   一行一个服务：左侧固定宽度服务名，后面四格控件按比例分；
+   行由脚本按描述表渲染，列表太长时只让这一块内部滚，不把整页顶长。 */
 .services {
   display: grid;
   gap: 6px;
@@ -362,48 +363,49 @@ html, body {
   border: 1px solid rgba(128, 128, 128, 0.2);
   background: rgba(128, 128, 128, 0.025);
   transition: opacity 0.2s;
+  min-width: 0;
 }
 .services.dim { opacity: 0.45; }
 .services .card-title { margin: 0; }
-.service-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  min-width: 0;
-}
-@media (max-width: 760px) {
-  .service-grid { grid-template-columns: 1fr; }
-  /* 窄屏下四项拆成两行：地址 + 模型一行，超时 + 测试一行。 */
-  .service-fields { grid-template-columns: 1fr 1fr; }
-}
-.service {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-.service-title {
+.services-title {
   font-size: 12px;
   font-weight: 600;
 }
-.service-fields {
+.service-list {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.62fr auto;
+  gap: 2px;
+  min-width: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+/* 一行服务：服务名 + 地址 + 模型 + 超时 + 测试。
+   服务名统一右对齐，宽度固定，换类型时左边不会跟着抖。 */
+.service-row {
+  display: grid;
+  grid-template-columns: 3.2em minmax(0, 1.4fr) minmax(0, 1fr) minmax(58px, 0.62fr) auto;
   align-items: end;
-  gap: 6px;
+  gap: 0 6px;
   min-width: 0;
 }
-.service-fields .field { margin-bottom: 0; }
+.service-name {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  padding-bottom: 7px;
+}
+.service-row .field { margin-bottom: 0; }
 /* 超时那一格只放三四个数字，不跟地址抢宽度。 */
-.service-fields .field.narrow input { min-width: 0; }
-.service-fields .field.service-test {
+.service-row .field.narrow input { min-width: 0; }
+.service-row .field.service-test {
   display: flex;
   align-items: flex-end;
 }
-.service .field-hint { margin: 0; }
-/* 测试结果一行：绿 / 红 / 灰三档共用这个容器，颜色只表达状态，不改字号换行。
-   iframe 里没有宿主主题变量，一律用中性 rgba。 */
+/* 测试结果行常驻第二行（grid-column 从控件第一格开始）。空着也占一行高度，
+   结果出现 / 消失时不会把行高撑起来，整页就不会抖。三档颜色只表达状态。 */
 .service-result {
+  grid-column: 2 / -1;
   margin: 0;
+  min-height: 15px;
   font-size: 10.5px;
   line-height: 1.4;
   word-break: break-word;
@@ -411,6 +413,23 @@ html, body {
 .service-result.ok { color: #5d7d56; }
 .service-result.bad { color: #b8564d; }
 .service-result.muted { color: currentColor; opacity: 0.45; }
+/* 列表下方唯一一段总说明；每行不再各带一句。 */
+.services-note {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  opacity: 0.55;
+}
+@media (max-width: 760px) {
+  /* 窄屏下控件拆两行：地址 + 模型一行，超时 + 测试一行。 */
+  .service-row {
+    grid-template-columns: 3.2em minmax(0, 1fr) minmax(0, 1fr);
+    row-gap: 6px;
+  }
+  .service-row .field.narrow { grid-column: 2; }
+  .service-row .field.service-test { grid-column: 3; }
+  .service-result { grid-column: 2 / -1; }
+}
 
 /* ---------- 通道的整对回退说明 ---------- */
 .channel-pair-note {

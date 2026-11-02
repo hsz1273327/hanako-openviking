@@ -24,6 +24,105 @@ export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
   rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
   systemone: Object.freeze({ min: 100, max: 8000, fallback: 3500 }),
 });
+
+/**
+ * 打分服务的描述表。面板按这张表渲染「一行一个服务」，HTML 里不写死行。
+ *
+ * 加第三种服务：在表里加一项，再让后端多认一个 kind。
+ * hint 只参与拼接列表下方那段总说明，不会单独显示在每一行下面。
+ */
+export const SCORING_SERVICES = Object.freeze([
+  Object.freeze({
+    kind: "rerank",
+    label: "精排",
+    urlKey: "rerankServiceUrl",
+    modelKey: "rerankServiceModel",
+    timeoutKey: "rerankServiceTimeoutMs",
+    defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.rerank.fallback,
+    hint: "交叉编码器走 /v1/rerank",
+    urlPlaceholder: "http://127.0.0.1:8098",
+    modelPlaceholder: "bge-reranker-v2-m3",
+  }),
+  Object.freeze({
+    kind: "systemone",
+    label: "决策",
+    urlKey: "systemoneServiceUrl",
+    modelKey: "systemoneServiceModel",
+    timeoutKey: "systemoneServiceTimeoutMs",
+    defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.systemone.fallback,
+    hint: "决策模型走 /v1/systemone",
+    urlPlaceholder: "http://192.168.50.142:8097",
+    modelPlaceholder: "kev-4b",
+  }),
+]);
+
+/** 按 kind 找一项服务描述；不认识的 kind 返回 null（比如宿主的 model 通道）。 */
+export function scoringServiceOf(kind) {
+  return SCORING_SERVICES.find((service) => service.kind === kind) || null;
+}
+
+function scoringRowField(id, key, label, extra = {}) {
+  return { id, key, label, ...extra };
+}
+
+/** 一项服务描述 -> 一行界面的完整渲染数据（纯函数，冒烟直接验）。 */
+export function scoringServiceRow(service) {
+  const limits = SERVICE_TIMEOUT_LIMITS[service?.kind] || SERVICE_TIMEOUT_LIMITS.rerank;
+  const kind = service?.kind || "";
+  return {
+    kind,
+    label: service?.label || kind,
+    hint: service?.hint || "",
+    url: scoringRowField(service?.urlKey || `${kind}ServiceUrl`, service?.urlKey, "地址", {
+      type: "url",
+      spellcheck: false,
+      placeholder: service?.urlPlaceholder || "",
+    }),
+    model: scoringRowField(service?.modelKey || `${kind}ServiceModel`, service?.modelKey, "模型", {
+      type: "text",
+      spellcheck: false,
+      placeholder: service?.modelPlaceholder || "",
+    }),
+    timeout: scoringRowField(
+      service?.timeoutKey || `${kind}ServiceTimeoutMs`,
+      service?.timeoutKey,
+      "超时",
+      {
+        type: "number",
+        min: limits.min,
+        max: limits.max,
+        step: 100,
+        placeholder: `${service?.defaultTimeoutMs ?? limits.fallback} ms`,
+        narrow: true,
+      },
+    ),
+    testId: `${kind}ServiceTest`,
+    resultId: `${kind}ServiceResult`,
+  };
+}
+
+/** 列表下方唯一那段总说明：服务路径、成对规则、各类型默认超时。 */
+export function scoringServicesNote(services = SCORING_SERVICES) {
+  const list = Array.isArray(services) ? services : SCORING_SERVICES;
+  const routes = list.map((service) => service?.hint).filter(Boolean).join("，");
+  const defaults = list
+    .map((service) => `${service?.label || service?.kind} ${service?.defaultTimeoutMs}ms`)
+    .join("、");
+  return `${routes}。地址与模型成对；超时留空用默认（${defaults}）。留空的类型不会出现在精排通道里。`;
+}
+
+/**
+ * 整张打分服务表的渲染计划：标题、若干行、列表下方一段说明。
+ * 面板只负责把这份计划落成 DOM，加服务时不用改渲染代码。
+ */
+export function scoringServiceLayout(services = SCORING_SERVICES) {
+  const list = Array.isArray(services) ? services : SCORING_SERVICES;
+  return {
+    title: "打分服务",
+    rows: list.map(scoringServiceRow),
+    note: scoringServicesNote(list),
+  };
+}
 // 结果行的三种开头词，与失败原因一起拼成一行字。
 export const SERVICE_TEST_TEXT = Object.freeze({
   missing: "先填地址和模型",
@@ -110,19 +209,15 @@ export function serviceTimeoutInput(value, kind = "rerank") {
   return ms === null ? "" : String(ms);
 }
 
-/** 打分服务六字段的显示值：非法地址 / 超时在读取侧收敛成空（= 未配置）。 */
+/** 打分服务的显示值：按描述表逐项收敛，非法地址 / 超时在读取侧收敛成空（= 未配置）。 */
 export function paintScoringConfig(out) {
-  return {
-    rerankServiceUrl: normalizeServiceUrl(out?.rerankServiceUrl),
-    rerankServiceModel: normalizeServiceModel(out?.rerankServiceModel),
-    rerankServiceTimeoutMs: normalizeServiceTimeout(out?.rerankServiceTimeoutMs, "rerank"),
-    systemoneServiceUrl: normalizeServiceUrl(out?.systemoneServiceUrl),
-    systemoneServiceModel: normalizeServiceModel(out?.systemoneServiceModel),
-    systemoneServiceTimeoutMs: normalizeServiceTimeout(
-      out?.systemoneServiceTimeoutMs,
-      "systemone",
-    ),
-  };
+  const painted = {};
+  for (const service of SCORING_SERVICES) {
+    painted[service.urlKey] = normalizeServiceUrl(out?.[service.urlKey]);
+    painted[service.modelKey] = normalizeServiceModel(out?.[service.modelKey]);
+    painted[service.timeoutKey] = normalizeServiceTimeout(out?.[service.timeoutKey], service.kind);
+  }
+  return painted;
 }
 
 /** 「测试」按钮要发的那一单：用的就是界面此刻填的值，不是已保存的配置。 */
@@ -177,15 +272,13 @@ export function serviceTestView(result, configuredModel = "") {
  */
 export function channelPairNote(value, config) {
   const channel = normalizeRerankChannel(value);
-  if (channel.type === "model") return "";
+  const service = scoringServiceOf(channel.type);
+  if (!service) return "";
   const hasUrl = Boolean(channel.url);
   const hasModel = Boolean(channel.model);
   if (hasUrl === hasModel) return "";
   // 服务也没配时，这行通道根本不会生效，说明由「服务未配置」那一句接管。
-  const serviceUrl =
-    channel.type === "rerank"
-      ? normalizeServiceUrl(config?.rerankServiceUrl)
-      : normalizeServiceUrl(config?.systemoneServiceUrl);
+  const serviceUrl = normalizeServiceUrl(config?.[service.urlKey]);
   if (!serviceUrl) return "";
   return hasUrl ? CHANNEL_PAIR_NOTE_MODEL : CHANNEL_PAIR_NOTE_URL;
 }
@@ -198,11 +291,12 @@ export function channelPairNote(value, config) {
  */
 export function channelTypeOptions(config) {
   const options = [];
-  if (normalizeServiceUrl(config?.rerankServiceUrl)) {
-    options.push({ value: "rerank", label: RERANK_CHANNEL_LABELS.rerank });
-  }
-  if (normalizeServiceUrl(config?.systemoneServiceUrl)) {
-    options.push({ value: "systemone", label: RERANK_CHANNEL_LABELS.systemone });
+  for (const service of SCORING_SERVICES) {
+    if (!normalizeServiceUrl(config?.[service.urlKey])) continue;
+    options.push({
+      value: service.kind,
+      label: RERANK_CHANNEL_LABELS[service.kind] || service.label,
+    });
   }
   options.push({ value: "model", label: RERANK_CHANNEL_LABELS.model });
   return options;
@@ -214,12 +308,11 @@ export function channelTypeOptions(config) {
  */
 export function channelServiceMissing(value, config) {
   const channel = normalizeRerankChannel(value);
-  if (channel.type === "model") return false;
+  const service = scoringServiceOf(channel.type);
+  if (!service) return false;
   // 自己的地址与模型都有 = 这一行自己成对，不依赖服务配置。
   if (channel.url && channel.model) return false;
-  if (channel.type === "rerank") return !normalizeServiceUrl(config?.rerankServiceUrl);
-  if (channel.type === "systemone") return !normalizeServiceUrl(config?.systemoneServiceUrl);
-  return false;
+  return !normalizeServiceUrl(config?.[service.urlKey]);
 }
 
 /** 与 src/ov/settings.js 的 normalizeGateModel 同口径：空串 = 用宿主辅助模型。 */
