@@ -37,20 +37,52 @@
       </button>
     </section>
 
-    <section id="toggleGrid" class="toggles">
-      <div class="toggle" data-key="skillRouting">
-        <div class="toggle-copy">
-          <b>技能路由</b>
-          <span>把共享技能交给助手按需调用</span>
-        </div>
-        <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
-      </div>
+    <!-- 前置：不管宏观行为，只管「下面那些能力有没有底座」。
+         探针决定日志记不记钩子事实，打分服务决定精排通道能不能选那两类。 -->
+    <section id="prelude" class="card prelude" aria-label="前置">
+      <h2 class="card-title">前置</h2>
+
       <div class="toggle" data-key="probe">
         <div class="toggle-copy">
           <b>探针</b>
           <span>把钩子事实记进日志</span>
         </div>
         <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
+      </div>
+
+      <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
+           两块都留空时，通道里就只剩「宿主模型」这一类。 -->
+      <div id="scoringServices" class="services">
+        <div class="service-grid">
+          <div class="service">
+            <div class="service-title">精排服务</div>
+            <div class="service-fields">
+              <div class="field">
+                <label for="rerankServiceUrl">地址</label>
+                <input id="rerankServiceUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8098">
+              </div>
+              <div class="field">
+                <label for="rerankServiceModel">模型</label>
+                <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
+              </div>
+            </div>
+            <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。</p>
+          </div>
+          <div class="service">
+            <div class="service-title">决策服务</div>
+            <div class="service-fields">
+              <div class="field">
+                <label for="systemoneServiceUrl">地址</label>
+                <input id="systemoneServiceUrl" type="url" spellcheck="false" placeholder="http://192.168.50.142:8097">
+              </div>
+              <div class="field">
+                <label for="systemoneServiceModel">模型</label>
+                <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
+              </div>
+            </div>
+            <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。</p>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -196,10 +228,11 @@
           <p id="rerankChannelsEmpty" class="field-hint">还没有通道，精排不会生效</p>
           <div id="rerankChannelList" class="channel-list"></div>
           <div class="channel-actions">
+            <span id="rerankChannelHint" class="field-hint" hidden>先在上面配好打分服务</span>
             <button id="rerankAddChannel" class="btn ghost sm" type="button">添加通道</button>
           </div>
           <pre id="rerankTestResult" class="channel-result" hidden></pre>
-          <span class="field-hint">rerank / systemone 走配置的 URL；model 走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。超时留空用该类型默认值：systemone 3500ms，候选越多越慢，默认 5 条（一次问完全部候选，超过 5 条的按未打分处理）。</span>
+          <span class="field-hint">精排 / 决策两类走上面「打分服务」配的地址；宿主模型走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。超时留空用该类型默认值：systemone 3500ms，候选越多越慢，默认 5 条（一次问完全部候选，超过 5 条的按未打分处理）。</span>
         </div>
       </div>
 
@@ -207,6 +240,16 @@
 
       <div id="peerList" class="peer-list empty">正在读取</div>
       <p id="peerHint" class="field-hint" hidden>点一下任意一行可以排除这个 peer：它的记忆不再参与上面的召回，再点恢复。</p>
+    </section>
+
+    <!-- 能力：和召回同级的一块。现在只有一个开关，内容就是标题 + 开关 + 一行说明。
+         放在召回之后、日志之前。 -->
+    <section id="skillRoute" class="card skill-route" aria-label="技能路由">
+      <header class="skill-route-head">
+        <h2 class="card-title">技能路由</h2>
+        <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
+      </header>
+      <p class="skill-route-hint">把共享技能交给助手按需调用</p>
     </section>
 
     <section class="card logs">

@@ -10,10 +10,14 @@ export const RERANK_MODES = Object.freeze(["off", "llm"]);
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 export const RERANK_CHANNELS_MAX = 8;
 export const RERANK_CHANNEL_LABELS = Object.freeze({
-  rerank: "Rerank（/v1/rerank）",
-  systemone: "SystemOne（/v1/systemone）",
+  rerank: "精排服务",
+  systemone: "决策服务",
   model: "宿主模型",
 });
+// 打分服务的模型名上限，与 src/ov/settings.js 的 SERVICE_MODEL_MAX 同值。
+export const SERVICE_MODEL_MAX = 128;
+// 打分服务地址上限，与 src/ov/settings.js 的 RERANK_CHANNEL_URL_MAX 同值。
+export const SERVICE_URL_MAX = 512;
 // 每种通道的默认超时（ms）。与 src/memory/recall.js 的常量同值：
 // systemone 一次问完全部候选，候选越多越慢，所以给得比另两种宽。
 // 后端在没手配超时时会按候选数自适应（每条 +700，上限 8000），
@@ -39,6 +43,69 @@ function oneOf(value, allowed, fallback) {
 
 function textOf(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+/** 与 src/ov/settings.js 的 normalizeServiceUrl 同口径：只认 http / https，去尾斜杠。 */
+export function normalizeServiceUrl(value) {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text || Array.from(text).length > SERVICE_URL_MAX) return "";
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return "";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+  if (!parsed.hostname) return "";
+  return text.replace(/\/+$/, "");
+}
+
+/** 与 src/ov/settings.js 的 normalizeServiceModel 同口径：去空白，按字符截断。 */
+export function normalizeServiceModel(value) {
+  if (typeof value !== "string") return "";
+  return Array.from(value.trim()).slice(0, SERVICE_MODEL_MAX).join("");
+}
+
+/** 打分服务四字段的显示值：非法地址在读取侧收敛成空串（= 未配置）。 */
+export function paintScoringConfig(out) {
+  return {
+    rerankServiceUrl: normalizeServiceUrl(out?.rerankServiceUrl),
+    rerankServiceModel: normalizeServiceModel(out?.rerankServiceModel),
+    systemoneServiceUrl: normalizeServiceUrl(out?.systemoneServiceUrl),
+    systemoneServiceModel: normalizeServiceModel(out?.systemoneServiceModel),
+  };
+}
+
+/**
+ * 通道类型下拉的选项：按已配置的打分服务动态生成。
+ *
+ * 精排服务配了才出现「精排服务」，决策服务配了才出现「决策服务」；
+ * 宿主模型不需要端点，所以始终在。两个服务都没配时只剩这一项。
+ */
+export function channelTypeOptions(config) {
+  const options = [];
+  if (normalizeServiceUrl(config?.rerankServiceUrl)) {
+    options.push({ value: "rerank", label: RERANK_CHANNEL_LABELS.rerank });
+  }
+  if (normalizeServiceUrl(config?.systemoneServiceUrl)) {
+    options.push({ value: "systemone", label: RERANK_CHANNEL_LABELS.systemone });
+  }
+  options.push({ value: "model", label: RERANK_CHANNEL_LABELS.model });
+  return options;
+}
+
+/**
+ * 这一行通道运行时会不会变成废票：类型是 rerank / systemone，但通道里没写 URL、
+ * 对应的打分服务也没配。留着数据不自动删，只在界面上标红。
+ */
+export function channelServiceMissing(value, config) {
+  const channel = normalizeRerankChannel(value);
+  if (channel.type === "model") return false;
+  if (normalizeServiceUrl(channel.url)) return false;
+  if (channel.type === "rerank") return !normalizeServiceUrl(config?.rerankServiceUrl);
+  if (channel.type === "systemone") return !normalizeServiceUrl(config?.systemoneServiceUrl);
+  return false;
 }
 
 /** 与 src/ov/settings.js 的 normalizeGateModel 同口径：空串 = 用宿主辅助模型。 */
@@ -204,15 +271,16 @@ export function rerankChannelsText(list) {
 /**
  * 一行通道是否已经填到“可以提交”的程度。
  *
- * 新加的空模板先留在界面上让人填，不写服务端；否则第一次 change 就会被
- * 服务端的整单校验打回，用户刚敲的字也会跟着回滚掉。
+ * rerank / systemone 的端点由上面的打分服务提供，通道行不再要求 URL 与模型；
+ * 存量里带了 URL 的，一旦填了就必须是合法的 http(s)，否则整行不提交。
+ * model 通道的模型标识留空算完整（空 = 宿主辅助模型）。
  */
 export function isCompleteRerankChannel(value) {
   const channel = normalizeRerankChannel(value);
   if (channel.type === "model") {
     return !channel.model || normalizeGateModel(channel.model) !== "";
   }
-  if (!channel.url || !channel.model) return false;
+  if (!channel.url) return true;
   try {
     const url = new URL(channel.url);
     return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
@@ -273,9 +341,14 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + llm 提示词与模型来源 + 重排配置。 */
+/** 面板用的完整投影：判断 / 查询 + llm 提示词与模型来源 + 重排配置 + 打分服务。 */
 export function paintRecallConfig(out) {
-  return { ...paintLayers(out), ...paintGateConfig(out), ...paintRerankConfig(out) };
+  return {
+    ...paintLayers(out),
+    ...paintGateConfig(out),
+    ...paintRerankConfig(out),
+    ...paintScoringConfig(out),
+  };
 }
 
 /**

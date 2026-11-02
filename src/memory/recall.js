@@ -803,6 +803,38 @@ async function scoreModelChannel(sdk, switches, channel, query, items) {
 }
 
 /**
+ * 通道的端点解析：通道自带的 url / model 优先，没填才用对应打分服务配置里的。
+ *
+ * 这是「配置兼容」的那一步：老配置把端点写在通道里，照旧生效；新配置只在上面声明
+ * 一次服务，通道只引用类型。返回新对象，不改调用方手里那份配置。
+ */
+export function resolveRerankChannel(channel, switches) {
+  if (!channel || typeof channel !== "object") return channel;
+  const serviceUrl =
+    channel.type === "rerank"
+      ? switches?.rerankServiceUrl
+      : channel.type === "systemone"
+        ? switches?.systemoneServiceUrl
+        : "";
+  const serviceModel =
+    channel.type === "rerank"
+      ? switches?.rerankServiceModel
+      : channel.type === "systemone"
+        ? switches?.systemoneServiceModel
+        : "";
+  const ownUrl = typeof channel.url === "string" ? channel.url.trim() : "";
+  const ownModel = typeof channel.model === "string" ? channel.model.trim() : "";
+  const fallbackUrl = String(serviceUrl || "").trim();
+  // 地址为空 = 整个服务未配置，模型也一并忽略，不拿孤立模型去拼一个端点。
+  const fallbackModel = fallbackUrl ? String(serviceModel || "").trim() : "";
+  return {
+    ...channel,
+    url: channel.type === "model" ? "" : ownUrl || fallbackUrl,
+    model: ownModel || fallbackModel,
+  };
+}
+
+/**
  * 这一轮实际要跑的通道。
  *
  * 有启用通道就按配置跑；一个启用通道都没有时，退回旧的 rerankPrompt / rerankModel
@@ -965,12 +997,17 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   const candidates = (Array.isArray(items) ? items : []).map((item) =>
     typeof item === "string" ? { text: item } : item,
   );
-  const list = Array.isArray(channels) && channels.length ? channels : rerankChannelsOf(switches);
+  const list = (Array.isArray(channels) && channels.length ? channels : rerankChannelsOf(switches))
+    .map((channel) => resolveRerankChannel(channel, switches));
 
   const results = await Promise.all(
     list.map(async (channel) => {
       const channelStarted = Date.now();
       try {
+        // 端点解析完之后仍为空：这一类打分服务没配，这一路直接弃权。
+        if ((channel.type === "rerank" || channel.type === "systemone") && !channel.url) {
+          throw new Error("打分服务未配置，这一路不会生效");
+        }
         let scores;
         if (channel.type === "rerank") {
           scores = await scoreRerankChannel(sdk, channel, query, candidates);

@@ -12,8 +12,10 @@ import {
   QUERY_MODES,
   RECALL_GATES,
   RERANK_CHANNELS_MAX,
+  RERANK_CHANNEL_URL_MAX,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
+  SERVICE_MODEL_MAX,
   normalizeGateModel,
   normalizeGatePrompt,
   normalizeQueryMode,
@@ -21,6 +23,8 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  normalizeServiceModel,
+  normalizeServiceUrl,
   parseRerankChannel,
   parseRerankChannels,
   readSwitches,
@@ -33,6 +37,9 @@ const SPECS = Object.freeze({
   queryMode: QUERY_MODES,
   rerank: RERANK_MODES,
 });
+
+/** 打分服务的四字段：两组（精排 / 决策）的地址与模型。 */
+const SERVICE_MODEL_FIELDS = Object.freeze(["rerankServiceModel", "systemoneServiceModel"]);
 
 /** provider/model 的边界与 APPS.md 的可调用模型标识一致：非空、无控制字符、≤128。 */
 const MODEL_FIELD_MAX = 128;
@@ -56,6 +63,41 @@ function modelRefError(raw, field = "gateModel") {
   return null;
 }
 
+/**
+ * 打分服务地址：空串合法（= 未配置）；非空必须是 http / https。
+ * 非法值直接拒，不在写入侧悄悄清空——悄悄清空等于用户以为配上了。
+ */
+function serviceUrlError(raw, field) {
+  if (typeof raw !== "string") return `${field} 必须是字符串`;
+  const value = raw.trim();
+  if (!value) return null;
+  if (Array.from(value).length > RERANK_CHANNEL_URL_MAX) {
+    return `${field} 最长 ${RERANK_CHANNEL_URL_MAX} 字符`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return `${field} 不是合法 URL`;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `${field} 只接受 http:// 或 https://`;
+  }
+  if (!parsed.hostname) return `${field} 缺少主机名`;
+  return null;
+}
+
+/** 打分服务的模型名：可以为空（有的服务只有一个模型），非空最长 128 字符。 */
+function serviceModelError(raw, field) {
+  if (typeof raw !== "string") return `${field} 必须是字符串`;
+  const value = raw.trim();
+  if (Array.from(value).length > SERVICE_MODEL_MAX) {
+    return `${field} 最长 ${SERVICE_MODEL_MAX} 个字符`;
+  }
+  if (CONTROL_CHARS_RE.test(value)) return `${field} 不能含控制字符`;
+  return null;
+}
+
 async function current(ctx) {
   return {
     recallGate: normalizeRecallGate(await ctx.config.get("recallGate")),
@@ -72,6 +114,10 @@ async function current(ctx) {
         /* 日志不能影响读数 */
       }
     }),
+    rerankServiceUrl: normalizeServiceUrl(await ctx.config.get("rerankServiceUrl")),
+    rerankServiceModel: normalizeServiceModel(await ctx.config.get("rerankServiceModel")),
+    systemoneServiceUrl: normalizeServiceUrl(await ctx.config.get("systemoneServiceUrl")),
+    systemoneServiceModel: normalizeServiceModel(await ctx.config.get("systemoneServiceModel")),
   };
 }
 
@@ -143,6 +189,25 @@ export default function registerRecallModeRoutes(app, ctx) {
       const problem = modelRefError(body.rerankModel, "rerankModel");
       if (problem) return c.json({ ok: false, error: problem }, 400);
       changes.push(["rerankModel", String(body.rerankModel).trim()]);
+    }
+
+    if (has(body, "rerankServiceUrl")) {
+      const problem = serviceUrlError(body.rerankServiceUrl, "rerankServiceUrl");
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push(["rerankServiceUrl", normalizeServiceUrl(body.rerankServiceUrl)]);
+    }
+
+    if (has(body, "systemoneServiceUrl")) {
+      const problem = serviceUrlError(body.systemoneServiceUrl, "systemoneServiceUrl");
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push(["systemoneServiceUrl", normalizeServiceUrl(body.systemoneServiceUrl)]);
+    }
+
+    for (const key of SERVICE_MODEL_FIELDS) {
+      if (!has(body, key)) continue;
+      const problem = serviceModelError(body[key], key);
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push([key, normalizeServiceModel(body[key])]);
     }
 
     if (has(body, "rerankChannels")) {

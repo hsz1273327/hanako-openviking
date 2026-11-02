@@ -39,14 +39,18 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  normalizeServiceModel,
+  normalizeServiceUrl,
   parseRerankChannel,
   parseRerankChannels,
   serializeRerankChannels,
   GATE_PROMPT_MAX,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TYPES,
+  RERANK_CHANNEL_URL_MAX,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
+  SERVICE_MODEL_MAX,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
@@ -81,6 +85,7 @@ import {
   renderRerankPrompt,
   rerankPromptOf,
   rerankChannelsOf,
+  resolveRerankChannel,
   normalizeChannelScores,
   mergeRerankScores,
   rankRerankIndexes,
@@ -141,12 +146,16 @@ import {
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  SERVICE_MODEL_MAX as UI_SERVICE_MODEL_MAX,
+  SERVICE_URL_MAX as UI_SERVICE_URL_MAX,
   SYSTEMONE_TIMEOUT_MAX as UI_SYSTEMONE_TIMEOUT_MAX,
   SYSTEMONE_TIMEOUT_BASE as UI_SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_STEP as UI_SYSTEMONE_TIMEOUT_STEP,
   SYSTEMONE_MAX_CANDIDATES as UI_SYSTEMONE_MAX_CANDIDATES,
   commitLayers,
   emptyRerankChannel,
+  channelServiceMissing,
+  channelTypeOptions,
   isCompleteRerankChannel,
   modelOptions,
   normalizeRerankChannels,
@@ -154,11 +163,12 @@ import {
   paintLayers,
   paintRecallConfig,
   paintRerankConfig,
+  paintScoringConfig,
   promptDraft,
   promptStatus,
-  rerankChannelsText,
   rerankPromptDraft,
   rerankPromptStatus,
+  rerankChannelsText,
 } from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
@@ -1742,12 +1752,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ]),
     (message) => incompleteWarnings.push(message),
   );
-  eq("字段不全 / 类型不认识的整项丢弃", incomplete.length, 1);
-  eq("丢弃时每项各记一条 warn", incompleteWarnings.length, 4);
+  eq("类型不认识 / 形状不对的整项丢弃，只靠服务配置的通道保留", incomplete.length, 2);
+  eq("丢弃时每项各记一条 warn", incompleteWarnings.length, 3);
   eq(
     "合法项原样留下",
     [incomplete[0].type, incomplete[0].model],
     ["rerank", "m"],
+  );
+  eq(
+    "只写类型的通道也留下（端点由打分服务提供）",
+    [incomplete[1].type, incomplete[1].url, incomplete[1].model],
+    ["rerank", "http://h", ""],
   );
 
   const many = Array.from({ length: 10 }, (_, index) => ({
@@ -1765,7 +1780,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("超过 8 路记一条 warn", cappedWarnings.length, 1);
 
   eq("通道类型只有三种", RERANK_CHANNEL_TYPES, ["rerank", "systemone", "model"]);
-  eq("单项解析：缺 URL 给 null", parseRerankChannel({ type: "rerank", model: "m" }), null);
+  eq(
+    "单项解析：只写类型也接受（运行时用打分服务）",
+    parseRerankChannel({ type: "rerank", model: "m" }),
+    { type: "rerank", name: "", url: "", model: "m", weight: 1, enabled: true },
+  );
+  eq(
+    "单项解析：出现了 URL 就必须合法",
+    parseRerankChannel({ type: "rerank", url: "ftp://h", model: "m" }),
+    null,
+  );
   eq(
     "单项解析：权重越界给 null",
     parseRerankChannel({ type: "model", weight: 11 }),
@@ -1784,7 +1808,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "serialize 会重新校验并收敛形状",
     serializeRerankChannels([{ type: "model", model: "" }, { type: "rerank" }]),
-    JSON.stringify([{ type: "model", name: "", url: "", model: "", weight: 1, enabled: true }]),
+    JSON.stringify([
+      { type: "model", name: "", url: "", model: "", weight: 1, enabled: true },
+      { type: "rerank", name: "", url: "", model: "", weight: 1, enabled: true },
+    ]),
   );
   eq(
     "readSwitches 解析通道 JSON",
@@ -1796,6 +1823,57 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       }),
     )).rerankChannels.length,
     1,
+  );
+
+  // ---- 打分服务：四个新配置项的归一化 ----
+  eq("精排服务地址默认空", DEFAULTS.rerankServiceUrl, "");
+  eq("决策服务模型默认空", DEFAULTS.systemoneServiceModel, "");
+  eq(
+    "未配置时四个服务字段都是空",
+    await readSwitches(sdkWith({})).then((sw) => [
+      sw.rerankServiceUrl,
+      sw.rerankServiceModel,
+      sw.systemoneServiceUrl,
+      sw.systemoneServiceModel,
+    ]),
+    ["", "", "", ""],
+  );
+
+  eq("服务 URL 接受 http", normalizeServiceUrl("http://127.0.0.1:8098"), "http://127.0.0.1:8098");
+  eq("服务 URL 接受 https", normalizeServiceUrl("https://rerank.test"), "https://rerank.test");
+  eq("服务 URL 去首尾空白", normalizeServiceUrl("  http://h:1  "), "http://h:1");
+  eq("服务 URL 去尾部斜杠", normalizeServiceUrl("http://h:1///"), "http://h:1");
+  eq("非 http(s) 的服务 URL 当未配置", normalizeServiceUrl("ftp://h"), "");
+  eq("缺协议的服务 URL 当未配置", normalizeServiceUrl("127.0.0.1:8098"), "");
+  eq("空串服务 URL 就是未配置", normalizeServiceUrl("   "), "");
+  eq("非字符串服务 URL 当未配置", normalizeServiceUrl(8098), "");
+
+  eq("服务模型去空白", normalizeServiceModel("  bge-reranker-v2-m3  "), "bge-reranker-v2-m3");
+  eq("服务模型允许为空", normalizeServiceModel("   "), "");
+  eq("非字符串服务模型给空串", normalizeServiceModel(1), "");
+  eq(
+    "服务模型截断到 128",
+    Array.from(normalizeServiceModel("m".repeat(SERVICE_MODEL_MAX + 20))).length,
+    SERVICE_MODEL_MAX,
+  );
+
+  const services = await readSwitches(
+    sdkWith({
+      rerankServiceUrl: "http://127.0.0.1:8098/",
+      rerankServiceModel: "  bge-reranker-v2-m3  ",
+      systemoneServiceUrl: "ftp://nope",
+      systemoneServiceModel: "  kev-4b  ",
+    }),
+  );
+  eq(
+    "readSwitches 读服务：合法地址去尾斜杠、非法地址收敛成空",
+    [
+      services.rerankServiceUrl,
+      services.rerankServiceModel,
+      services.systemoneServiceUrl,
+      services.systemoneServiceModel,
+    ],
+    ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "kev-4b"],
   );
 }
 
@@ -1872,18 +1950,103 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("下拉与名单之间有分隔",
     /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
 
-  // 技能路由 / 探针那排恢复成只有两个开关，没有下拉。
-  const toggleStart = html.indexOf('<section id="toggleGrid"');
-  const toggleEnd = html.indexOf("</section>", toggleStart);
-  const toggleBlock = html.slice(toggleStart, toggleEnd);
-  const skillIdx = toggleBlock.indexOf('data-key="skillRouting"');
-  const probeIdx = toggleBlock.indexOf('data-key="probe"');
-  check("技能路由与探针还在，且路由在前", skillIdx > 0 && probeIdx > skillIdx);
-  check("技能路由 / 探针那排里不含 select", toggleBlock.includes("<select") === false,
-    toggleBlock);
-  check("召回管理在开关排之后", recallStart > toggleEnd, `recall=${recallStart} toggleEnd=${toggleEnd}`);
-  check("那排恰好两个开关", (toggleBlock.match(/role="switch"/g) || []).length === 2,
-    toggleBlock);
+  // 技能路由从开关排里搬出来，与记忆召回平级；探针归到「前置」卡。
+  const preludeStart = html.indexOf('<section id="prelude"');
+  const preludeEnd = html.indexOf("</section>", preludeStart);
+  const preludeBlock = html.slice(preludeStart, preludeEnd);
+  const skillRouteStart = html.indexOf('<section id="skillRoute"');
+  const skillRouteEnd = html.indexOf("</section>", skillRouteStart);
+  const skillRouteBlock = html.slice(skillRouteStart, skillRouteEnd);
+  const masterStart = html.indexOf('<section id="masterCard"');
+
+  check("前置一块存在", preludeStart > masterStart, `prelude=${preludeStart} master=${masterStart}`);
+  check("前置里有探针开关", preludeBlock.includes('data-key="probe"'));
+  check("前置里有两个打分服务", preludeBlock.includes('id="scoringServices"'));
+  check(
+    "前置里没有技能路由",
+    preludeBlock.includes('data-key="skillRouting"') === false,
+    preludeBlock,
+  );
+  check("前置里不含下拉", preludeBlock.includes("<select") === false, preludeBlock);
+  check("前置里只有一个开关（探针）",
+    (preludeBlock.match(/role="switch"/g) || []).length === 1, preludeBlock);
+
+  check("技能路由独立成一块", skillRouteStart > preludeEnd, `skill=${skillRouteStart} preludeEnd=${preludeEnd}`);
+  check("技能路由那块有标题", /<h2 class="card-title">技能路由<\/h2>/.test(skillRouteBlock), skillRouteBlock);
+  check("技能路由那块有开关", skillRouteBlock.includes('data-key="skillRouting"'));
+  check(
+    "技能路由那块只有一行说明",
+    skillRouteBlock.includes("把共享技能交给助手按需调用") &&
+      (skillRouteBlock.match(/class="skill-route-hint"/g) || []).length === 1,
+    skillRouteBlock,
+  );
+  check(
+    "技能路由那块没有空壳列表或占位文案",
+    skillRouteBlock.includes("<ul") === false &&
+      skillRouteBlock.includes("即将") === false &&
+      skillRouteBlock.includes("敬请") === false,
+    skillRouteBlock,
+  );
+  check("toggleGrid 容器已拆掉", html.includes('id="toggleGrid"') === false);
+  check("召回管理在前置之后", recallStart > preludeEnd, `recall=${recallStart} preludeEnd=${preludeEnd}`);
+
+  const logsStart = html.indexOf('<section class="card logs"');
+  const order = [masterStart, preludeStart, recallStart, skillRouteStart, logsStart];
+  check(
+    "五块的 DOM 顺序：总闸 → 前置 → 召回 → 技能路由 → 日志",
+    order.every((value, index) => value > 0 && (index === 0 || value > order[index - 1])),
+    order.join(" < "),
+  );
+
+  // ---- 打分服务：总闸下面、按会话说明之前，占满整行 ----
+  const scoringIdx = html.indexOf('id="scoringServices"');
+  const scopedIdx = html.indexOf('class="scoped-note"');
+  check("打分服务一块存在", scoringIdx > 0);
+  check(
+    "打分服务在前置卡里、scoped-note 之前",
+    scoringIdx > preludeStart && scoringIdx < scopedIdx,
+    `scoring=${scoringIdx} prelude=${preludeStart} scoped=${scopedIdx}`,
+  );
+  check(
+    "打分服务不在两栏里",
+    scoringIdx < colsStart,
+    `scoring=${scoringIdx} cols=${colsStart}..${colsEnd}`,
+  );
+  for (const id of [
+    "rerankServiceUrl",
+    "rerankServiceModel",
+    "systemoneServiceUrl",
+    "systemoneServiceModel",
+  ]) {
+    check(`打分服务字段 ${id} 在`, new RegExp(`id="${id}"`).test(html));
+  }
+  check(
+    "精排服务两个占位文案在",
+    html.includes('placeholder="http://127.0.0.1:8098"') &&
+      html.includes('placeholder="bge-reranker-v2-m3"'),
+  );
+  check(
+    "决策服务两个占位文案在",
+    html.includes('placeholder="http://192.168.50.142:8097"') &&
+      html.includes('placeholder="kev-4b"'),
+  );
+  check(
+    "精排服务说明写清走 /v1/rerank 且留空不能选",
+    html.includes("交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。"),
+  );
+  check(
+    "决策服务说明写清走 /v1/systemone 且留空不能选",
+    html.includes("决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。"),
+  );
+  check("打分服务有样式", /\n\.services \{/.test(css));
+  check("服务两栏有栅格", /\n\.service-grid \{/.test(css) && /1fr 1fr/.test(css));
+  check("总闸关着时打分服务也置灰", panelJs.includes('#scoringServices'));
+
+  // 通道空态文案不能指向“下面”：打分服务在通道上面。
+  check("添加通道旁提示指向上面", html.includes("先在上面配好打分服务"));
+  check("提示不写“先在下面”", html.includes("先在下面配好打分服务") === false);
+  check("技能路由那块有样式", /\n\.skill-route \{/.test(css));
+  check("总闸关着时技能路由也置灰", panelJs.includes(".skill-route"));
 
   // 说明文字沿用面板的 hint 样式。
   check("规则跳过的说明在面板上", html.includes("≤8 字") && html.includes("指代词"));
@@ -2025,12 +2188,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("面板有测试按钮", /id="rerankTestBtn"[^>]*>\s*测试\s*</.test(html));
   check("面板有测试结果位", html.includes('id="rerankTestResult"'));
   check(
-    "通道行由脚本渲染三种类型",
-    panelJs.includes("renderRerankChannels") && panelJs.includes("RERANK_CHANNEL_TYPES"),
+    "通道行由脚本渲染可选类型",
+    panelJs.includes("renderRerankChannels") && panelJs.includes("channelTypeOptions"),
   );
+  check("通道行不再有 URL 与模型输入", panelJs.includes('channelCell("URL"') === false &&
+    panelJs.includes('channelCell("模型"') === false &&
+    panelJs.includes('textInput(channel.url') === false &&
+    panelJs.includes('textInput(channel.model') === false);
+  check("服务未配置的通道会标红", panelJs.includes("channelServiceMissing") &&
+    panelJs.includes("服务未配置，不会生效"));
+  check("两个服务都没配时添加按钮禁用", panelJs.includes("typeOptions.every") &&
+    panelJs.includes("|| noService"));
   check("删除按钮在通道行里", panelJs.includes('textContent = "删除"'));
   check("权重输入有边界", panelJs.includes('weight.min = "0.1"') && panelJs.includes('weight.max = "10"'));
-  check("添加通道用空模板", panelJs.includes("emptyRerankChannel()"));
+  check("添加通道用空模板", panelJs.includes("emptyRerankChannel(firstType)"));
   check("测试按钮打新端点", panelJs.includes('jsonPost("/recall-mode/test"'));
   check("通道行有样式", /\n\.channel-row \{/.test(css));
   check("测试结果有样式", /\n\.channel-result \{/.test(css));
@@ -2049,6 +2220,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
   );
   eq("候选上限与后端一致", UI_SYSTEMONE_MAX_CANDIDATES, SYSTEMONE_MAX_CANDIDATES);
+  eq("服务模型上限与后端一致", UI_SERVICE_MODEL_MAX, SERVICE_MODEL_MAX);
+  eq("服务地址上限与后端一致", UI_SERVICE_URL_MAX, RERANK_CHANNEL_URL_MAX);
   check(
     "面板提示写明默认 5 条",
     html.includes("默认 5 条") && html.includes(`只问前 ${SYSTEMONE_MAX_CANDIDATES}`) === false,
@@ -2106,6 +2279,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("manifest 里 rerank 枚举", props.rerank?.enum, ["off", "llm"]);
   eq("manifest 里 rerankPrompt 默认空", props.rerankPrompt?.default, "");
   eq("manifest 里 rerankModel 默认空", props.rerankModel?.default, "");
+  eq("manifest 里 rerankServiceUrl 默认空", props.rerankServiceUrl?.default, "");
+  eq("manifest 里 rerankServiceModel 默认空", props.rerankServiceModel?.default, "");
+  eq("manifest 里 systemoneServiceUrl 默认空", props.systemoneServiceUrl?.default, "");
+  eq("manifest 里 systemoneServiceModel 默认空", props.systemoneServiceModel?.default, "");
   check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
 }
 
@@ -2231,7 +2408,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     paintGateConfig({ gateModel: "m1" }).gateModel,
     "",
   );
-  eq("完整投影包含两层、llm、重排配置与通道", paintRecallConfig({ recallGate: "llm" }), {
+  eq("完整投影包含两层、llm、重排配置、通道与打分服务", paintRecallConfig({ recallGate: "llm" }), {
     recallGate: "llm",
     queryMode: "last",
     gatePrompt: "",
@@ -2240,6 +2417,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankPrompt: "",
     rerankModel: "",
     rerankChannels: [],
+    rerankServiceUrl: "",
+    rerankServiceModel: "",
+    systemoneServiceUrl: "",
+    systemoneServiceModel: "",
   });
 
   // ---- 重排配置的归一化与草稿 ----
@@ -2315,9 +2496,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       .weight,
     2,
   );
-  eq("空模板还不算完整通道", isCompleteRerankChannel(emptyRerankChannel()), false);
+  eq("只选类型的空模板也算完整通道（端点由打分服务提供）", isCompleteRerankChannel(emptyRerankChannel()), true);
   eq(
-    "填好 URL 与模型才算完整",
+    "存量 URL 合法也算完整",
     isCompleteRerankChannel({ type: "rerank", url: "http://h", model: "m" }),
     true,
   );
@@ -2330,6 +2511,131 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "非 http(s) 的 URL 不算完整",
     isCompleteRerankChannel({ type: "systemone", url: "ftp://h", model: "m" }),
     false,
+  );
+
+  // ---- 打分服务：显示归一化与通道类型选项 ----
+  eq(
+    "打分服务显示值归一化",
+    paintScoringConfig({
+      rerankServiceUrl: "  http://127.0.0.1:8098///  ",
+      rerankServiceModel: "  bge-reranker-v2-m3  ",
+      systemoneServiceUrl: "ftp://nope",
+      systemoneServiceModel: "kev-4b",
+    }),
+    {
+      rerankServiceUrl: "http://127.0.0.1:8098",
+      rerankServiceModel: "bge-reranker-v2-m3",
+      systemoneServiceUrl: "",
+      systemoneServiceModel: "kev-4b",
+    },
+  );
+  eq(
+    "只配精排 -> 精排服务 + 宿主模型",
+    channelTypeOptions({ rerankServiceUrl: "http://h:8098" }).map((option) => option.value),
+    ["rerank", "model"],
+  );
+  eq(
+    "只配决策 -> 决策服务 + 宿主模型",
+    channelTypeOptions({ systemoneServiceUrl: "http://h:8097" }).map((option) => option.value),
+    ["systemone", "model"],
+  );
+  eq(
+    "都配 -> 三类都在",
+    channelTypeOptions({
+      rerankServiceUrl: "http://h:8098",
+      systemoneServiceUrl: "http://h:8097",
+    }).map((option) => option.value),
+    ["rerank", "systemone", "model"],
+  );
+  eq(
+    "都不配 -> 只剩宿主模型",
+    channelTypeOptions({}).map((option) => option.value),
+    ["model"],
+  );
+  eq(
+    "选项文案就是服务名",
+    channelTypeOptions({
+      rerankServiceUrl: "http://h:8098",
+      systemoneServiceUrl: "http://h:8097",
+    }).map((option) => option.label),
+    ["精排服务", "决策服务", "宿主模型"],
+  );
+
+  // 服务被清空：已有通道保留，只标记不可用，不自动删。
+  const clearedServiceChannels = parseRerankChannels(
+    JSON.stringify([{ type: "rerank" }, { type: "model" }]),
+  );
+  eq("服务清空后通道仍保留", clearedServiceChannels.length, 2);
+  eq(
+    "缺服务的通道被标记不可用",
+    clearedServiceChannels.map((channel) => channelServiceMissing(channel, {})),
+    [true, false],
+  );
+  eq(
+    "服务配上后同一通道变为可用",
+    channelServiceMissing(clearedServiceChannels[0], {
+      rerankServiceUrl: "http://h:8098",
+    }),
+    false,
+  );
+  eq(
+    "通道自带 URL 时不再依赖服务",
+    channelServiceMissing({ type: "systemone", url: "http://h:8097" }, {}),
+    false,
+  );
+
+  // 运行时端点优先级：通道自带 > 打分服务配置。
+  eq(
+    "通道自带的 URL / 模型优先",
+    (({ url, model }) => [url, model])(
+      resolveRerankChannel(
+        { type: "rerank", url: "http://channel:1", model: "channel-model" },
+        { rerankServiceUrl: "http://service:2", rerankServiceModel: "service-model" },
+      ),
+    ),
+    ["http://channel:1", "channel-model"],
+  );
+  eq(
+    "通道没填时用服务配置",
+    (({ url, model }) => [url, model])(
+      resolveRerankChannel(
+        { type: "rerank", url: "", model: "" },
+        { rerankServiceUrl: "http://service:2", rerankServiceModel: "service-model" },
+      ),
+    ),
+    ["http://service:2", "service-model"],
+  );
+  eq(
+    "服务地址为空时孤立模型不生效",
+    (({ url, model }) => [url, model])(
+      resolveRerankChannel({ type: "rerank" }, { rerankServiceModel: "orphan-model" }),
+    ),
+    ["", ""],
+  );
+  eq(
+    "决策服务只看 systemone 那组",
+    (({ url, model }) => [url, model])(
+      resolveRerankChannel(
+        { type: "systemone" },
+        {
+          rerankServiceUrl: "http://r:1",
+          rerankServiceModel: "r",
+          systemoneServiceUrl: "http://s:2",
+          systemoneServiceModel: "s",
+        },
+      ),
+    ),
+    ["http://s:2", "s"],
+  );
+  eq(
+    "宿主模型不受打分服务影响",
+    (({ url, model }) => [url, model])(
+      resolveRerankChannel(
+        { type: "model", model: "p/m" },
+        { rerankServiceUrl: "http://r:1", rerankServiceModel: "r" },
+      ),
+    ),
+    ["", "p/m"],
   );
 
   // 模型目录 -> 选项：一步选到位，文案带 provider，值形如 provider/id。
@@ -3090,6 +3396,74 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("只改 queryMode 不受模型配置影响", untouched.status, 200);
   eq("模型配置原样还在", store.gateModel, "p1/m1");
 
+  // ---- 打分服务四字段：整单校验、非法 400 零写入 ----
+  eq("GET 缺省时四个服务字段都为空",
+    (await get()).body.rerankServiceUrl === "" &&
+      (await get()).body.rerankServiceModel === "" &&
+      (await get()).body.systemoneServiceUrl === "" &&
+      (await get()).body.systemoneServiceModel === "",
+    true);
+
+  writes.length = 0;
+  const servicesOk = await post({
+    rerankServiceUrl: "  http://127.0.0.1:8098/  ",
+    rerankServiceModel: "  bge-reranker-v2-m3  ",
+    systemoneServiceUrl: "http://192.168.50.142:8097",
+    systemoneServiceModel: "  kev-4b  ",
+  });
+  eq("服务四字段可写", servicesOk.status, 200);
+  eq("服务 URL 落库时去尾斜杠", store.rerankServiceUrl, "http://127.0.0.1:8098");
+  eq("服务模型落库时去空白", store.systemoneServiceModel, "kev-4b");
+  eq(
+    "GET 回显四个服务字段",
+    [
+      servicesOk.body.rerankServiceUrl,
+      servicesOk.body.rerankServiceModel,
+      servicesOk.body.systemoneServiceUrl,
+      servicesOk.body.systemoneServiceModel,
+    ],
+    ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "http://192.168.50.142:8097", "kev-4b"],
+  );
+  check("applied 列出服务字段",
+    ["rerankServiceUrl", "rerankServiceModel", "systemoneServiceUrl", "systemoneServiceModel"]
+      .every((key) => servicesOk.body.applied.includes(key)));
+
+  writes.length = 0;
+  const badServiceUrl = await post({ rerankServiceUrl: "ftp://nope", rerank: "llm" });
+  eq("非 http(s) 服务 URL 400", badServiceUrl.status, 400);
+  eq("非法服务 URL 零写入", writes.length, 0);
+  eq("非法服务 URL 不会静默清空旧值", store.rerankServiceUrl, "http://127.0.0.1:8098");
+
+  writes.length = 0;
+  const missingScheme = await post({ systemoneServiceUrl: "192.168.50.142:8097" });
+  eq("缺协议的服务 URL 400", missingScheme.status, 400);
+  eq("缺协议零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badServiceUrlType = await post({ rerankServiceUrl: 8098 });
+  eq("服务 URL 类型不对 400", badServiceUrlType.status, 400);
+  eq("服务 URL 类型不对零写入", writes.length, 0);
+
+  writes.length = 0;
+  const longServiceModel = await post({ rerankServiceModel: "m".repeat(SERVICE_MODEL_MAX + 1) });
+  eq("超长服务模型 400", longServiceModel.status, 400);
+  eq("超长服务模型零写入", writes.length, 0);
+
+  writes.length = 0;
+  const badServiceModelType = await post({ systemoneServiceModel: 1 });
+  eq("服务模型类型不对 400", badServiceModelType.status, 400);
+  eq("服务模型类型不对零写入", writes.length, 0);
+
+  writes.length = 0;
+  const controlServiceModel = await post({ rerankServiceModel: "a\u0000b" });
+  eq("服务模型含控制字符 400", controlServiceModel.status, 400);
+  eq("控制字符服务模型零写入", writes.length, 0);
+
+  writes.length = 0;
+  const emptyService = await post({ rerankServiceUrl: "", rerankServiceModel: "" });
+  eq("服务可以清空", emptyService.status, 200);
+  eq("清空后落库为空串", [store.rerankServiceUrl, store.rerankServiceModel], ["", ""]);
+
   // ---- 精排通道的读写与整单校验 ----
   eq("GET 缺省时通道为空数组", (await get()).body.rerankChannels, []);
 
@@ -3123,10 +3497,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   writes.length = 0;
   const badChannelsItem = await post({
-    rerankChannels: JSON.stringify([{ type: "rerank", url: "http://h" }]),
+    rerankChannels: JSON.stringify([{ type: "rerank", url: "ftp://h" }]),
   });
-  eq("通道字段不全 400", badChannelsItem.status, 400);
-  eq("通道字段不全零写入", writes.length, 0);
+  eq("通道 URL 非法 400", badChannelsItem.status, 400);
+  eq("通道 URL 非法零写入", writes.length, 0);
+
+  writes.length = 0;
+  const typeOnlyChannels = await post({
+    rerankChannels: JSON.stringify([{ type: "rerank" }, { type: "systemone" }]),
+  });
+  eq("只写类型的通道可写（端点走打分服务）", typeOnlyChannels.status, 200);
+  eq("只写类型的通道落库", JSON.parse(store.rerankChannels).length, 2);
+  eq(
+    "只写类型的通道 url / model 为空",
+    [
+      JSON.parse(store.rerankChannels)[0].url,
+      JSON.parse(store.rerankChannels)[0].model,
+    ],
+    ["", ""],
+  );
 
   writes.length = 0;
   const tooManyChannels = await post({
@@ -4563,6 +4952,65 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [1, 0.28, 0],
     );
     eq("rerank 0 分候选被丢掉", outcome.indexes, [0, 1]);
+  }
+
+  // ---- 通道不写 URL / 模型时，用打分服务配置 ----
+  {
+    resetRuntimeTransport();
+    const calls = [];
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url, init) => {
+        calls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify(okBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: {
+        rerankChannels: [],
+        rerankPrompt: "",
+        rerankModel: "",
+        rerankServiceUrl: "http://127.0.0.1:8098",
+        rerankServiceModel: "bge-reranker-v2-m3",
+      },
+      query: "用户问题",
+      items,
+      channels: [{ type: "rerank", name: "服务", url: "", model: "", weight: 1 }],
+    });
+    eq("服务配置补上端点", calls[0].url, "http://127.0.0.1:8098/v1/rerank");
+    eq("服务配置补上模型", calls[0].body.model, "bge-reranker-v2-m3");
+    eq("只选类型的通道也能正常出分", outcome.channels[0].ok, true);
+  }
+
+  // ---- 服务也没配：这一路弃权，不假装 0 分 ----
+  {
+    resetRuntimeTransport();
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async () => {
+        throw new Error("不该联网");
+      },
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [{ type: "rerank", name: "空", weight: 1 }],
+    });
+    eq("服务未配置的通道失败", outcome.channels[0].ok, false);
+    check(
+      "失败原因写明服务未配置",
+      String(outcome.channels[0].error || "").includes("打分服务未配置"),
+      outcome.channels[0].error,
+    );
+    eq("全部通道弃权时原样保留", outcome.fallback, true);
   }
 
   // ---- 通道走受管运行时出口：URL 由通道自己给，不锁死一个 origin ----

@@ -199,12 +199,16 @@ html, body {
 .switch.sm .knob { width: 15px; height: 15px; }
 .switch.sm[aria-checked="true"] .knob { transform: translateX(17px); }
 
-/* ---------- 子开关网格 ---------- */
+/* ---------- 前置：探针与打分服务，同一张卡 ---------- */
 
-.toggles {
+/* 从总闸到下面那些能力之间的曼哈顿地带。不再用网格容器：
+   探针一行、服务两栅，各自管自己。 */
+.prelude {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 10px;
+  gap: 12px;
+}
+.prelude .card-title {
+  margin: 0;
 }
 
 .toggle {
@@ -234,6 +238,69 @@ html, body {
   opacity: 0.55;
   line-height: 1.35;
 }
+
+/* ---------- 技能路由：与记忆召回平级的一块 ---------- */
+
+.skill-route {
+  display: grid;
+  gap: 6px;
+}
+.skill-route.dim { opacity: 0.45; }
+.skill-route-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.skill-route-head .card-title { margin: 0; }
+.skill-route-hint {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.55;
+  line-height: 1.35;
+}
+
+/* ---------- 打分服务（通道引用的端点） ---------- */
+
+/* 前置卡里面的一块：先声明「有哪些打分服务」，下面的精排通道只选类型。
+   两个服务并排，窄屏自动落成一列。 */
+.services {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  background: rgba(128, 128, 128, 0.025);
+  transition: opacity 0.2s;
+}
+.services.dim { opacity: 0.45; }
+.services .card-title { margin: 0; }
+.service-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  min-width: 0;
+}
+@media (max-width: 760px) {
+  .service-grid { grid-template-columns: 1fr; }
+}
+.service {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.service-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.service-fields {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 8px;
+  min-width: 0;
+}
+.service-fields .field { margin-bottom: 0; }
+.service .field-hint { margin: 0; }
 
 /* ---------- 召回管理（下拉 + peer 名单） ---------- */
 
@@ -310,6 +377,14 @@ html, body {
   border-radius: 10px;
   background: rgba(128, 128, 128, 0.035);
 }
+/* 服务被清空、这条通道运行时不会生效：留着数据，只标红提醒。 */
+.channel-row.warn {
+  border-color: rgba(194, 85, 75, 0.55);
+}
+.channel-unavailable {
+  font-size: 11px;
+  color: #b8564d;
+}
 .channel-row-head {
   display: flex;
   align-items: center;
@@ -365,7 +440,12 @@ html, body {
 }
 .channel-actions {
   display: flex;
+  align-items: center;
+  gap: 10px;
   justify-content: flex-end;
+}
+.channel-actions .field-hint {
+  margin-right: auto;
 }
 .channel-result {
   margin: 0;

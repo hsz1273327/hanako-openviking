@@ -30,13 +30,14 @@ import {
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS,
-  RERANK_CHANNEL_TYPES,
   SYSTEMONE_MAX_CANDIDATES,
   SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_MAX,
   SYSTEMONE_TIMEOUT_STEP,
   commitLayers,
   emptyRerankChannel,
+  channelServiceMissing,
+  channelTypeOptions,
   isCompleteRerankChannel,
   modelOptions,
   normalizeGatePrompt,
@@ -129,7 +130,10 @@ function applyControls(out) {
 }
 
 function paintDim(enabled) {
-  for (const node of document.querySelectorAll(".toggle, .recall-grid, .gate-advanced")) {
+  // 前置（探针 + 打分服务）和技能路由都是独立块，总闸关着时一起置灰。
+  for (const node of document.querySelectorAll(
+    ".toggle, .recall-grid, #scoringServices, .gate-advanced, .skill-route",
+  )) {
     node.classList.toggle("dim", !enabled);
   }
   $("masterCard").setAttribute("data-off", enabled ? "false" : "true");
@@ -410,8 +414,10 @@ function textInput(value, placeholder) {
 }
 
 /**
- * 通道列表：每行是类型 / 名称 / URL / 模型 / 权重 / 启用 / 删除。
- * 只在 change 时提交，不抢正在输入的光标；
+ * 通道列表：每行是类型 / 名称 / 权重 / 超时 / 启用 / 删除。
+ * 类型选项按上面已配的打分服务动态生成：只配了精排就只有「精排服务」，
+ * 两个都没配就只剩「宿主模型」，此时「添加通道」禁用。
+ * 只在 change 时提交，不抢正在输入的光标。
  */
 function renderRerankChannels(list) {
   const box = $("rerankChannelList");
@@ -419,17 +425,26 @@ function renderRerankChannels(list) {
   rerankChannelsDraft = normalizeRerankChannels(list);
   box.textContent = "";
 
+  const typeOptions = channelTypeOptions(layers);
+  const noService = typeOptions.every((option) => option.value === "model");
+
   const empty = $("rerankChannelsEmpty");
   if (empty) empty.hidden = rerankChannelsDraft.length > 0;
   const count = $("rerankChannelsCount");
   if (count) count.textContent = rerankChannelsCountText(rerankChannelsDraft);
   const add = $("rerankAddChannel");
-  if (add) add.disabled = rerankChannelsDraft.length >= RERANK_CHANNELS_MAX;
+  if (add) add.disabled = rerankChannelsDraft.length >= RERANK_CHANNELS_MAX || noService;
+  const addHint = $("rerankChannelHint");
+  if (addHint) addHint.hidden = !noService;
 
   rerankChannelsDraft.forEach((channel, index) => {
     const row = document.createElement("div");
     row.className = "channel-row";
     row.dataset.index = String(index);
+
+    // 服务被清空后，存量通道保留在列表里，但运行时不会生效：标红说清楚，不自动删。
+    const unavailable = channelServiceMissing(channel, layers);
+    row.classList.toggle("warn", unavailable);
 
     const head = document.createElement("div");
     head.className = "channel-row-head";
@@ -456,39 +471,42 @@ function renderRerankChannels(list) {
       renderRerankChannels(rerankChannelsDraft);
       saveLayers();
     });
-    head.append(title, enabledLabel, remove);
+    head.append(title, enabledLabel);
+    if (unavailable) {
+      const warning = document.createElement("span");
+      warning.className = "channel-unavailable";
+      warning.textContent = "服务未配置，不会生效";
+      head.append(warning);
+    }
+    head.append(remove);
 
     const type = document.createElement("select");
-    for (const value of RERANK_CHANNEL_TYPES) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = RERANK_CHANNEL_LABELS[value] || value;
-      type.appendChild(option);
+    const options = [...typeOptions];
+    // 存量通道的类型可能已不在可选范围内（服务被清空）：把当前值留住，别让下拉变空。
+    if (!options.some((option) => option.value === channel.type)) {
+      options.push({
+        value: channel.type,
+        label: `${RERANK_CHANNEL_LABELS[channel.type] || channel.type}（服务未配置）`,
+      });
+    }
+    for (const option of options) {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      type.appendChild(node);
     }
     type.value = channel.type;
     type.addEventListener("change", () => {
       // 那一格的默认超时跟类型走，placeholder 与上限一起换。
       timeout.placeholder = String(RERANK_CHANNEL_TIMEOUT_DEFAULTS[type.value] ?? 800);
       timeout.max = String(type.value === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000);
-      updateChannel(index, { type: type.value });
+      updateChannel(index, { type: type.value, url: "", model: "" });
       saveLayers();
     });
 
     const name = textInput(channel.name, "显示名，可空");
     name.addEventListener("change", () => {
       updateChannel(index, { name: name.value });
-      saveLayers();
-    });
-
-    const url = textInput(channel.url, "http://127.0.0.1:8080");
-    url.addEventListener("change", () => {
-      updateChannel(index, { url: url.value });
-      saveLayers();
-    });
-
-    const model = textInput(channel.model, channel.type === "model" ? "provider/model 或空" : "模型名");
-    model.addEventListener("change", () => {
-      updateChannel(index, { model: model.value });
       saveLayers();
     });
 
@@ -551,8 +569,6 @@ function renderRerankChannels(list) {
     cells.append(
       channelCell("类型", type),
       channelCell("名称", name),
-      channelCell("URL", url, true),
-      channelCell("模型", model, true),
       channelCell("权重", weight),
       channelCell("超时（ms）", timeout),
     );
@@ -867,6 +883,10 @@ function applyLayers(next) {
   paintPromptStatus();
   paintGatePanels();
   paintRerankPanels();
+  // 打分服务：正在输入的那一格不被一次刷新抢走光标与内容。
+  for (const [id, key] of SERVICE_FIELDS) {
+    if (document.activeElement !== $(id)) $(id).value = layers[key] || "";
+  }
   renderRerankChannels([...layers.rerankChannels, ...pending]);
   paintModelSelect();
 }
@@ -882,8 +902,21 @@ function readLayers() {
     rerankModel: $("rerankModel").value,
     // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
     rerankChannels: rerankChannelsDraft.filter(isCompleteRerankChannel),
+    // 打分服务：原样发，合法性由服务端整单校验；被拒就整组回滚。
+    rerankServiceUrl: $("rerankServiceUrl").value.trim(),
+    rerankServiceModel: $("rerankServiceModel").value.trim(),
+    systemoneServiceUrl: $("systemoneServiceUrl").value.trim(),
+    systemoneServiceModel: $("systemoneServiceModel").value.trim(),
   };
 }
+
+// 打分服务四字段与输入框 id 一一对应（id 与配置键同名）。
+const SERVICE_FIELDS = [
+  ["rerankServiceUrl", "rerankServiceUrl"],
+  ["rerankServiceModel", "rerankServiceModel"],
+  ["systemoneServiceUrl", "systemoneServiceUrl"],
+  ["systemoneServiceModel", "systemoneServiceModel"],
+];
 
 const LAYER_KEYS = [
   "recallGate",
@@ -894,6 +927,10 @@ const LAYER_KEYS = [
   "rerankPrompt",
   "rerankModel",
   "rerankChannels",
+  "rerankServiceUrl",
+  "rerankServiceModel",
+  "systemoneServiceUrl",
+  "systemoneServiceModel",
 ];
 
 function sameLayers(a, b) {
@@ -1011,9 +1048,21 @@ $("rerankResetPrompt").addEventListener("click", () => {
 });
 $("rerankModel").addEventListener("change", saveLayers);
 
+for (const [id] of SERVICE_FIELDS) {
+  $(id).addEventListener("change", saveLayers);
+  $(id).addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      $(id).blur();
+    }
+  });
+}
+
 $("rerankAddChannel").addEventListener("click", () => {
   if (rerankChannelsDraft.length >= RERANK_CHANNELS_MAX) return;
-  rerankChannelsDraft = [...rerankChannelsDraft, emptyRerankChannel()];
+  // 新行默认用当前可选的第一类；两个服务都没配时按钮已禁用。
+  const firstType = channelTypeOptions(layers)[0]?.value || "model";
+  rerankChannelsDraft = [...rerankChannelsDraft, emptyRerankChannel(firstType)];
   renderRerankChannels(rerankChannelsDraft);
   saveLayers();
 });

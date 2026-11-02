@@ -26,6 +26,10 @@ export const DEFAULTS = {
   rerankPrompt: "",
   rerankModel: "",
   rerankChannels: "",
+  rerankServiceUrl: "",
+  rerankServiceModel: "",
+  systemoneServiceUrl: "",
+  systemoneServiceModel: "",
 };
 
 /** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令，llm 让宿主模型判断。 */
@@ -50,6 +54,9 @@ export const RERANK_WEIGHT_MAX = 10;
 /** 通道字段的存留上限。名称只是显示用，URL / 模型标识按与其它配置同口径收敛。 */
 export const RERANK_CHANNEL_NAME_MAX = 64;
 export const RERANK_CHANNEL_URL_MAX = 512;
+
+/** 打分服务的模型名上限。服务名与通道模型名同一口径。 */
+export const SERVICE_MODEL_MAX = 128;
 
 /** 自定义提示词上限。超过这个长度的存量值在读取侧截断，POST 侧整单拒绝。 */
 export const GATE_PROMPT_MAX = 2000;
@@ -113,7 +120,7 @@ export function normalizeGateModel(raw) {
 export const normalizeRerankModel = normalizeGateModel;
 
 /** 通道 URL 只认 http / https；末尾斜杠在这里统一去掉，拼接端点时不会再出现双斜杠。 */
-function normalizeChannelUrl(raw) {
+export function normalizeChannelUrl(raw) {
   if (typeof raw !== "string") return "";
   const value = raw.trim();
   if (!value || Array.from(value).length > RERANK_CHANNEL_URL_MAX) return "";
@@ -129,11 +136,27 @@ function normalizeChannelUrl(raw) {
 }
 
 /**
- * 单项通道解析。返回 null 表示整项丢弃——缺字段就是缺字段，不拿默认值去猜。
+ * 打分服务地址：与通道 URL 同口径（只认 http / https、去尾斜杠），非法值在读取侧
+ * 收敛成空串（= 该服务未配置）。写入侧另有整单校验，非法值直接 400，不悄悄清空。
+ */
+export function normalizeServiceUrl(raw) {
+  return normalizeChannelUrl(raw);
+}
+
+/** 打分服务的模型名：去空白后按字符截断。空串合法（有的服务只有一个模型）。 */
+export function normalizeServiceModel(raw) {
+  if (typeof raw !== "string") return "";
+  return Array.from(raw.trim()).slice(0, SERVICE_MODEL_MAX).join("");
+}
+
+/**
+ * 单项通道解析。返回 null 表示整项丢弃——字段出现了但形状不对就整项不要。
  *
  * 默认值只有两处，而且是任务书明确写下的：weight 缺省 1，enabled 缺省 true。
- * type 必须是三种之一；rerank / systemone 必须有 URL 与模型；model 类型的模型标识
- * 可以留空（空 = 宿主辅助模型），非空则必须形如 provider/model。
+ * type 必须是三种之一。rerank / systemone 的 url 与 model 现在可以缺省：端点与模型
+ * 由「打分服务」那组配置提供，通道自带的 url / model 仍然接受并优先使用（存量配置
+ * 不失效）。model 类型的模型标识可以留空（空 = 宿主辅助模型），非空则必须形如
+ * provider/model。
  */
 export function parseRerankChannel(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -155,10 +178,17 @@ export function parseRerankChannel(raw) {
     // 模型通道填 provider/model 或空；空走宿主辅助模型。
     if (model && !normalizeGateModel(model)) return null;
   } else {
-    url = normalizeChannelUrl(raw.url);
-    if (!url || !model) return null;
-    if (Array.from(model).length > MODEL_REF_PART_MAX) return null;
-    if (/[\u0000-\u001f\u007f\s]/.test(model)) return null;
+    // url 缺省 = 用对应打分服务的地址；一旦出现就必须是合法的 http(s)。
+    if (raw.url !== undefined && typeof raw.url !== "string") return null;
+    const givenUrl = typeof raw.url === "string" ? raw.url.trim() : "";
+    if (givenUrl) {
+      url = normalizeChannelUrl(givenUrl);
+      if (!url) return null;
+    }
+    if (model) {
+      if (Array.from(model).length > MODEL_REF_PART_MAX) return null;
+      if (/[\u0000-\u001f\u007f\s]/.test(model)) return null;
+    }
   }
 
   let weight = 1;
@@ -303,6 +333,10 @@ export async function readSwitches(sdk) {
         /* 日志不能影响配置读取 */
       }
     }),
+    rerankServiceUrl: normalizeServiceUrl(await read(sdk, "rerankServiceUrl")),
+    rerankServiceModel: normalizeServiceModel(await read(sdk, "rerankServiceModel")),
+    systemoneServiceUrl: normalizeServiceUrl(await read(sdk, "systemoneServiceUrl")),
+    systemoneServiceModel: normalizeServiceModel(await read(sdk, "systemoneServiceModel")),
   };
 }
 
