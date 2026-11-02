@@ -15,6 +15,7 @@ import {
   RERANK_CHANNEL_URL_MAX,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
+  SERVICE_KINDS,
   SERVICE_MODEL_MAX,
   normalizeGateModel,
   normalizeGatePrompt,
@@ -24,12 +25,20 @@ import {
   normalizeRerankModel,
   normalizeRerankPrompt,
   normalizeServiceModel,
+  normalizeServiceTimeout,
   normalizeServiceUrl,
   parseRerankChannel,
   parseRerankChannels,
   readSwitches,
+  serializeServiceTimeout,
+  servicePairError,
+  serviceTimeoutOrDefault,
 } from "../src/ov/settings.js";
-import { readRerankSample, runRerankChannels } from "../src/memory/recall.js";
+import {
+  readRerankSample,
+  runRerankChannels,
+  testScoringService,
+} from "../src/memory/recall.js";
 import { sessionKeyOf } from "../src/state/session.js";
 
 const SPECS = Object.freeze({
@@ -40,6 +49,21 @@ const SPECS = Object.freeze({
 
 /** 打分服务的四字段：两组（精排 / 决策）的地址与模型。 */
 const SERVICE_MODEL_FIELDS = Object.freeze(["rerankServiceModel", "systemoneServiceModel"]);
+
+/**
+ * 地址与模型是一对：校验时按「这一单提交之后的生效值」看，不看单次提交里带了几个键。
+ * 先存地址、再补模型的两步提交不会被拆成一次非法状态。
+ */
+const SERVICE_PAIRS = Object.freeze([
+  ["rerankServiceUrl", "rerankServiceModel"],
+  ["systemoneServiceUrl", "systemoneServiceModel"],
+]);
+
+/** 超时字段与它属于哪一类服务（两类的边界与默认值不同）。 */
+const SERVICE_TIMEOUT_FIELDS = Object.freeze([
+  ["rerankServiceTimeoutMs", "rerank"],
+  ["systemoneServiceTimeoutMs", "systemone"],
+]);
 
 /** provider/model 的边界与 APPS.md 的可调用模型标识一致：非空、无控制字符、≤128。 */
 const MODEL_FIELD_MAX = 128;
@@ -116,8 +140,17 @@ async function current(ctx) {
     }),
     rerankServiceUrl: normalizeServiceUrl(await ctx.config.get("rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await ctx.config.get("rerankServiceModel")),
+    // null = 没配（用默认值），数字 = 配的那个。面板的 placeholder 与运行时共用这个口径。
+    rerankServiceTimeoutMs: normalizeServiceTimeout(
+      await ctx.config.get("rerankServiceTimeoutMs"),
+      "rerank",
+    ),
     systemoneServiceUrl: normalizeServiceUrl(await ctx.config.get("systemoneServiceUrl")),
     systemoneServiceModel: normalizeServiceModel(await ctx.config.get("systemoneServiceModel")),
+    systemoneServiceTimeoutMs: normalizeServiceTimeout(
+      await ctx.config.get("systemoneServiceTimeoutMs"),
+      "systemone",
+    ),
   };
 }
 
@@ -210,6 +243,29 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push([key, normalizeServiceModel(body[key])]);
     }
 
+    // 超时：不合法不报错，回退到该类型的默认值（存空串），不留非法值在配置里。
+    // null 是面板「清空这一格」的写法（界面归一后就是 null），当清空处理。
+    for (const [key, kind] of SERVICE_TIMEOUT_FIELDS) {
+      if (!has(body, key)) continue;
+      const raw = body[key];
+      if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+        return c.json({ ok: false, error: `${key} 必须是字符串、数字或 null` }, 400);
+      }
+      changes.push([key, serializeServiceTimeout(raw, kind)]);
+    }
+
+    // 地址与模型成对：配了地址就必须有模型名，否则整单拒，一个字段不写。
+    // 只校验这一单动到的那一对：存量里已经有「有地址缺模型」的老配置时，
+    // 改别的键不该被连坐——那一对的回退另由 resolveRerankChannel 整对处理。
+    const pending = new Map(changes);
+    for (const [urlField, modelField] of SERVICE_PAIRS) {
+      if (!has(body, urlField) && !has(body, modelField)) continue;
+      const url = pending.has(urlField) ? pending.get(urlField) : await ctx.config.get(urlField);
+      const model = pending.has(modelField) ? pending.get(modelField) : await ctx.config.get(modelField);
+      const problem = servicePairError(url, model, urlField, modelField);
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+    }
+
     if (has(body, "rerankChannels")) {
       if (typeof body.rerankChannels !== "string") {
         return c.json({ ok: false, error: "rerankChannels 必须是 JSON 字符串" }, 400);
@@ -254,6 +310,38 @@ export default function registerRecallModeRoutes(app, ctx) {
       { ok: true, applied: changes.map(([key]) => key), ...(await current(ctx)) },
       200,
     );
+  });
+
+  // 面板「测试」按钮：拿请求体里那一对（地址 + 模型）直接打一发打分服务。
+  // 校验用请求体里的值，不读已存配置：填了还没保存也要能先试。零副作用。
+  app.post("/recall-mode/service-test", async (c) => {
+    let body = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ ok: false, error: "body 不是 JSON" }, 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return c.json({ ok: false, error: "body 必须是对象" }, 400);
+    }
+
+    const kind = body.kind;
+    if (!SERVICE_KINDS.includes(kind)) {
+      return c.json({ ok: false, error: `kind 只能是 ${SERVICE_KINDS.join(" / ")}` }, 400);
+    }
+
+    const url = normalizeServiceUrl(body.url);
+    if (!url) return c.json({ ok: false, error: "url 必须是合法的 http(s) 地址" }, 400);
+
+    const model = normalizeServiceModel(body.model);
+    const problem = servicePairError(url, model, "url", "model");
+    if (problem) return c.json({ ok: false, error: problem }, 400);
+
+    // 超时按类型归一化：非数字 / 越界一律回该类型的默认值（800 / 3500）。
+    const timeoutMs = serviceTimeoutOrDefault(body.timeoutMs, kind);
+    const outcome = await testScoringService({ sdk: ctx, kind, url, model, timeoutMs });
+    // 打不通不是请求错，是结果：一律 200 + ok:false，面板照原文显示错误。
+    return c.json(outcome, 200);
   });
 
   // 面板「测试」按钮：拿这个会话最近一轮留存的真实候选复跑一次精排。

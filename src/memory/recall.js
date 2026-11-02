@@ -16,10 +16,12 @@ import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
+  normalizeServiceTimeout,
   parseRerankChannels,
   readConnection,
   readExcludedPeers,
   readSwitches,
+  serviceTimeoutOrDefault,
 } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
 import {
@@ -705,15 +707,39 @@ async function scoreRerankChannel(sdk, channel, query, items) {
       : null;
   if (!list || !list.length) throw new Error("rerank 没有返回 results");
 
-  const scores = new Array(items.length).fill(0);
+  const scores = new Array(items.length).fill(null);
+  let rawScores = [];
   list.forEach((entry, position) => {
     if (!entry || typeof entry !== "object") throw new Error("rerank 结果项不是对象");
+    const raw = Number(entry.relevance_score ?? entry.score);
+    if (!Number.isFinite(raw)) throw new Error("rerank 结果缺少 relevance_score");
+    rawScores.push(raw);
     const index = Number.isInteger(entry.index) ? entry.index : position;
-    const score = scoreOf(entry.relevance_score ?? entry.score);
-    if (score === null) throw new Error("rerank 结果缺少 relevance_score");
-    if (index >= 0 && index < items.length) scores[index] = score;
+    if (index >= 0 && index < items.length) scores[index] = raw;
   });
-  return scores;
+  return squashRerankScores(scores, rawScores);
+}
+
+/**
+ * 把 rerank 的原始分收拢到 0..1。
+ *
+ * 两类服务给的分数不是一个东西：Cohere 那派返回的就是 0..1 的相关度，
+ * 而 llama.cpp 接的 bge-reranker 返回的是**交叉编码器的原始 logit**，实测能到 ±10。
+ * 对 logit 直接做 clamp 会出两个坑：负分全变 0（被当成“明确不要”而丢掉候选），
+ * 正分全变 1（排序信息没了，全正时整路还会计成“同分”而弃权）。
+ * 所以：只要出现越界值，就判定这批是 logit，整批过 sigmoid；否则原样保留。
+ * null（服务没给这一条的分）不参与，保持 null。
+ */
+export function squashRerankScores(scores, probe = scores) {
+  const list = (Array.isArray(probe) ? probe : []).filter((value) => Number.isFinite(Number(value)));
+  const looksLikeLogit = list.some((value) => Number(value) < 0 || Number(value) > 1);
+  return scores.map((raw) => {
+    if (raw === null || raw === undefined) return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    if (looksLikeLogit) return 1 / (1 + Math.exp(-value));
+    return Math.min(1, Math.max(0, value));
+  });
 }
 
 /**
@@ -784,6 +810,91 @@ async function scoreSystemOneChannel(sdk, channel, query, items) {
   return scores;
 }
 
+/**
+ * 打分服务的连通性测试。
+ *
+ * 用的是调用方传进来的那一对（地址 + 模型），不是已存配置：面板上填了还没保存的
+ * 值也要能先试一把。只发一发最小请求，不读也不写任何会话 / 配置状态。
+ *
+ * 判定「可用」比运行时严一点：HTTP 2xx 只是必要条件，结构对不上同样算不可用。
+ * 一个 200 但缺 results 的服务能让整轮召回静默地一路弃权，用户在界面上却看到
+ * 「可用」，那比直接报错更浪费时间。
+ */
+export async function testScoringService({ sdk, kind, url, model, timeoutMs } = {}) {
+  const started = Date.now();
+  const elapsed = () => Math.max(0, Date.now() - started);
+  if (kind !== "rerank" && kind !== "systemone") {
+    return { ok: false, elapsedMs: 0, error: `未知的打分服务类型：${String(kind)}` };
+  }
+
+  const endpoint = kind === "rerank" ? "/v1/rerank" : "/v1/systemone";
+  const payload =
+    kind === "rerank"
+      ? {
+          model,
+          query: "连通性测试",
+          documents: ["这是一条用于测试的文档"],
+        }
+      : {
+          model,
+          state: { type: "text", content: "连通性测试" },
+          questions: { q: { type: "noul", instructions: "这是一条测试提问吗" } },
+        };
+  const limit = serviceTimeoutOrDefault(timeoutMs, kind);
+
+  let data;
+  try {
+    data = await postJson(sdk, channelEndpoint(url, endpoint), payload, limit);
+  } catch (error) {
+    // Node 的 fetch 只把一句「fetch failed」抛到 message 上，真正的原因在 cause 里。
+    // 不把 cause 带出来，面板上就只剩个看不出所以然的「fetch failed」。
+    const cause = error?.cause?.message ?? error?.cause?.code ?? "";
+    const message = String(error?.message || error || "unknown");
+    return {
+      ok: false,
+      elapsedMs: elapsed(),
+      error: reasonOf(cause ? `${message}：${String(cause)}` : message),
+    };
+  }
+
+  const serverModel =
+    typeof data?.model === "string" && data.model.trim() ? data.model.trim() : null;
+
+  if (kind === "rerank") {
+    const list = Array.isArray(data?.results) ? data.results : null;
+    if (!list || !list.length) {
+      return { ok: false, elapsedMs: elapsed(), error: "返回结构不符合预期（缺 results）" };
+    }
+    for (const entry of list) {
+      const raw = entry && typeof entry === "object" ? entry.relevance_score ?? entry.score : null;
+      if (!Number.isFinite(Number(raw))) {
+        return {
+          ok: false,
+          elapsedMs: elapsed(),
+          error: "返回结构不符合预期（缺 relevance_score / score）",
+        };
+      }
+    }
+    return {
+      ok: true,
+      elapsedMs: elapsed(),
+      model: serverModel,
+      detail: `返回 ${list.length} 条打分结果`,
+    };
+  }
+
+  const answer = data?.answers?.q;
+  if (!answer || typeof answer !== "object") {
+    return { ok: false, elapsedMs: elapsed(), error: "返回结构不符合预期（缺 answers.q）" };
+  }
+  return {
+    ok: true,
+    elapsedMs: elapsed(),
+    model: serverModel,
+    detail: `返回 1 个回答（${Object.keys(answer).join(", ") || "空对象"}）`,
+  };
+}
+
 /** 宿主模型通道：沿用编号清单，挑中 1、未挑中 0。 */
 async function scoreModelChannel(sdk, switches, channel, query, items) {
   const prompt = renderRerankPrompt(rerankPromptOf(switches), query, items);
@@ -803,10 +914,32 @@ async function scoreModelChannel(sdk, switches, channel, query, items) {
 }
 
 /**
- * 通道的端点解析：通道自带的 url / model 优先，没填才用对应打分服务配置里的。
+ * 地址与模型成对对不上时给界面看的一句话。缺模型是最常见的存量形态
+ * （老通道只填了地址），两条文案都要能被界面原样展示。
+ */
+export const CHANNEL_PAIR_NOTE_MODEL = "通道自带的模型名为空，已改用服务配置";
+export const CHANNEL_PAIR_NOTE_URL = "通道自带的地址为空，已改用服务配置";
+
+/** 通道自己的超时读数：非数字 / 非正数一律当没填。 */
+function normalizeChannelTimeoutValue(raw) {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+/**
+ * 通道的端点解析：通道自带的地址与模型「要么都有、要么都不用」，缺一个整对改用
+ * 对应打分服务配置里的那一对。
  *
- * 这是「配置兼容」的那一步：老配置把端点写在通道里，照旧生效；新配置只在上面声明
- * 一次服务，通道只引用类型。返回新对象，不改调用方手里那份配置。
+ * 为什么是整对而不是逐项：两半各自回退会拼出「自己的地址 + 别人的模型名」这种
+ * 现场，请求发得出去，返回也像真的，只有分数不对——比直接弃权更难查。
+ *
+ * 返回新对象，不改调用方手里那份配置。pairNote 是给界面看的一句话，说明为什么
+ * 这一行没用自己的值；运行时不读它。
+ *
+ * 超时优先级：通道自带 > 服务配置 > 缺省。缺省时 rerank 落到
+ * RERANK_CHANNEL_TIMEOUT_MS（800），systemone 落到按候选数自适应；服务配置允许
+ * 填到 15000，但 systemone 实际发出去前仍会被 systemoneTimeoutFor 压到 8000。
  */
 export function resolveRerankChannel(channel, switches) {
   if (!channel || typeof channel !== "object") return channel;
@@ -822,15 +955,47 @@ export function resolveRerankChannel(channel, switches) {
       : channel.type === "systemone"
         ? switches?.systemoneServiceModel
         : "";
+  const serviceTimeout =
+    channel.type === "rerank"
+      ? switches?.rerankServiceTimeoutMs
+      : channel.type === "systemone"
+        ? switches?.systemoneServiceTimeoutMs
+        : null;
+
   const ownUrl = typeof channel.url === "string" ? channel.url.trim() : "";
   const ownModel = typeof channel.model === "string" ? channel.model.trim() : "";
+  const ownPair = Boolean(ownUrl && ownModel);
+
   const fallbackUrl = String(serviceUrl || "").trim();
   // 地址为空 = 整个服务未配置，模型也一并忽略，不拿孤立模型去拼一个端点。
   const fallbackModel = fallbackUrl ? String(serviceModel || "").trim() : "";
+
+  // 通道自己的超时优先；没填才看服务配置；两边都没配 = 缺省（交给按类型给值 / 自适应）。
+  // 服务配置那一份过一遍归一化：越界的存量值当没配，不能拿一个非法值去拼请求。
+  const ownTimeout = normalizeChannelTimeoutValue(channel.timeoutMs);
+  const declaredTimeout =
+    ownTimeout ??
+    (channel.type === "rerank" || channel.type === "systemone"
+      ? normalizeServiceTimeout(serviceTimeout, channel.type)
+      : null);
+
+  let pairNote = "";
+  // 服务也没配时这一路根本不生效，说明由「服务未配置」那一句接管，不在这里说回退。
+  if (
+    fallbackUrl &&
+    channel.type !== "model" &&
+    Boolean(ownUrl) !== Boolean(ownModel)
+  ) {
+    pairNote = ownUrl ? CHANNEL_PAIR_NOTE_MODEL : CHANNEL_PAIR_NOTE_URL;
+  }
+
   return {
     ...channel,
-    url: channel.type === "model" ? "" : ownUrl || fallbackUrl,
-    model: ownModel || fallbackModel,
+    url: channel.type === "model" ? "" : ownPair ? ownUrl : fallbackUrl,
+    // 宿主模型通道只认自己的模型标识，跟打分服务那一对无关。
+    model: channel.type === "model" ? ownModel : ownPair ? ownModel : fallbackModel,
+    ...(pairNote ? { pairNote } : {}),
+    ...(declaredTimeout === null ? {} : { timeoutMs: declaredTimeout }),
   };
 }
 
@@ -1070,6 +1235,13 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
       ok: result.ok,
       abstained: result.abstained === true,
       elapsedMs: result.elapsedMs,
+      // 这一路实际用的端点 / 超时 / 整对回退的原因，面板「测试」结果行直接展开。
+      url: result.channel.url || "",
+      model: result.channel.model || "",
+      ...(result.channel.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: result.channel.timeoutMs }),
+      ...(result.channel.pairNote ? { pairNote: result.channel.pairNote } : {}),
       ...(Array.isArray(result.scores) ? { scores: result.scores } : {}),
       ...(result.ok
         ? { normalized: result.normalized, range: result.range }

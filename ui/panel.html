@@ -51,10 +51,12 @@
       </div>
 
       <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
+           每组是「地址 + 模型 + 超时 + 测试」四项：地址与模型成对（配了地址就要填模型名），
+           超时留空就用该类型的默认值（placeholder 里写着那个数）。
            两块都留空时，通道里就只剩「宿主模型」这一类。 -->
       <div id="scoringServices" class="services">
         <div class="service-grid">
-          <div class="service">
+          <div class="service" data-kind="rerank">
             <div class="service-title">精排服务</div>
             <div class="service-fields">
               <div class="field">
@@ -65,10 +67,18 @@
                 <label for="rerankServiceModel">模型</label>
                 <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
               </div>
+              <div class="field narrow">
+                <label for="rerankServiceTimeoutMs">超时</label>
+                <input id="rerankServiceTimeoutMs" type="number" min="100" max="10000" step="100" placeholder="800 ms">
+              </div>
+              <div class="field service-test">
+                <button id="rerankServiceTest" class="btn ghost sm" type="button">测试</button>
+              </div>
             </div>
-            <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。</p>
+            <p id="rerankServiceResult" class="service-result" hidden></p>
+            <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 800 ms。</p>
           </div>
-          <div class="service">
+          <div class="service" data-kind="systemone">
             <div class="service-title">决策服务</div>
             <div class="service-fields">
               <div class="field">
@@ -79,8 +89,16 @@
                 <label for="systemoneServiceModel">模型</label>
                 <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
               </div>
+              <div class="field narrow">
+                <label for="systemoneServiceTimeoutMs">超时</label>
+                <input id="systemoneServiceTimeoutMs" type="number" min="100" max="15000" step="100" placeholder="3500 ms">
+              </div>
+              <div class="field service-test">
+                <button id="systemoneServiceTest" class="btn ghost sm" type="button">测试</button>
+              </div>
             </div>
-            <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。</p>
+            <p id="systemoneServiceResult" class="service-result" hidden></p>
+            <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 3500 ms。</p>
           </div>
         </div>
       </div>
@@ -232,7 +250,7 @@
             <button id="rerankAddChannel" class="btn ghost sm" type="button">添加通道</button>
           </div>
           <pre id="rerankTestResult" class="channel-result" hidden></pre>
-          <span class="field-hint">精排 / 决策两类走上面「打分服务」配的地址；宿主模型走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。超时留空用该类型默认值：systemone 3500ms，候选越多越慢，默认 5 条（一次问完全部候选，超过 5 条的按未打分处理）。</span>
+          <span class="field-hint">精排 / 决策两类走上面「打分服务」配的地址；宿主模型走宿主模型，模型留空表示辅助模型。多路按权重加权合并，单路失败只弃权不归零。通道自带的地址与模型成对生效，只填一半就整对改用服务配置。超时优先级：通道自带 &gt; 服务配置 &gt; 类型默认值；systemone 没配超时时按候选数自适应（3500ms 起，候选越多越慢，默认 5 条，一次问完全部候选，超过 5 条的按未打分处理）。</span>
         </div>
       </div>
 

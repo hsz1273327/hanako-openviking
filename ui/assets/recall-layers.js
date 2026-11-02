@@ -18,6 +18,23 @@ export const RERANK_CHANNEL_LABELS = Object.freeze({
 export const SERVICE_MODEL_MAX = 128;
 // 打分服务地址上限，与 src/ov/settings.js 的 RERANK_CHANNEL_URL_MAX 同值。
 export const SERVICE_URL_MAX = 512;
+// 两类打分服务的超时边界，与 src/ov/settings.js 的 SERVICE_TIMEOUT_LIMITS 同值。
+// fallback 就是留空时的默认值，输入框的 placeholder 用它。
+export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
+  rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
+  systemone: Object.freeze({ min: 100, max: 15000, fallback: 3500 }),
+});
+// 结果行的三种开头词，与失败原因一起拼成一行字。
+export const SERVICE_TEST_TEXT = Object.freeze({
+  missing: "先填地址和模型",
+  ok: "可用",
+  bad: "不可用",
+});
+// 整对回退的两句说明，与 src/memory/recall.js 的 CHANNEL_PAIR_NOTE_* 逐字一致。
+export const CHANNEL_PAIR_NOTE_MODEL = "通道自带的模型名为空，已改用服务配置";
+export const CHANNEL_PAIR_NOTE_URL = "通道自带的地址为空，已改用服务配置";
+// 失败原因最多显示这么多个字，超出截断。
+export const SERVICE_TEST_ERROR_MAX = 120;
 // 每种通道的默认超时（ms）。与 src/memory/recall.js 的常量同值：
 // systemone 一次问完全部候选，候选越多越慢，所以给得比另两种宽。
 // 后端在没手配超时时会按候选数自适应（每条 +700，上限 8000），
@@ -67,14 +84,110 @@ export function normalizeServiceModel(value) {
   return Array.from(value.trim()).slice(0, SERVICE_MODEL_MAX).join("");
 }
 
-/** 打分服务四字段的显示值：非法地址在读取侧收敛成空串（= 未配置）。 */
+function serviceLimits(kind) {
+  return SERVICE_TIMEOUT_LIMITS[kind] || SERVICE_TIMEOUT_LIMITS.rerank;
+}
+
+/**
+ * 与 src/ov/settings.js 的 normalizeServiceTimeout 同口径：合法值给数字，
+ * 空串 / 非数字 / 越界给 null（= 用默认值）。
+ */
+export function normalizeServiceTimeout(value, kind = "rerank") {
+  const limits = serviceLimits(kind);
+  const text =
+    typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return null;
+  const ms = Math.floor(parsed);
+  if (ms < limits.min || ms > limits.max) return null;
+  return ms;
+}
+
+/** 输入框里该显示什么：没配就是空串（placeholder 会写默认值）。 */
+export function serviceTimeoutInput(value, kind = "rerank") {
+  const ms = normalizeServiceTimeout(value, kind);
+  return ms === null ? "" : String(ms);
+}
+
+/** 打分服务六字段的显示值：非法地址 / 超时在读取侧收敛成空（= 未配置）。 */
 export function paintScoringConfig(out) {
   return {
     rerankServiceUrl: normalizeServiceUrl(out?.rerankServiceUrl),
     rerankServiceModel: normalizeServiceModel(out?.rerankServiceModel),
+    rerankServiceTimeoutMs: normalizeServiceTimeout(out?.rerankServiceTimeoutMs, "rerank"),
     systemoneServiceUrl: normalizeServiceUrl(out?.systemoneServiceUrl),
     systemoneServiceModel: normalizeServiceModel(out?.systemoneServiceModel),
+    systemoneServiceTimeoutMs: normalizeServiceTimeout(
+      out?.systemoneServiceTimeoutMs,
+      "systemone",
+    ),
   };
+}
+
+/** 「测试」按钮要发的那一单：用的就是界面此刻填的值，不是已保存的配置。 */
+export function serviceTestBody(kind, { url, model, timeoutMs } = {}) {
+  const value = normalizeServiceTimeout(timeoutMs, kind);
+  return {
+    kind,
+    url: normalizeServiceUrl(url),
+    model: normalizeServiceModel(model),
+    ...(value === null ? {} : { timeoutMs: value }),
+  };
+}
+
+/**
+ * 地址与模型都填了才有可测的东西。缺任何一个，结果行直接显示「先填地址和模型」。
+ */
+export function serviceTestReady(value) {
+  const input = value && typeof value === "object" ? value : {};
+  return Boolean(textOf(input.url) && textOf(input.model));
+}
+
+function clipText(value, max) {
+  const chars = Array.from(typeof value === "string" ? value : "");
+  return chars.length <= max ? chars.join("") : chars.slice(0, max).join("");
+}
+
+/**
+ * 结果行的一句话与它的状态档：
+ *   ok   → 绿字「可用 · 187ms · bge-reranker-v2-m3」
+ *   bad  → 红字「不可用 · connect ECONNREFUSED」
+ *   muted→ 灰字「先填地址和模型」
+ *
+ * 模型名以服务端返回的为准，取不到（服务不回 model 字段）就用配置里那个。
+ */
+export function serviceTestView(result, configuredModel = "") {
+  if (!result || typeof result !== "object") {
+    return { tone: "muted", text: SERVICE_TEST_TEXT.missing };
+  }
+  if (result.ok === true) {
+    const model = normalizeServiceModel(result.model) || normalizeServiceModel(configuredModel);
+    const parts = [SERVICE_TEST_TEXT.ok, `${Math.max(0, Math.floor(Number(result.elapsedMs) || 0))}ms`];
+    if (model) parts.push(model);
+    return { tone: "ok", text: parts.join(" · ") };
+  }
+  const reason = clipText(String(result.error || "失败"), SERVICE_TEST_ERROR_MAX) || "失败";
+  return { tone: "bad", text: `${SERVICE_TEST_TEXT.bad} · ${reason}` };
+}
+
+/**
+ * 一行通道的整对说明：自己的地址与模型只填了一半时，运行时那一对会整个改用服务配置。
+ * 地址、模型都有自己的（或都没有）就没有这行字。
+ */
+export function channelPairNote(value, config) {
+  const channel = normalizeRerankChannel(value);
+  if (channel.type === "model") return "";
+  const hasUrl = Boolean(channel.url);
+  const hasModel = Boolean(channel.model);
+  if (hasUrl === hasModel) return "";
+  // 服务也没配时，这行通道根本不会生效，说明由「服务未配置」那一句接管。
+  const serviceUrl =
+    channel.type === "rerank"
+      ? normalizeServiceUrl(config?.rerankServiceUrl)
+      : normalizeServiceUrl(config?.systemoneServiceUrl);
+  if (!serviceUrl) return "";
+  return hasUrl ? CHANNEL_PAIR_NOTE_MODEL : CHANNEL_PAIR_NOTE_URL;
 }
 
 /**
@@ -96,13 +209,14 @@ export function channelTypeOptions(config) {
 }
 
 /**
- * 这一行通道运行时会不会变成废票：类型是 rerank / systemone，但通道里没写 URL、
- * 对应的打分服务也没配。留着数据不自动删，只在界面上标红。
+ * 这一行通道运行时会不会变成废票：类型是 rerank / systemone，但自己的地址与模型
+ * 没成对、对应的打分服务也没配。留着数据不自动删，只在界面上标红。
  */
 export function channelServiceMissing(value, config) {
   const channel = normalizeRerankChannel(value);
   if (channel.type === "model") return false;
-  if (normalizeServiceUrl(channel.url)) return false;
+  // 自己的地址与模型都有 = 这一行自己成对，不依赖服务配置。
+  if (channel.url && channel.model) return false;
   if (channel.type === "rerank") return !normalizeServiceUrl(config?.rerankServiceUrl);
   if (channel.type === "systemone") return !normalizeServiceUrl(config?.systemoneServiceUrl);
   return false;

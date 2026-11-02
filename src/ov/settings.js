@@ -28,8 +28,10 @@ export const DEFAULTS = {
   rerankChannels: "",
   rerankServiceUrl: "",
   rerankServiceModel: "",
+  rerankServiceTimeoutMs: "",
   systemoneServiceUrl: "",
   systemoneServiceModel: "",
+  systemoneServiceTimeoutMs: "",
 };
 
 /** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令，llm 让宿主模型判断。 */
@@ -57,6 +59,25 @@ export const RERANK_CHANNEL_URL_MAX = 512;
 
 /** 打分服务的模型名上限。服务名与通道模型名同一口径。 */
 export const SERVICE_MODEL_MAX = 128;
+
+/**
+ * 打分服务超时的边界。单位是毫秒，给的是「一次打分请求」的上限，不是整轮召回。
+ *
+ * fallback 是留空时的默认值：精排一份候选一次往返，800 够；决策服务一次问完全部
+ * 候选、每问一次都是前向，所以给到 3500。越界的值不夹到边界上，而是回默认值——
+ * 用户把 99999 填进来通常是想「别超时」，悄悄夹成 10000 会让原因更难查。
+ */
+export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
+  rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
+  systemone: Object.freeze({ min: 100, max: 15000, fallback: 3500 }),
+});
+
+/** 两类打分服务的名字。路由与界面按它取边界，认不出来的一律按精排那组。 */
+export const SERVICE_KINDS = Object.freeze(["rerank", "systemone"]);
+
+function serviceLimits(kind) {
+  return SERVICE_TIMEOUT_LIMITS[kind] || SERVICE_TIMEOUT_LIMITS.rerank;
+}
 
 /** 自定义提示词上限。超过这个长度的存量值在读取侧截断，POST 侧整单拒绝。 */
 export const GATE_PROMPT_MAX = 2000;
@@ -147,6 +168,54 @@ export function normalizeServiceUrl(raw) {
 export function normalizeServiceModel(raw) {
   if (typeof raw !== "string") return "";
   return Array.from(raw.trim()).slice(0, SERVICE_MODEL_MAX).join("");
+}
+
+/**
+ * 打分服务超时的归一化：合法值给数字，空串 / 非数字 / 越界给 null（= 用默认值）。
+ *
+ * 返回 null 而不是默认值，是为了让「没配」和「配了正好等于默认值」能区分开：
+ * systemone 那一路在没配时要按候选数自适应，配了就不再自适应。
+ */
+export function normalizeServiceTimeout(raw, kind = "rerank") {
+  const limits = serviceLimits(kind);
+  const text =
+    typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!text) return null;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return null;
+  const ms = Math.floor(parsed);
+  if (ms < limits.min || ms > limits.max) return null;
+  return ms;
+}
+
+/** 读数：归一化拿不到数字时用该类型的默认值（精排 800 / 决策 3500）。 */
+export function serviceTimeoutOrDefault(raw, kind = "rerank") {
+  const value = normalizeServiceTimeout(raw, kind);
+  return value === null ? serviceLimits(kind).fallback : value;
+}
+
+/** 写回配置的形状：合法值存数字串，非法值存空串（= 回默认值，不留非法值）。 */
+export function serializeServiceTimeout(raw, kind = "rerank") {
+  const value = normalizeServiceTimeout(raw, kind);
+  return value === null ? "" : String(value);
+}
+
+/**
+ * 地址与模型成对：配了地址就必须填模型名，清空时两个一起清。
+ *
+ * 只看最终生效的那一对（请求体里的值叠在已存值上），所以「先存地址、再补模型」
+ * 两步提交不会被拆成一次非法状态。只给模型不给地址是允许的：地址为空等于该服务
+ * 未配置，孤立的模型名不会拿去拼端点（见 resolveRerankChannel 的整对回退）。
+ *
+ * 返回错误文案，null 表示这一对没问题。
+ */
+export function servicePairError(url, model, urlField, modelField) {
+  const hasUrl = Boolean(normalizeServiceUrl(url));
+  const hasModel = Boolean(normalizeServiceModel(model));
+  if (hasUrl && !hasModel) {
+    return `${urlField} 配了地址就要填模型名（${modelField}）`;
+  }
+  return null;
 }
 
 /**
@@ -335,8 +404,17 @@ export async function readSwitches(sdk) {
     }),
     rerankServiceUrl: normalizeServiceUrl(await read(sdk, "rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await read(sdk, "rerankServiceModel")),
+    // null = 没配（用默认值）；数字 = 用户配的那个。运行时靠这个区分「没配」与「配了默认值」。
+    rerankServiceTimeoutMs: normalizeServiceTimeout(
+      await read(sdk, "rerankServiceTimeoutMs"),
+      "rerank",
+    ),
     systemoneServiceUrl: normalizeServiceUrl(await read(sdk, "systemoneServiceUrl")),
     systemoneServiceModel: normalizeServiceModel(await read(sdk, "systemoneServiceModel")),
+    systemoneServiceTimeoutMs: normalizeServiceTimeout(
+      await read(sdk, "systemoneServiceTimeoutMs"),
+      "systemone",
+    ),
   };
 }
 

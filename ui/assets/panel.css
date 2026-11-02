@@ -283,6 +283,8 @@ html, body {
 }
 @media (max-width: 760px) {
   .service-grid { grid-template-columns: 1fr; }
+  /* 窄屏下四项拆成两行：地址 + 模型一行，超时 + 测试一行。 */
+  .service-fields { grid-template-columns: 1fr 1fr; }
 }
 .service {
   display: grid;
@@ -295,12 +297,38 @@ html, body {
 }
 .service-fields {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: 1.4fr 1fr 0.62fr auto;
+  align-items: end;
   gap: 8px;
   min-width: 0;
 }
 .service-fields .field { margin-bottom: 0; }
+/* 超时那一格只放三四个数字，不跟地址抢宽度。 */
+.service-fields .field.narrow input { min-width: 0; }
+.service-fields .field.service-test {
+  display: flex;
+  align-items: flex-end;
+}
 .service .field-hint { margin: 0; }
+/* 测试结果一行：绿 / 红 / 灰三档共用这个容器，颜色只表达状态，不改字号换行。
+   iframe 里没有宿主主题变量，一律用中性 rgba。 */
+.service-result {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.service-result.ok { color: #5d7d56; }
+.service-result.bad { color: #b8564d; }
+.service-result.muted { color: currentColor; opacity: 0.45; }
+
+/* ---------- 通道的整对回退说明 ---------- */
+.channel-pair-note {
+  font-size: 10.5px;
+  line-height: 1.4;
+  opacity: 0.55;
+  margin: 0;
+}
 
 /* ---------- 召回管理（下拉 + peer 名单） ---------- */
 

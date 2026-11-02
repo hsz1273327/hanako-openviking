@@ -124,7 +124,13 @@
           "rerankServiceModel": {
             "type": "string",
             "title": "精排服务模型",
-            "description": "精排服务上的模型名，例如 bge-reranker-v2-m3。允许留空（有的服务只有一个模型），最长 128 字符。",
+            "description": "精排服务上的模型名，例如 bge-reranker-v2-m3。地址与模型成对：配了地址就必须填模型名。最长 128 字符。",
+            "default": ""
+          },
+          "rerankServiceTimeoutMs": {
+            "type": "string",
+            "title": "精排服务超时",
+            "description": "一次 /v1/rerank 请求的超时（ms），留空用默认 800，可填 100 到 10000。越界或非数字按默认值处理。",
             "default": ""
           },
           "systemoneServiceUrl": {
@@ -136,7 +142,13 @@
           "systemoneServiceModel": {
             "type": "string",
             "title": "决策服务模型",
-            "description": "决策服务上的模型名，例如 kev-4b。允许留空（有的服务只有一个模型），最长 128 字符。",
+            "description": "决策服务上的模型名，例如 kev-4b。地址与模型成对：配了地址就必须填模型名。最长 128 字符。",
+            "default": ""
+          },
+          "systemoneServiceTimeoutMs": {
+            "type": "string",
+            "title": "决策服务超时",
+            "description": "一次 /v1/systemone 请求的超时（ms），留空用默认 3500，可填 100 到 15000。越界或非数字按默认值处理。",
             "default": ""
           },
           "queryMode": {

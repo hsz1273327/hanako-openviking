@@ -40,7 +40,11 @@ import {
   normalizeRerankModel,
   normalizeRerankPrompt,
   normalizeServiceModel,
+  normalizeServiceTimeout,
   normalizeServiceUrl,
+  serializeServiceTimeout,
+  servicePairError,
+  serviceTimeoutOrDefault,
   parseRerankChannel,
   parseRerankChannels,
   serializeRerankChannels,
@@ -51,6 +55,7 @@ import {
   RERANK_MODES,
   RERANK_PROMPT_MAX,
   SERVICE_MODEL_MAX,
+  SERVICE_TIMEOUT_LIMITS,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { createProbe } from "../src/probe.js";
@@ -87,6 +92,7 @@ import {
   rerankChannelsOf,
   resolveRerankChannel,
   normalizeChannelScores,
+  squashRerankScores,
   mergeRerankScores,
   rankRerankIndexes,
   runRerankChannels,
@@ -96,6 +102,9 @@ import {
   buildSystemOneState,
   systemoneInstructions,
   systemoneTimeoutFor,
+  testScoringService,
+  CHANNEL_PAIR_NOTE_MODEL,
+  CHANNEL_PAIR_NOTE_URL,
   SYSTEMONE_MAX_CANDIDATES,
   SYSTEMONE_CHANNEL_TIMEOUT_MS,
   SYSTEMONE_TIMEOUT_MAX_MS,
@@ -146,8 +155,18 @@ import {
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
+  CHANNEL_PAIR_NOTE_MODEL as UI_CHANNEL_PAIR_NOTE_MODEL,
+  CHANNEL_PAIR_NOTE_URL as UI_CHANNEL_PAIR_NOTE_URL,
+  SERVICE_TEST_TEXT as UI_SERVICE_TEST_TEXT,
+  SERVICE_TIMEOUT_LIMITS as UI_SERVICE_TIMEOUT_LIMITS,
   SERVICE_MODEL_MAX as UI_SERVICE_MODEL_MAX,
   SERVICE_URL_MAX as UI_SERVICE_URL_MAX,
+  channelPairNote as uiChannelPairNote,
+  normalizeServiceTimeout as uiNormalizeServiceTimeout,
+  serviceTestBody as uiServiceTestBody,
+  serviceTestReady as uiServiceTestReady,
+  serviceTestView as uiServiceTestView,
+  serviceTimeoutInput as uiServiceTimeoutInput,
   SYSTEMONE_TIMEOUT_MAX as UI_SYSTEMONE_TIMEOUT_MAX,
   SYSTEMONE_TIMEOUT_BASE as UI_SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_STEP as UI_SYSTEMONE_TIMEOUT_STEP,
@@ -1875,6 +1894,87 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
     ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "kev-4b"],
   );
+
+  // ---- 打分服务超时：空 / 非数字 / 越界一律回默认值，不留非法值 ----
+  eq("精排与决策的默认超时", [
+    SERVICE_TIMEOUT_LIMITS.rerank.fallback,
+    SERVICE_TIMEOUT_LIMITS.systemone.fallback,
+  ], [800, 3500]);
+  eq("精排超时可填区间", [SERVICE_TIMEOUT_LIMITS.rerank.min, SERVICE_TIMEOUT_LIMITS.rerank.max], [100, 10000]);
+  eq("决策超时可填区间", [
+    SERVICE_TIMEOUT_LIMITS.systemone.min,
+    SERVICE_TIMEOUT_LIMITS.systemone.max,
+  ], [100, 15000]);
+  eq("超时字符串归一成数字", normalizeServiceTimeout(" 1200 ", "rerank"), 1200);
+  eq("数字也能归一", normalizeServiceTimeout(1200, "rerank"), 1200);
+  eq("小数向下取整", normalizeServiceTimeout("1200.9", "rerank"), 1200);
+  eq("空串 = 没配（null，不是 800）", normalizeServiceTimeout("   ", "rerank"), null);
+  eq("非数字 = 没配", normalizeServiceTimeout("abc", "rerank"), null);
+  eq("低于下限 = 没配", normalizeServiceTimeout(99, "rerank"), null);
+  eq("高于上限 = 没配", normalizeServiceTimeout(10001, "rerank"), null);
+  eq("决策那组的上限更宽", normalizeServiceTimeout(12000, "systemone"), 12000);
+  eq("同一个值对精排越界", normalizeServiceTimeout(12000, "rerank"), null);
+  eq("认不出的类型按精排那组", normalizeServiceTimeout("99999", "nope"), null);
+  eq("未配置取默认值", [
+    serviceTimeoutOrDefault("", "rerank"),
+    serviceTimeoutOrDefault(null, "systemone"),
+  ], [800, 3500]);
+  eq("配了就用自己的", [
+    serviceTimeoutOrDefault("1200", "rerank"),
+    serviceTimeoutOrDefault(9000, "systemone"),
+  ], [1200, 9000]);
+  eq("写回：合法值存数字串", serializeServiceTimeout("1200", "rerank"), "1200");
+  eq("写回：非法值存空串（= 回默认值，不留非法值）", [
+    serializeServiceTimeout("99999", "rerank"),
+    serializeServiceTimeout("abc", "systemone"),
+    serializeServiceTimeout("", "rerank"),
+  ], ["", "", ""]);
+
+  const timeouts = await readSwitches(
+    sdkWith({ rerankServiceTimeoutMs: "1200", systemoneServiceTimeoutMs: "99999" }),
+  );
+  eq(
+    "readSwitches 读超时：合法的给数字，越界的当没配",
+    [timeouts.rerankServiceTimeoutMs, timeouts.systemoneServiceTimeoutMs],
+    [1200, null],
+  );
+  const noTimeouts = await readSwitches(sdkWith({}));
+  eq(
+    "没配超时时两项都是 null（运行时靠它区分「没配」与「配了默认值」）",
+    [noTimeouts.rerankServiceTimeoutMs, noTimeouts.systemoneServiceTimeoutMs],
+    [null, null],
+  );
+  eq("DEFAULTS 里两个超时默认空", [
+    DEFAULTS.rerankServiceTimeoutMs,
+    DEFAULTS.systemoneServiceTimeoutMs,
+  ], ["", ""]);
+
+  // ---- 地址与模型成对 ----
+  eq(
+    "地址 + 模型齐全就放行",
+    servicePairError("http://h:8098", "bge", "rerankServiceUrl", "rerankServiceModel"),
+    null,
+  );
+  eq(
+    "只给地址 400 理由写明配了地址就要填模型名",
+    servicePairError("http://h:8098", "", "rerankServiceUrl", "rerankServiceModel"),
+    "rerankServiceUrl 配了地址就要填模型名（rerankServiceModel）",
+  );
+  eq(
+    "只给模型不拦（地址空 = 服务未配置）",
+    servicePairError("", "bge", "rerankServiceUrl", "rerankServiceModel"),
+    null,
+  );
+  eq(
+    "两个都空 = 都清空，不拦",
+    servicePairError("", "", "systemoneServiceUrl", "systemoneServiceModel"),
+    null,
+  );
+  eq(
+    "非法地址不算配了地址（由 URL 校验先报）",
+    servicePairError("ftp://h", "", "rerankServiceUrl", "rerankServiceModel"),
+    null,
+  );
 }
 
 // ================= ui: 召回策略在主面板 =================
@@ -2015,11 +2115,53 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   for (const id of [
     "rerankServiceUrl",
     "rerankServiceModel",
+    "rerankServiceTimeoutMs",
+    "rerankServiceTest",
+    "rerankServiceResult",
     "systemoneServiceUrl",
     "systemoneServiceModel",
+    "systemoneServiceTimeoutMs",
+    "systemoneServiceTest",
+    "systemoneServiceResult",
   ]) {
     check(`打分服务字段 ${id} 在`, new RegExp(`id="${id}"`).test(html));
   }
+
+  // 每组服务四项：地址 / 模型 / 超时 / 测试。按两个组的切片数控件，不靠整页数。
+  const rerankGroupStart = html.indexOf('data-kind="rerank"');
+  const systemoneGroupStart = html.indexOf('data-kind="systemone"');
+  check("两组服务都有 data-kind 标记", rerankGroupStart > 0 && systemoneGroupStart > rerankGroupStart);
+  const rerankGroup = html.slice(rerankGroupStart, systemoneGroupStart);
+  const systemoneGroup = html.slice(systemoneGroupStart, html.indexOf('class="scoped-note"'));
+  for (const [name, group] of [
+    ["精排服务", rerankGroup],
+    ["决策服务", systemoneGroup],
+  ]) {
+    eq(`${name}三个输入框（地址 / 模型 / 超时）`, (group.match(/<input /g) || []).length, 3);
+    eq(`${name}一个测试按钮`, (group.match(/<button /g) || []).length, 1);
+    check(`${name}的测试按钮写着「测试」`, />测试<\/button>/.test(group), group.slice(0, 80));
+    eq(`${name}一个结果行`, (group.match(/class="service-result"/g) || []).length, 1);
+    check(`${name}的结果行默认隐藏`, /class="service-result" hidden/.test(group));
+    check(`${name}的超时输入框是数字框`, /type="number"/.test(group));
+  }
+  eq(
+    "精排超时 placeholder 写默认值与单位",
+    /id="rerankServiceTimeoutMs"[^>]*placeholder="800 ms"/.test(html),
+    true,
+  );
+  eq(
+    "决策超时 placeholder 写默认值与单位",
+    /id="systemoneServiceTimeoutMs"[^>]*placeholder="3500 ms"/.test(html),
+    true,
+  );
+  eq(
+    "两个超时输入框的上下限跟着各自类型",
+    [
+      /id="rerankServiceTimeoutMs"[^>]*max="10000"/.test(html),
+      /id="systemoneServiceTimeoutMs"[^>]*max="15000"/.test(html),
+    ],
+    [true, true],
+  );
   check(
     "精排服务两个占位文案在",
     html.includes('placeholder="http://127.0.0.1:8098"') &&
@@ -2041,6 +2183,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("打分服务有样式", /\n\.services \{/.test(css));
   check("服务两栏有栅格", /\n\.service-grid \{/.test(css) && /1fr 1fr/.test(css));
   check("总闸关着时打分服务也置灰", panelJs.includes('#scoringServices'));
+  // 四项一排：地址 / 模型 / 窄的超时 / 测试。
+  check(
+    "服务行是四列栅格（超时窄、按钮自宽）",
+    /\n\.service-fields \{[\s\S]{0,200}grid-template-columns:\s*1\.4fr 1fr 0\.62fr auto/.test(css),
+  );
+  check("测试按钮靠底对齐", /\.field\.service-test \{[\s\S]{0,120}align-items:\s*flex-end/.test(css));
+  for (const tone of ["ok", "bad", "muted"]) {
+    check(`结果行的 ${tone} 档有样式`, new RegExp(`\\.service-result\\.${tone} \\{`).test(css));
+  }
+  check("结果行样式存在", /\n\.service-result \{/.test(css));
+  check("整对回退说明有样式", /\n\.channel-pair-note \{/.test(css));
+
+  // 前端的接线点：新路由、测试函数、结果行与回退说明。
+  check("面板往 service-test 发请求", panelJs.includes('/recall-mode/service-test'));
+  check("面板有服务测试的执行函数", /async function runServiceTest\(kind\)/.test(panelJs));
+  check("测试按钮进 loading 并禁用", /button\.disabled = true/.test(panelJs) &&
+    panelJs.includes('"测试中…"'));
+  check("两个测试按钮都绑上了", /for \(const \[kind, buttonId\] of SERVICE_TESTS\)/.test(panelJs));
+  check("结果行按 tone 上色", /service-result \$\{view\.tone\}/.test(panelJs));
+  check("通道行会画整对回退说明", panelJs.includes("channelPairNote(channel, layers)"));
 
   // 通道空态文案不能指向“下面”：打分服务在通道上面。
   check("添加通道旁提示指向上面", html.includes("先在上面配好打分服务"));
@@ -2231,6 +2393,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "超时那一格注明候选越多越慢",
     html.includes("超时（ms）") && html.includes("候选越多越慢"),
   );
+  check(
+    "通道说明写清超时三层优先级",
+    html.includes("通道自带 &gt; 服务配置 &gt; 类型默认值"),
+    html.slice(html.indexOf("超时优先级") - 40, html.indexOf("超时优先级") + 60),
+  );
+  check(
+    "通道说明写清地址与模型成对",
+    html.includes("通道自带的地址与模型成对生效，只填一半就整对改用服务配置"),
+  );
   // 两份默认模板各只有一份：HTML 里零份，recall-layers.js 里恰好一份。
   check("判断默认模板不在 HTML 里", html.includes(DEFAULT_GATE_PROMPT) === false);
   check("重排默认模板不在 HTML 里", html.includes(DEFAULT_RERANK_PROMPT) === false);
@@ -2283,6 +2454,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("manifest 里 rerankServiceModel 默认空", props.rerankServiceModel?.default, "");
   eq("manifest 里 systemoneServiceUrl 默认空", props.systemoneServiceUrl?.default, "");
   eq("manifest 里 systemoneServiceModel 默认空", props.systemoneServiceModel?.default, "");
+  eq("manifest 里 rerankServiceTimeoutMs 默认空", props.rerankServiceTimeoutMs?.default, "");
+  eq("manifest 里 systemoneServiceTimeoutMs 默认空", props.systemoneServiceTimeoutMs?.default, "");
+  check(
+    "manifest 的超时说明写了默认值与可填区间",
+    String(props.rerankServiceTimeoutMs?.description).includes("800") &&
+      String(props.rerankServiceTimeoutMs?.description).includes("100") &&
+      String(props.rerankServiceTimeoutMs?.description).includes("10000") &&
+      String(props.systemoneServiceTimeoutMs?.description).includes("3500") &&
+      String(props.systemoneServiceTimeoutMs?.description).includes("15000"),
+    JSON.stringify([props.rerankServiceTimeoutMs?.description, props.systemoneServiceTimeoutMs?.description]),
+  );
+  check(
+    "manifest 里每个 DEFAULTS 键都有声明（新增配置不能只活在代码里）",
+    Object.keys(DEFAULTS).every((key) => props[key] !== undefined),
+    Object.keys(DEFAULTS).filter((key) => props[key] === undefined).join(", "),
+  );
   check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
 }
 
@@ -2419,8 +2606,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankChannels: [],
     rerankServiceUrl: "",
     rerankServiceModel: "",
+    rerankServiceTimeoutMs: null,
     systemoneServiceUrl: "",
     systemoneServiceModel: "",
+    systemoneServiceTimeoutMs: null,
   });
 
   // ---- 重排配置的归一化与草稿 ----
@@ -2519,16 +2708,109 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     paintScoringConfig({
       rerankServiceUrl: "  http://127.0.0.1:8098///  ",
       rerankServiceModel: "  bge-reranker-v2-m3  ",
+      rerankServiceTimeoutMs: "  1200  ",
       systemoneServiceUrl: "ftp://nope",
       systemoneServiceModel: "kev-4b",
+      systemoneServiceTimeoutMs: "99999",
     }),
     {
       rerankServiceUrl: "http://127.0.0.1:8098",
       rerankServiceModel: "bge-reranker-v2-m3",
+      rerankServiceTimeoutMs: 1200,
       systemoneServiceUrl: "",
       systemoneServiceModel: "kev-4b",
+      systemoneServiceTimeoutMs: null,
     },
   );
+  // ---- 打分服务的超时：前后端同口径 ----
+  eq("超时边界与后端同值", UI_SERVICE_TIMEOUT_LIMITS, SERVICE_TIMEOUT_LIMITS);
+  eq("超时默认值与后端同值", [
+    UI_SERVICE_TIMEOUT_LIMITS.rerank.fallback,
+    UI_SERVICE_TIMEOUT_LIMITS.systemone.fallback,
+  ], [800, 3500]);
+  eq("界面侧超时归一与后端一致（合法）", uiNormalizeServiceTimeout(" 1200 ", "rerank"), 1200);
+  eq("界面侧超时归一与后端一致（越界回 null）", [
+    uiNormalizeServiceTimeout("99999", "rerank"),
+    uiNormalizeServiceTimeout("abc", "systemone"),
+    uiNormalizeServiceTimeout("", "rerank"),
+  ], [null, null, null]);
+  eq("输入框：没配就是空串", uiServiceTimeoutInput(null, "rerank"), "");
+  eq("输入框：配了就是数字串", uiServiceTimeoutInput(1200, "systemone"), "1200");
+  eq("输入框：越界当没配", uiServiceTimeoutInput("99999", "rerank"), "");
+
+  // ---- 「测试」按钮的两件纯逻辑：发什么、怎么显示 ----
+  eq(
+    "测试请求用界面此刻的值，地址去尾斜杠、超时归一",
+    uiServiceTestBody("rerank", {
+      url: "  http://127.0.0.1:8098///  ",
+      model: "  bge-reranker-v2-m3  ",
+      timeoutMs: "1200",
+    }),
+    {
+      kind: "rerank",
+      url: "http://127.0.0.1:8098",
+      model: "bge-reranker-v2-m3",
+      timeoutMs: 1200,
+    },
+  );
+  eq(
+    "超时没填就不带这个键（服务端按类型给默认值）",
+    "timeoutMs" in uiServiceTestBody("systemone", { url: "http://h:1", model: "kev-4b" }),
+    false,
+  );
+  eq(
+    "地址与模型都填了才算可测",
+    [
+      uiServiceTestReady({ url: "http://h:1", model: "kev-4b" }),
+      uiServiceTestReady({ url: "http://h:1", model: "  " }),
+      uiServiceTestReady({ url: "", model: "kev-4b" }),
+      uiServiceTestReady(null),
+    ],
+    [true, false, false, false],
+  );
+
+  eq(
+    "成功行：可用 · 187ms · 服务端返回的模型名",
+    uiServiceTestView({ ok: true, elapsedMs: 187, model: "bge-reranker-v2-m3" }, "configured"),
+    { tone: "ok", text: "可用 · 187ms · bge-reranker-v2-m3" },
+  );
+  eq(
+    "成功行：服务端不回模型名就用配的那个",
+    uiServiceTestView({ ok: true, elapsedMs: 42, model: null }, "kev-4b"),
+    { tone: "ok", text: "可用 · 42ms · kev-4b" },
+  );
+  eq(
+    "成功行：两边都没有就不编一个模型名",
+    uiServiceTestView({ ok: true, elapsedMs: 9, model: null }, ""),
+    { tone: "ok", text: "可用 · 9ms" },
+  );
+  eq(
+    "失败行：原文照抄错误",
+    uiServiceTestView({ ok: false, elapsedMs: 12, error: "connect ECONNREFUSED 127.0.0.1:8098" }),
+    { tone: "bad", text: "不可用 · connect ECONNREFUSED 127.0.0.1:8098" },
+  );
+  eq(
+    "失败行：错误截到 120 字",
+    Array.from(
+      uiServiceTestView({ ok: false, error: "x".repeat(200) }).text.replace("不可用 · ", ""),
+    ).length,
+    120,
+  );
+  eq(
+    "失败行：没错误原文也不空着",
+    uiServiceTestView({ ok: false }).text,
+    "不可用 · 失败",
+  );
+  eq("未配置行：先填地址和模型", uiServiceTestView(null), {
+    tone: "muted",
+    text: "先填地址和模型",
+  });
+  eq(
+    "三档开头词与文案常量一致",
+    [UI_SERVICE_TEST_TEXT.ok, UI_SERVICE_TEST_TEXT.bad, UI_SERVICE_TEST_TEXT.missing],
+    ["可用", "不可用", "先填地址和模型"],
+  );
+
   eq(
     "只配精排 -> 精排服务 + 宿主模型",
     channelTypeOptions({ rerankServiceUrl: "http://h:8098" }).map((option) => option.value),
@@ -2578,10 +2860,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     }),
     false,
   );
-  eq(
-    "通道自带 URL 时不再依赖服务",
+  check(
+    "通道自己的地址与模型成对时不再依赖服务",
+    channelServiceMissing({ type: "systemone", url: "http://h:8097", model: "kev-4b" }, {}) === false,
+  );
+  check(
+    "只填地址（老配置）时仍依赖服务：服务没配就是废票",
     channelServiceMissing({ type: "systemone", url: "http://h:8097" }, {}),
-    false,
   );
 
   // 运行时端点优先级：通道自带 > 打分服务配置。
@@ -2636,6 +2921,133 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ),
     ),
     ["", "p/m"],
+  );
+
+  // ---- 整对回退：地址与模型要么都有、要么都不用 ----
+  const serviceRerank = {
+    rerankServiceUrl: "http://service:2",
+    rerankServiceModel: "service-model",
+  };
+  {
+    const both = resolveRerankChannel(
+      { type: "rerank", url: "http://channel:1", model: "channel-model" },
+      serviceRerank,
+    );
+    eq("整对都在：地址用通道自己的", both.url, "http://channel:1");
+    eq("整对都在：模型也用通道自己的", both.model, "channel-model");
+    eq("整对都在：不显示回退说明", both.pairNote, undefined);
+  }
+  {
+    // 老配置：只填了地址，没填模型名。整对改用服务配置。
+    const urlOnly = resolveRerankChannel(
+      { type: "rerank", url: "http://channel:1" },
+      serviceRerank,
+    );
+    eq("只给地址：地址改用服务配置", urlOnly.url, "http://service:2");
+    eq("只给地址：模型也用服务配置（不配自己的地址）", urlOnly.model, "service-model");
+    eq("只给地址：给出回退说明", urlOnly.pairNote, CHANNEL_PAIR_NOTE_MODEL);
+    eq(
+      "回退说明就是任务书那句",
+      CHANNEL_PAIR_NOTE_MODEL,
+      "通道自带的模型名为空，已改用服务配置",
+    );
+    eq("前后两份回退说明逐字一致（模型那半）", CHANNEL_PAIR_NOTE_MODEL, UI_CHANNEL_PAIR_NOTE_MODEL);
+  }
+  {
+    const modelOnly = resolveRerankChannel(
+      { type: "systemone", model: "kev-4b" },
+      {
+        systemoneServiceUrl: "http://service:3",
+        systemoneServiceModel: "service-model",
+      },
+    );
+    eq("只给模型：地址用服务配置", modelOnly.url, "http://service:3");
+    eq("只给模型：模型也用服务配置（不拿孤立模型去拼）", modelOnly.model, "service-model");
+    eq("只给模型：说明写的是地址为空", modelOnly.pairNote, CHANNEL_PAIR_NOTE_URL);
+    eq("前后两份回退说明逐字一致（地址那半）", CHANNEL_PAIR_NOTE_URL, UI_CHANNEL_PAIR_NOTE_URL);
+  }
+  {
+    const orphan = resolveRerankChannel({ type: "rerank", url: "http://channel:1" }, {});
+    eq("只给地址且服务也没配：整对为空", [orphan.url, orphan.model], ["", ""]);
+    eq("这种时候不说「已改用服务配置」", orphan.pairNote, undefined);
+  }
+  eq(
+    "界面侧的整对说明与后端同一口径（只给地址）",
+    uiChannelPairNote({ type: "rerank", url: "http://channel:1" }, serviceRerank),
+    CHANNEL_PAIR_NOTE_MODEL,
+  );
+  eq(
+    "界面侧的整对说明与后端同一口径（只给模型）",
+    uiChannelPairNote({ type: "systemone", model: "kev-4b" }, {
+      systemoneServiceUrl: "http://service:3",
+    }),
+    CHANNEL_PAIR_NOTE_URL,
+  );
+  eq(
+    "界面侧：整对都在时不显示说明",
+    uiChannelPairNote(
+      { type: "rerank", url: "http://channel:1", model: "channel-model" },
+      serviceRerank,
+    ),
+    "",
+  );
+  eq(
+    "界面侧：服务也没配时不显示说明（那一行已经标红了）",
+    uiChannelPairNote({ type: "rerank", url: "http://channel:1" }, {}),
+    "",
+  );
+  eq(
+    "界面侧：宿主模型通道不参与整对回退",
+    uiChannelPairNote({ type: "model", url: "http://channel:1" }, serviceRerank),
+    "",
+  );
+
+  // ---- 超时优先级：三层逐一验（读值，不发请求） ----
+  eq(
+    "通道自带的超时压过服务配置",
+    resolveRerankChannel(
+      { type: "rerank", timeoutMs: 1200 },
+      { ...serviceRerank, rerankServiceTimeoutMs: 900 },
+    ).timeoutMs,
+    1200,
+  );
+  eq(
+    "通道没填时用服务配置的超时",
+    resolveRerankChannel(
+      { type: "systemone" },
+      {
+        systemoneServiceUrl: "http://s:2",
+        systemoneServiceModel: "m",
+        systemoneServiceTimeoutMs: 2000,
+      },
+    ).timeoutMs,
+    2000,
+  );
+  eq(
+    "两边都没配就不塞 timeoutMs（留给默认值 / 自适应）",
+    "timeoutMs" in resolveRerankChannel({ type: "systemone" }, {}),
+    false,
+  );
+  eq(
+    "systemone 服务超时压过自适应",
+    systemoneTimeoutFor(
+      resolveRerankChannel({ type: "systemone" }, { systemoneServiceTimeoutMs: 2000 }),
+      5,
+    ),
+    2000,
+  );
+  eq(
+    "没配服务超时时 systemone 仍按候选数自适应",
+    systemoneTimeoutFor(resolveRerankChannel({ type: "systemone" }, {}), 6),
+    4200,
+  );
+  eq(
+    "存量里越界的服务超时当没配（回到自适应）",
+    systemoneTimeoutFor(
+      resolveRerankChannel({ type: "systemone" }, { systemoneServiceTimeoutMs: 99999 }),
+      5,
+    ),
+    3500,
   );
 
   // 模型目录 -> 选项：一步选到位，文案带 provider，值形如 provider/id。
@@ -3531,6 +3943,98 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("空串清空通道", clearedChannels.status, 200);
   eq("清空后落库为空串", store.rerankChannels, "");
   eq("清空后回显空数组", clearedChannels.body.rerankChannels, []);
+
+  // ---- 地址与模型成对：有地址无模型 400、零写入 ----
+  writes.length = 0;
+  const urlOnly = await post({ rerankServiceUrl: "http://127.0.0.1:8098" });
+  eq("有地址无模型 400", urlOnly.status, 400);
+  check(
+    "拒绝理由写明配了地址就要填模型名",
+    String(urlOnly.body.error || "").includes("配了地址就要填模型名"),
+    urlOnly.body.error,
+  );
+  eq("有地址无模型零写入", writes.length, 0);
+  eq("旧地址没被写进去", store.rerankServiceUrl ?? "", "");
+
+  writes.length = 0;
+  const modelOnly = await post({ systemoneServiceModel: "kev-4b" });
+  eq("只有模型时照旧可写", modelOnly.status, 200);
+  eq("孤立模型名可以落库", store.systemoneServiceModel, "kev-4b");
+
+  // 两步提交：先存模型、再补地址，也能过。
+  writes.length = 0;
+  const stepOne = await post({ rerankServiceModel: "bge-reranker-v2-m3" });
+  eq("第一步：先存模型", stepOne.status, 200);
+  const stepTwo = await post({ rerankServiceUrl: "http://127.0.0.1:8098" });
+  eq("第二步：补上地址", stepTwo.status, 200);
+  eq(
+    "两步之后是一对完整的值",
+    [store.rerankServiceUrl, store.rerankServiceModel],
+    ["http://127.0.0.1:8098", "bge-reranker-v2-m3"],
+  );
+
+  // 存量里已经有「有地址缺模型」时，改别的键不能被连坐。
+  store.systemoneServiceUrl = "http://192.168.50.142:8097";
+  store.systemoneServiceModel = "";
+  writes.length = 0;
+  const otherKey = await post({ queryMode: "last" });
+  eq("没动那一对时不被存量老配置连坐", otherKey.status, 200);
+  store.systemoneServiceUrl = "";
+
+  // 清空时两个一起清。
+  writes.length = 0;
+  const clearedPair = await post({ rerankServiceUrl: "", rerankServiceModel: "" });
+  eq("成对清空", clearedPair.status, 200);
+  eq("清空后两个都是空串", [store.rerankServiceUrl, store.rerankServiceModel], ["", ""]);
+
+  // ---- 超时字段：非法值回默认、不留在配置里 ----
+  eq("GET 未配置时两个超时是 null", [
+    (await get()).body.rerankServiceTimeoutMs,
+    (await get()).body.systemoneServiceTimeoutMs,
+  ], [null, null]);
+
+  writes.length = 0;
+  const timeoutOk = await post({
+    rerankServiceTimeoutMs: "1200",
+    systemoneServiceTimeoutMs: 2000,
+  });
+  eq("超时可写", timeoutOk.status, 200);
+  eq("超时落库成数字串", [store.rerankServiceTimeoutMs, store.systemoneServiceTimeoutMs], [
+    "1200",
+    "2000",
+  ]);
+  eq("GET 回显超时为数字", [
+    timeoutOk.body.rerankServiceTimeoutMs,
+    timeoutOk.body.systemoneServiceTimeoutMs,
+  ], [1200, 2000]);
+  check(
+    "applied 列出超时字段",
+    timeoutOk.body.applied.includes("rerankServiceTimeoutMs") &&
+      timeoutOk.body.applied.includes("systemoneServiceTimeoutMs"),
+  );
+
+  writes.length = 0;
+  const timeoutOutOfRange = await post({ rerankServiceTimeoutMs: "99999" });
+  eq("超时越界不报错", timeoutOutOfRange.status, 200);
+  eq("超时越界落库为空串（= 回默认值）", store.rerankServiceTimeoutMs, "");
+  eq("越界后 GET 回 null", timeoutOutOfRange.body.rerankServiceTimeoutMs, null);
+
+  writes.length = 0;
+  const timeoutNumeric = await post({ systemoneServiceTimeoutMs: "abc" });
+  eq("非数字超时不报错", timeoutNumeric.status, 200);
+  eq("非数字超时也不留在配置里", store.systemoneServiceTimeoutMs, "");
+
+  writes.length = 0;
+  const timeoutBadType = await post({ rerankServiceTimeoutMs: { ms: 1200 } });
+  eq("超时类型不对（对象）400", timeoutBadType.status, 400);
+  eq("超时类型不对零写入", writes.length, 0);
+
+  // 面板清空那一格时发的是 null（归一化之后的形状），不能当成类型错。
+  writes.length = 0;
+  const timeoutCleared = await post({ rerankServiceTimeoutMs: null });
+  eq("null = 清空这一格", timeoutCleared.status, 200);
+  eq("清空后落库为空串", store.rerankServiceTimeoutMs, "");
+  eq("清空后 GET 回 null", timeoutCleared.body.rerankServiceTimeoutMs, null);
 }
 
 // ================= routes: 精排通道测试按钮 =================
@@ -3603,6 +4107,197 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   ]);
 
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= routes: 打分服务的连通性测试 =================
+{
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const store = {};
+  const writes = [];
+  const calls = [];
+  // 每个用例换一次：这就是“那个服务此刻怎么回应”的全部。
+  let respond = async () => new Response("{}", { status: 200 });
+  const ctx = {
+    config: {
+      get: async (key) => store[key],
+      set: async (key, value) => {
+        writes.push([key, value]);
+        store[key] = value;
+      },
+    },
+    network: {
+      fetch: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return respond(url, init);
+      },
+    },
+  };
+  registerRecallModeRoutes(app, ctx);
+  const test = (body) =>
+    handlers["POST /recall-mode/service-test"]({
+      req: { json: async () => body },
+      json: (payload, status) => ({ body: payload, status }),
+    });
+  const jsonOf = (payload, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  // 测试不用运行时，走 ctx.network，跟没起运行时时的退路同一条。
+  resetRuntimeTransport();
+
+  // ---- 1. rerank 成功：2xx + results 非空 + 每项有分 ----
+  calls.length = 0;
+  respond = async () =>
+    jsonOf({ model: "bge-reranker-v2-m3", results: [{ index: 0, relevance_score: 0.42 }] });
+  const rerankOk = await test({
+    kind: "rerank",
+    url: "  http://127.0.0.1:8098/  ",
+    model: "bge-reranker-v2-m3",
+    timeoutMs: 800,
+  });
+  eq("service-test rerank 可用", rerankOk.body.ok, true);
+  check("成功时给 elapsedMs", Number.isFinite(rerankOk.body.elapsedMs), rerankOk.body.elapsedMs);
+  eq("模型名取服务端返回的那个", rerankOk.body.model, "bge-reranker-v2-m3");
+  eq("请求打到 /v1/rerank，且地址去尾斜杠", calls[0].url, "http://127.0.0.1:8098/v1/rerank");
+  eq("rerank 用 POST", calls[0].init.method, "POST");
+  eq("请求体带上模型名", calls[0].body.model, "bge-reranker-v2-m3");
+  eq("请求体带一句固定 query", calls[0].body.query, "连通性测试");
+  eq("请求体带一条固定文档", calls[0].body.documents, ["这是一条用于测试的文档"]);
+  check("detail 是一句话", typeof rerankOk.body.detail === "string" && rerankOk.body.detail.length > 0);
+
+  // 服务端不回 model 时给 null，面板那边回退到配置里的模型名。
+  respond = async () => jsonOf({ results: [{ index: 0, score: 0.1 }] });
+  const rerankNoModel = await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  eq("score 也能当成有分", rerankNoModel.body.ok, true);
+  eq("服务端不回 model 时给 null", rerankNoModel.body.model, null);
+
+  // ---- 2. rerank 结构不对：200 也不算可用 ----
+  respond = async () => jsonOf({ results: [] });
+  const rerankEmpty = await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  eq("results 为空不算可用", rerankEmpty.body.ok, false);
+  check(
+    "空 results 的错误写明返回结构不符合预期",
+    String(rerankEmpty.body.error).includes("返回结构不符合预期") &&
+      String(rerankEmpty.body.error).includes("results"),
+    rerankEmpty.body.error,
+  );
+
+  respond = async () => jsonOf({ data: [{ index: 0, relevance_score: 0.3 }] });
+  const rerankWrongShape = await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  eq("只有 data 没有 results 不算可用", rerankWrongShape.body.ok, false);
+
+  respond = async () => jsonOf({ results: [{ index: 0 }] });
+  const rerankNoScore = await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  eq("结果项缺分不算可用", rerankNoScore.body.ok, false);
+  check(
+    "缺分时错误提到 relevance_score",
+    String(rerankNoScore.body.error).includes("relevance_score"),
+    rerankNoScore.body.error,
+  );
+
+  respond = async () => jsonOf({ error: "boom" }, 500);
+  const rerank500 = await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  eq("HTTP 500 不算可用", rerank500.body.ok, false);
+  check("非 2xx 的错误带状态码", String(rerank500.body.error).includes("500"), rerank500.body.error);
+
+  // ---- 3. rerank 连不上：错误原文照抄 ----
+  respond = async () => {
+    throw new Error("connect ECONNREFUSED 127.0.0.1:8098");
+  };
+  const refused = await test({ kind: "rerank", url: "http://127.0.0.1:8098", model: "bge" });
+  eq("连不上就是不可用", refused.body.ok, false);
+  check(
+    "错误原文保留 ECONNREFUSED",
+    String(refused.body.error).includes("ECONNREFUSED"),
+    refused.body.error,
+  );
+  check("失败时也给 elapsedMs", Number.isFinite(refused.body.elapsedMs), refused.body.elapsedMs);
+  eq("失败时不带 model 字段", refused.body.model, undefined);
+
+  // ---- 4. systemone 成功 ----
+  calls.length = 0;
+  respond = async () => jsonOf({ answers: { q: { noul: 0.83 } } });
+  const systemoneOk = await test({
+    kind: "systemone",
+    url: "http://192.168.50.142:8097",
+    model: "kev-4b",
+    timeoutMs: 3500,
+  });
+  eq("service-test systemone 可用", systemoneOk.body.ok, true);
+  eq("systemone 打到自己的端点", calls[0].url, "http://192.168.50.142:8097/v1/systemone");
+  eq("systemone 请求体带模型名", calls[0].body.model, "kev-4b");
+  eq("systemone state 是一段 text", calls[0].body.state, { type: "text", content: "连通性测试" });
+  eq("systemone 只问一个问题", Object.keys(calls[0].body.questions), ["q"]);
+  eq("systemone 那个问题是 noul 题", calls[0].body.questions.q.type, "noul");
+  eq("systemone 不回 model 时给 null", systemoneOk.body.model, null);
+
+  // ---- 5. systemone 结构不对 ----
+  respond = async () => jsonOf({ answers: {} });
+  const systemoneWrong = await test({ kind: "systemone", url: "http://h:2", model: "kev-4b" });
+  eq("缺 answers.q 不算可用", systemoneWrong.body.ok, false);
+  check(
+    "错误写明缺 answers.q",
+    String(systemoneWrong.body.error).includes("answers.q"),
+    systemoneWrong.body.error,
+  );
+
+  // ---- 6. 超时：请求体里的 timeoutMs 真的是硬上限 ----
+  respond = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return jsonOf({ answers: { q: { noul: 0.5 } } });
+  };
+  const timedOut = await test({
+    kind: "systemone",
+    url: "http://h:2",
+    model: "kev-4b",
+    timeoutMs: 100,
+  });
+  eq("超时就是不可用", timedOut.body.ok, false);
+  check(
+    "超时错误以 TIMEOUT 开头并带上限",
+    /^TIMEOUT 100ms/.test(String(timedOut.body.error)),
+    timedOut.body.error,
+  );
+
+  // ---- 7. 入参校验：全 400，零写入 ----
+  writes.length = 0;
+  const badKind = await test({ kind: "model", url: "http://h:1", model: "bge" });
+  eq("kind 只认两类", badKind.status, 400);
+  writes.length = 0;
+  const noUrl = await test({ kind: "rerank", url: "", model: "bge" });
+  eq("没地址 400", noUrl.status, 400);
+  writes.length = 0;
+  const ftpUrl = await test({ kind: "rerank", url: "ftp://h", model: "bge" });
+  eq("非 http(s) 地址 400", ftpUrl.status, 400);
+  writes.length = 0;
+  const urlNoModel = await test({ kind: "rerank", url: "http://h:1", model: "  " });
+  eq("有地址无模型 400", urlNoModel.status, 400);
+  check(
+    "测试路由的拒绝理由也写明配了地址就要填模型名",
+    String(urlNoModel.body.error).includes("配了地址就要填模型名"),
+    urlNoModel.body.error,
+  );
+  const badJson = await handlers["POST /recall-mode/service-test"]({
+    req: { json: async () => { throw new Error("bad"); } },
+    json: (payload, status) => ({ body: payload, status }),
+  });
+  eq("body 不是 JSON 也 400", badJson.status, 400);
+  eq("测试路由全程零写入", writes.length, 0);
+
+  // 请求体里的值说了算：存着的配置不影响这一单。
+  store.rerankServiceUrl = "http://saved:1";
+  store.rerankServiceModel = "saved-model";
+  calls.length = 0;
+  respond = async () => jsonOf({ results: [{ index: 0, relevance_score: 0.5 }] });
+  await test({ kind: "rerank", url: "http://typed:2", model: "typed-model" });
+  eq("测试用请求体里的地址，不用已保存的", calls[0].url, "http://typed:2/v1/rerank");
+  eq("测试用请求体里的模型名", calls[0].body.model, "typed-model");
 }
 
 // ================= routes: models =================
@@ -4743,6 +5438,85 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("超时后 cancel 一次", fake.calls.cancel.length, 1);
   }
 
+  // ---- 超时三层在真请求上的体现：通道自带 > 服务配置 > 默认 / 自适应 ----
+  {
+    // 每一跳把信封里的 timeoutMs 截下来：这就是实际会用的那个数。
+    const timeoutOf = async (channel, switches, body) => {
+      const seen = [];
+      setRuntimeTransport({
+        send: async (url, init) => {
+          seen.push(init.timeoutMs);
+          return { ok: true, status: 200, headers: {}, data: body };
+        },
+      });
+      const sdk = recallSdk({ values: {}, dataDir: dir });
+      await runRerankChannels({
+        sdk,
+        switches,
+        query: "用户问题",
+        items: [{ text: "甲" }, { text: "乙" }],
+        channels: [channel],
+      });
+      resetRuntimeTransport();
+      return seen[0];
+    };
+    const rerankBody = {
+      results: [
+        { index: 0, relevance_score: 0.9 },
+        { index: 1, relevance_score: 0.1 },
+      ],
+    };
+    const systemoneBody = { answers: { r1: { noul: 0.9 }, r2: { noul: 0.1 } } };
+
+    eq(
+      "rerank 第一层：通道自带的超时压过服务配置",
+      await timeoutOf(
+        { type: "rerank", url: "http://h:1", model: "m", timeoutMs: 1200 },
+        { rerankServiceTimeoutMs: 900 },
+        rerankBody,
+      ),
+      1200,
+    );
+    eq(
+      "rerank 第二层：没填通道超时时用服务配置",
+      await timeoutOf(
+        { type: "rerank", url: "http://h:1", model: "m" },
+        { rerankServiceTimeoutMs: 900 },
+        rerankBody,
+      ),
+      900,
+    );
+    eq(
+      "rerank 第三层：两边都没配时用 800",
+      await timeoutOf({ type: "rerank", url: "http://h:1", model: "m" }, {}, rerankBody),
+      RERANK_CHANNEL_TIMEOUT_MS,
+    );
+
+    eq(
+      "systemone 第一层：通道自带的超时压过服务配置",
+      await timeoutOf(
+        { type: "systemone", url: "http://h:2", model: "m", timeoutMs: 2000 },
+        { systemoneServiceTimeoutMs: 1200 },
+        systemoneBody,
+      ),
+      2000,
+    );
+    eq(
+      "systemone 第二层：没填通道超时时用服务配置",
+      await timeoutOf(
+        { type: "systemone", url: "http://h:2", model: "m" },
+        { systemoneServiceTimeoutMs: 1200 },
+        systemoneBody,
+      ),
+      1200,
+    );
+    eq(
+      "systemone 第三层：两边都没配时按候选数自适应（2 条 = 基础值 3500）",
+      await timeoutOf({ type: "systemone", url: "http://h:2", model: "m" }, {}, systemoneBody),
+      SYSTEMONE_CHANNEL_TIMEOUT_MS,
+    );
+  }
+
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
@@ -4941,6 +5715,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       RERANK_DOCUMENT_CHARS,
     );
     eq("rerank 分数按 relevance_score 读", outcome.channels[0].scores, [0.9, 0.25, 0]);
+    // 真机 bge-reranker 返回的是交叉编码器 logit（实测 7.88 / -8.32 / -10.69）：
+    // 直接 clamp 会把负分全变 0（当反对票丢掉）、正分全变 1（排序没了）。
+    {
+      const rounded = (list) => list.map((value) => Number(value.toFixed(4)));
+      eq(
+        "0..1 相关度原样保留",
+        rounded(squashRerankScores([0.9, 0.25, 0])),
+        [0.9, 0.25, 0],
+      );
+      const logits = squashRerankScores([7.8827, -8.322, -10.692]);
+      check(
+        "logit 过 sigmoid 后保序且不再是 0/1",
+        logits[0] > logits[1] &&
+          logits[1] > logits[2] &&
+          logits.every((value) => value > 0 && value < 1),
+        JSON.stringify(rounded(logits)),
+      );
+      eq(
+        "logit 里没有被 clamp 成 1 的",
+        rounded(squashRerankScores([7.8827, 3.1])),
+        [0.9996, 0.9569],
+      );
+      eq(
+        "缺项保持 null",
+        squashRerankScores([2.5, null], [2.5]).map((value) => (value === null ? null : Number(value.toFixed(3)))),
+        [0.924, null],
+      );
+    }
     eq(
       "rerank 标准化后合并（0.9/0.25/0 拉成 1/0.28/0）",
       outcome.merged.map((value) => Number(value.toFixed(2))),

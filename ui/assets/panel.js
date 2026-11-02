@@ -34,6 +34,7 @@ import {
   SYSTEMONE_TIMEOUT_BASE,
   SYSTEMONE_TIMEOUT_MAX,
   SYSTEMONE_TIMEOUT_STEP,
+  channelPairNote,
   commitLayers,
   emptyRerankChannel,
   channelServiceMissing,
@@ -43,6 +44,7 @@ import {
   normalizeGatePrompt,
   normalizeRerankChannels,
   normalizeRerankPrompt,
+  normalizeServiceTimeout,
   paintRecallConfig,
   promptDraft,
   promptStatus,
@@ -50,6 +52,10 @@ import {
   rerankChannelsText,
   rerankPromptDraft,
   rerankPromptStatus,
+  serviceTestBody,
+  serviceTestReady,
+  serviceTestView,
+  serviceTimeoutInput,
 } from "./recall-layers.js";
 
 const $ = (id) => document.getElementById(id);
@@ -574,6 +580,14 @@ function renderRerankChannels(list) {
     );
 
     row.append(head, cells);
+    // 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。
+    const pairNote = channelPairNote(channel, layers);
+    if (pairNote) {
+      const note = document.createElement("p");
+      note.className = "channel-pair-note";
+      note.textContent = pairNote;
+      row.append(note);
+    }
     box.appendChild(row);
   });
 }
@@ -604,6 +618,8 @@ function formatChannelTest(out) {
         `${name} · ${channel?.abstained ? "弃权" : "失败"} ${channel?.elapsedMs ?? 0}ms · ${channel?.error || "失败"}`,
       );
     }
+    // 整对回退的通道要说明为什么没用它自己的地址 / 模型名。
+    if (channel?.pairNote) lines.push(`${name} · ${channel.pairNote}`);
   }
   if (out?.fallback) {
     lines.push("合并：全部通道弃权，原样保留全部候选");
@@ -617,6 +633,71 @@ function formatChannelTest(out) {
     lines.push(`保留：${kept.join(", ") || "无"}`);
   }
   return lines.join("\n");
+}
+
+/* ---------------- 打分服务的连通性测试 ---------------- */
+
+// 一组服务正在测；避免连点把一趟请求发成两趟。
+const serviceTestPending = new Set();
+
+/** 结果行统一的一次收笔：颜色只表达状态，文案已经在 serviceTestView 里拼好了。 */
+function paintServiceResult(box, view) {
+  if (!box) return;
+  box.hidden = false;
+  box.className = `service-result ${view.tone}`;
+  box.textContent = view.text;
+}
+
+/** 改了地址 / 模型 / 超时，上一次的结果就不再可信，直接收掉。 */
+function clearServiceResult(kind) {
+  const box = $(`${kind}ServiceResult`);
+  if (!box) return;
+  box.hidden = true;
+  box.className = "service-result";
+  box.textContent = "";
+}
+
+/**
+ * 拿输入框里此刻的值真打一发打分服务。
+ *
+ * 不发已保存的配置：填了还没保存的组合也要能先试。服务端只读这个请求体，
+ * 不碰任何状态，所以点多少次都不会把配置写成半截。
+ */
+async function runServiceTest(kind) {
+  const button = $(`${kind}ServiceTest`);
+  const box = $(`${kind}ServiceResult`);
+  if (!button || !box || serviceTestPending.has(kind)) return;
+
+  const draft = {
+    url: $(`${kind}ServiceUrl`).value,
+    model: $(`${kind}ServiceModel`).value,
+    timeoutMs: $(`${kind}ServiceTimeoutMs`).value,
+  };
+  const body = serviceTestBody(kind, draft);
+
+  // 没填全就没有可测的东西：直接显示「先填地址和模型」，不发请求。
+  // 填了但不合法（比如漏了 http://）仍然发：服务端会回一句具体的拒绝理由。
+  if (!serviceTestReady(draft)) {
+    paintServiceResult(box, serviceTestView(null));
+    return;
+  }
+
+  serviceTestPending.add(kind);
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "测试中…";
+  paintServiceResult(box, { tone: "muted", text: `正在请求 ${body.url}…` });
+  try {
+    const out = await jsonPost("/recall-mode/service-test", body);
+    if (!out || typeof out !== "object") throw new Error("服务端没有返回结果");
+    paintServiceResult(box, serviceTestView(out, body.model));
+  } catch (error) {
+    paintServiceResult(box, { tone: "bad", text: `不可用 · ${String(error?.message || error)}` });
+  } finally {
+    serviceTestPending.delete(kind);
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 async function runRerankChannelTest() {
@@ -885,7 +966,11 @@ function applyLayers(next) {
   paintRerankPanels();
   // 打分服务：正在输入的那一格不被一次刷新抢走光标与内容。
   for (const [id, key] of SERVICE_FIELDS) {
-    if (document.activeElement !== $(id)) $(id).value = layers[key] || "";
+    if (document.activeElement !== $(id)) {
+      $(id).value = id.endsWith("TimeoutMs")
+        ? serviceTimeoutInput(layers[key], kindOfServiceField(id))
+        : layers[key] || "";
+    }
   }
   renderRerankChannels([...layers.rerankChannels, ...pending]);
   paintModelSelect();
@@ -905,17 +990,36 @@ function readLayers() {
     // 打分服务：原样发，合法性由服务端整单校验；被拒就整组回滚。
     rerankServiceUrl: $("rerankServiceUrl").value.trim(),
     rerankServiceModel: $("rerankServiceModel").value.trim(),
+    // 超时收成数字或 null，与服务端投影同形：否则「没改」与「改了」比不出来。
+    rerankServiceTimeoutMs: normalizeServiceTimeout($("rerankServiceTimeoutMs").value, "rerank"),
     systemoneServiceUrl: $("systemoneServiceUrl").value.trim(),
     systemoneServiceModel: $("systemoneServiceModel").value.trim(),
+    systemoneServiceTimeoutMs: normalizeServiceTimeout(
+      $("systemoneServiceTimeoutMs").value,
+      "systemone",
+    ),
   };
 }
 
-// 打分服务四字段与输入框 id 一一对应（id 与配置键同名）。
+/** 一个输入框属于哪一类服务：按字段名前缀分，两类超时的边界不同。 */
+function kindOfServiceField(id) {
+  return id.startsWith("systemone") ? "systemone" : "rerank";
+}
+
+// 打分服务六字段与输入框 id 一一对应（id 与配置键同名）。
 const SERVICE_FIELDS = [
   ["rerankServiceUrl", "rerankServiceUrl"],
   ["rerankServiceModel", "rerankServiceModel"],
+  ["rerankServiceTimeoutMs", "rerankServiceTimeoutMs"],
   ["systemoneServiceUrl", "systemoneServiceUrl"],
   ["systemoneServiceModel", "systemoneServiceModel"],
+  ["systemoneServiceTimeoutMs", "systemoneServiceTimeoutMs"],
+];
+
+// 两组服务的「测试」按钮：kind -> 按钮 id。结果行 id 按 kind 推出来。
+const SERVICE_TESTS = [
+  ["rerank", "rerankServiceTest"],
+  ["systemone", "systemoneServiceTest"],
 ];
 
 const LAYER_KEYS = [
@@ -929,8 +1033,10 @@ const LAYER_KEYS = [
   "rerankChannels",
   "rerankServiceUrl",
   "rerankServiceModel",
+  "rerankServiceTimeoutMs",
   "systemoneServiceUrl",
   "systemoneServiceModel",
+  "systemoneServiceTimeoutMs",
 ];
 
 function sameLayers(a, b) {
@@ -1049,13 +1155,21 @@ $("rerankResetPrompt").addEventListener("click", () => {
 $("rerankModel").addEventListener("change", saveLayers);
 
 for (const [id] of SERVICE_FIELDS) {
-  $(id).addEventListener("change", saveLayers);
+  $(id).addEventListener("change", () => {
+    // 改了一格，上一次的测试结果就不是对这一组值的结论了。
+    clearServiceResult(kindOfServiceField(id));
+    saveLayers();
+  });
   $(id).addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       $(id).blur();
     }
   });
+}
+
+for (const [kind, buttonId] of SERVICE_TESTS) {
+  $(buttonId).addEventListener("click", () => runServiceTest(kind));
 }
 
 $("rerankAddChannel").addEventListener("click", () => {
