@@ -91,7 +91,8 @@ function selectTab(name, { persist = false } = {}) {
 }
 
 // 中枢里 peer 多的时候列表内部滚动，不截断、不折叠成 +N。
-// 一屏放得下 8 行（行高 + 间距），超出的部分靠 CSS 的 max-height 滚。
+// 名单在召回管理栏里吃满剩余高度（CSS 的 flex:1 + min-height:0），
+// 条目多了就自己滚；矮屏降级时才退回固定高度。
 
 let controls = null;
 let logOpen = false;

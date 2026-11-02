@@ -3,7 +3,18 @@
    依赖变量的代价是——变量没注入时整条声明作废，页面变成一张白纸，
    而失败是静默的，看起来像"没写 CSS"。 */
 
+/* 高度基准（查的是宿主 1.5.48-beta 的 renderer 包，不是猜的）：
+   宿主把整页 iframe 挂在一个定高链上：
+   pageSurface（height:100%，padding: calc(--panel-edge-gap / 2)，默认 --space-8 即 4px）
+   → pageStage（height:100%）→ pagePane（position:absolute; inset:0）
+   → iframe（display:block; width/height:100%）
+   所以 iframe 文档的视口高度就是宿主面板分给它的高度，面板里用 100% 走这条链。
+   刻意不写 100vh：它只在“iframe 定高”这一种挂载下与 100% 等价，一旦宿主换成
+   按内容撑高的挂载位（聊天流 flexible），vh 会指向另一套基准，而 100% 不会。
+   ui/assets/app-ui.css 里没有 html 选择器，没人替我们定 html / body 的高度，
+   这两条必须由面板自己写。 */
 html, body {
+  height: 100%;
   margin: 0;
   background: transparent;
   color: inherit;
@@ -11,12 +22,18 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 根容器固定一屏：吃满宿主给的高度，自己绝不出滚动条。
+   纵向结构 = 顶部条 / 标签栏 / 内容区 / 页脚，只有内容区可以伸缩。 */
 .page {
+  box-sizing: border-box;
+  height: 100%;
   max-width: 900px;
   margin: 0 auto;
-  padding: 24px 24px 44px;
-  display: grid;
-  gap: 14px;
+  padding: 12px 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
 }
 
 /* `hidden` 的 `display: none` 是 UA 样式，优先级最低：只要元素自己有一条
@@ -30,11 +47,12 @@ html, body {
 /* ---------- 顶部身份条 ---------- */
 
 .top {
+  flex: none;
   display: flex;
   align-items: flex-start;
-  gap: 16px;
+  gap: 12px;
   flex-wrap: wrap;
-  padding-bottom: 4px;
+  padding-bottom: 2px;
 }
 
 .ident {
@@ -113,6 +131,7 @@ html, body {
 
 /* 三个中文标签窄屏也放得下一行：等分宽度、绝不换行。 */
 .tabs {
+  flex: none;
   display: flex;
   flex-wrap: nowrap;
   gap: 4px;
@@ -127,7 +146,7 @@ html, body {
   font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
-  padding: 7px 10px;
+  padding: 6px 10px;
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 9px 9px 0 0;
@@ -154,10 +173,19 @@ html, body {
   outline-offset: -2px;
 }
 
-/* 三页内容各自成组；隐藏仍由 .page [hidden] 兜底。 */
+/* 三页内容各自成组；隐藏仍由 .page [hidden] 兜底。
+   内容区吃满剩余高度（flex:1 + min-height:0）。少了 min-height:0，子元素
+   的内容高度会把 flex 项顶回去，整页跟着长——这是这类布局最主要的破版点。
+   溢出优先让日志 / 名单自己滚（见 .logs、.peer-list）；两者都压到极限仍放
+   不下时，退一步由内容区自己滚，而不是裁掉卡片底部，也不把滚动交回整页。 */
 .tab-panel {
-  display: grid;
-  gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .btn {
@@ -184,9 +212,9 @@ html, body {
 .master {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 18px 20px;
-  border-radius: 16px;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid rgba(128, 128, 128, 0.24);
   background:
     linear-gradient(180deg, rgba(111, 143, 104, 0.08), rgba(128, 128, 128, 0.02));
@@ -197,19 +225,30 @@ html, body {
   border-color: rgba(128, 128, 128, 0.18);
 }
 
-.master-copy { min-width: 0; }
+/* 标题、说明、开关排在同一行：总闸是个是非题，不该占两行高度。
+   窄到放不下时才让说明整段落到第二行。 */
+.master-copy {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
 
 .master-title {
   margin: 0;
+  flex: none;
   font-size: 14.5px;
   font-weight: 620;
+  line-height: 1.2;
 }
 
 .master-hint {
-  margin: 3px 0 0;
+  margin: 0;
+  min-width: 0;
   font-size: 12px;
   opacity: 0.62;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 .master-hint.warn { color: #b8564d; opacity: 0.95; }
 
@@ -256,7 +295,7 @@ html, body {
    探针一行、服务两栅，各自管自己。 */
 .prelude {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 .prelude .card-title {
   margin: 0;
@@ -265,8 +304,8 @@ html, body {
 .toggle {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px;
+  padding: 6px 10px;
   border-radius: 12px;
   border: 1px solid rgba(128, 128, 128, 0.2);
   background: rgba(128, 128, 128, 0.025);
@@ -317,8 +356,8 @@ html, body {
    两个服务并排，窄屏自动落成一列。 */
 .services {
   display: grid;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: 6px;
+  padding: 6px 10px;
   border-radius: 12px;
   border: 1px solid rgba(128, 128, 128, 0.2);
   background: rgba(128, 128, 128, 0.025);
@@ -329,7 +368,7 @@ html, body {
 .service-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 @media (max-width: 760px) {
@@ -339,7 +378,7 @@ html, body {
 }
 .service {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 .service-title {
@@ -350,7 +389,7 @@ html, body {
   display: grid;
   grid-template-columns: 1.4fr 1fr 0.62fr auto;
   align-items: end;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 .service-fields .field { margin-bottom: 0; }
@@ -386,11 +425,25 @@ html, body {
 /* 召回的前两层跟上面两个开关一样是按整台机器算的、改了就生效，
    所以跟 peer 名单合成一栏：上面两个下拉并排，下面名单占满整行宽度。
    不做折叠也没有保存按钮。 */
+/* 召回管理是记忆页里唯一吃满剩余高度的一块：下拉与展开区按内容定高，
+   剩下的全部给 peer 名单，名单在栏内自己滚。 */
+.recall {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 判断 / 重排都展开、通道又多时，栏内内容会远超卡片：让卡片自己滚，
+     而不是把「添加通道」和名单裁掉。名单在空间够时仍吃满并自己滚。 */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .recall-head {
+  flex: none;
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .recall-head .card-title {
   margin: 0;
@@ -402,9 +455,10 @@ html, body {
 }
 
 .recall-grid {
+  flex: none;
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
   transition: opacity 0.2s;
 }
@@ -416,10 +470,11 @@ html, body {
 
 /* llm 判断 / 重排的展开区：提示词 + 模型。默认 hidden，由脚本切换。 */
 .gate-advanced {
+  flex: none;
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
-  padding-top: 14px;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid rgba(128, 128, 128, 0.14);
   transition: opacity 0.2s;
 }
@@ -443,10 +498,14 @@ html, body {
 }
 .prompt-head .btn { flex: none; }
 
-/* 多路精排通道：每行一张小卡，字段用可换行的栅格，窄屏不会横向溢出。 */
+/* 多路精排通道：每行一张小卡，字段用可换行的栅格，窄屏不会横向溢出。
+   通道多时列表自己滚，不把整栏顶高。 */
 .channel-list {
   display: grid;
   gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 .channel-row {
   display: grid;
@@ -541,13 +600,15 @@ html, body {
 /* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」，
    层次靠这条线分开，不另起一栏。 */
 .recall-sep {
+  flex: none;
   height: 1px;
-  margin: 14px 0 12px;
+  margin: 10px 0 8px;
   background: rgba(128, 128, 128, 0.16);
 }
 
 .scoped-note {
-  margin: -2px 2px 0;
+  flex: none;
+  margin: 0 2px;
   font-size: 11.5px;
   line-height: 1.5;
   opacity: 0.5;
@@ -562,7 +623,7 @@ html, body {
 .cols {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 8px;
 }
 @media (max-width: 760px) {
   .cols { grid-template-columns: 1fr; }
@@ -570,14 +631,14 @@ html, body {
 
 .card {
   border: 1px solid rgba(128, 128, 128, 0.2);
-  border-radius: 14px;
-  padding: 16px 18px 18px;
+  border-radius: 12px;
+  padding: 8px 10px 10px;
   background: rgba(128, 128, 128, 0.025);
   min-width: 0;
 }
 
 .card-title {
-  margin: 0 0 12px;
+  margin: 0 0 6px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -587,14 +648,15 @@ html, body {
 
 .field {
   display: grid;
-  gap: 5px;
-  margin-bottom: 12px;
+  gap: 4px;
+  margin-bottom: 8px;
 }
 .field:last-child { margin-bottom: 0; }
 
 .field label,
 .field .label {
   font-size: 11.5px;
+  line-height: 1.35;
   opacity: 0.62;
 }
 
@@ -604,7 +666,7 @@ html, body {
   font-size: 12.5px;
   width: 100%;
   box-sizing: border-box;
-  padding: 7px 10px;
+  padding: 4px 9px;
   border-radius: 9px;
   border: 1px solid rgba(128, 128, 128, 0.3);
   background: rgba(128, 128, 128, 0.05);
@@ -624,7 +686,7 @@ html, body {
   background: rgba(128, 128, 128, 0.05);
   color: inherit;
   min-width: 0;
-  min-height: 84px;
+  min-height: 68px;
   line-height: 1.5;
   resize: vertical;
 }
@@ -649,7 +711,7 @@ html, body {
 .field.pair {
   grid-template-columns: 1fr 1fr;
   gap: 4px 10px;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 .field.pair input { grid-row: 2; }
 
@@ -657,8 +719,8 @@ html, body {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  margin: 12px 0 4px;
-  padding-top: 12px;
+  margin: 6px 0 2px;
+  padding-top: 6px;
   border-top: 1px solid rgba(128, 128, 128, 0.16);
 }
 .fact {
@@ -705,7 +767,7 @@ html, body {
 /* ---------- 服务端检查项 ---------- */
 
 .checks-block {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 /* 摘要就一行。全绿时就是一句静态文字：没有箭头、不可点、没有按钮语义。
@@ -736,7 +798,7 @@ html, body {
    档位仍由 check-tone.js 的 statusTone 决定。 */
 .checks {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 4px 0 0;
   padding: 0;
   display: grid;
   gap: 1px;
@@ -779,11 +841,12 @@ html, body {
 
 /* ---------- peer 名单（召回管理栏内） ---------- */
 
-/* 一屏约 8 行（行高 ~31px + 6px 间距），再多就内部滚动。 */
+/* 名单吃满召回管理剩余的高度：条目少时不拉伸，条目多了在栏内自己滚。
+   不再用固定 max-height——高度由上面几个下拉和展开区剩多少决定。 */
 .peer-list {
+  flex: 1 1 auto;
   display: grid;
   gap: 6px;
-  max-height: 296px;
   overflow-y: auto;
   font-size: 10.5px;
   line-height: 1.5;
@@ -845,7 +908,7 @@ html, body {
 }
 
 .err {
-  margin: 10px 0 0;
+  margin: 8px 0 0;
   font-size: 11.5px;
   line-height: 1.5;
   color: #b8564d;
@@ -853,7 +916,7 @@ html, body {
 }
 
 .save-hint {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   font-size: 11px;
   opacity: 0.5;
   min-height: 14px;
@@ -863,11 +926,24 @@ html, body {
 
 /* ---------- 日志 ---------- */
 
+/* 日志卡是全局页里唯一可以让步的一块：空间够时日志框 120px，不够时整张卡
+   先变矮、日志框跟着缩并自己滚，而不去顶高整页。卡的下限是标题行 + 日志框
+   最小高度 + 内边距 ≈ 124px：既不写 min-height: 0（那会缩成一条线、把日志
+   框裁掉），也不靠自动最小尺寸（日志框的 height:120px 会算进去，卡就不肯缩）。 */
+.logs {
+  flex: 0 1 auto;
+  min-height: 124px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 .logs-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .logs-head .card-title { margin: 0; }
 
@@ -889,8 +965,12 @@ html, body {
 .logs-head .btn { margin-left: auto; }
 
 .log {
+  flex: 0 1 auto;
   margin: 0;
-  max-height: 300px;
+  box-sizing: border-box;
+  height: 120px;
+  /* 被挤压时保留约四行的可读高度；再不够就由内容区滚，不让日志变成一条线。 */
+  min-height: 64px;
   overflow: auto;
   font: 11px/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   white-space: pre-wrap;
@@ -901,11 +981,69 @@ html, body {
   padding: 11px 13px;
 }
 
-/* ---------- 页脚 ---------- */
+/* 全局页：总闸 / 前置 / 两栏都按内容定高，只有日志卡可以让步（见 .logs）。 */
+#panel-global > .master,
+#panel-global > .prelude,
+#panel-global > .cols {
+  flex: 0 0 auto;
+}
+
+/* 技能页只有一个开关：顶部对齐，不为了填满视野而拉伸。 */
+#panel-skill > .skill-route {
+  flex: 0 0 auto;
+}
 
 .foot {
+  flex: none;
   font-size: 11px;
   opacity: 0.45;
   text-align: center;
-  padding-top: 2px;
+  padding-top: 0;
+}
+
+/* ---------- 矮屏降级 ---------- */
+
+/* 视口高度不足 640px 时允许整页滚动。这是有意为之：在这个高度下
+   继续压一屏会把标签栏、输入框和日志挤成一条线，控件反而不可用。
+   常规高度下这条不生效，根容器始终是 overflow: hidden 的一屏。 */
+@media (max-height: 640px) {
+  html,
+  body {
+    height: auto;
+    overflow: visible;
+  }
+
+  .page {
+    height: auto;
+    overflow: visible;
+  }
+
+  .tab-panel {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .logs,
+  .peer-list {
+    flex: 0 0 auto;
+  }
+
+  .logs {
+    min-height: 0;
+  }
+
+  .log {
+    height: 120px;
+    min-height: 120px;
+  }
+
+  .peer-list {
+    max-height: 296px;
+    overflow-y: auto;
+  }
+
+  .channel-list {
+    max-height: 220px;
+    overflow-y: auto;
+  }
 }

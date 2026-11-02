@@ -2764,12 +2764,144 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     css.indexOf("}", css.indexOf(".tab-panel {")),
   );
   check(
-    "内容块是 grid + 14px 间距",
-    /display:\s*grid/.test(panelRule) && /gap:\s*14px/.test(panelRule),
+    "内容块是 flex 列 + 8px 间距（吃满剩余高度）",
+    /display:\s*flex/.test(panelRule) &&
+      /flex-direction:\s*column/.test(panelRule) &&
+      /gap:\s*8px/.test(panelRule),
     panelRule,
   );
   const tabRule = css.slice(css.indexOf(".tab {"), css.indexOf("}", css.indexOf(".tab {")));
   check("标签字号沿用 12px", /font-size:\s*12px/.test(tabRule), tabRule);
+}
+
+// ================= ui: 面板一屏布局（静态） =================
+{
+  // 这一块守的是「整页不滚」的静态契约：高度基准、根容器、内容区、
+  // 两个区内滚动点，以及矮屏降级。真观感要 reload 后在真机看。
+  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
+  const html = read("panel.html");
+  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const ruleFor = (selector) => {
+    const index = css.indexOf(`${selector} {`);
+    if (index < 0) return null;
+    const open = css.indexOf("{", index);
+    const end = css.indexOf("}", open);
+    return { index, body: css.slice(open + 1, end) };
+  };
+
+  // 高度基准：宿主把整页 iframe 装进定高容器，html/body 的 100% 就是它给的高度。
+  // app-ui.css 里没有 html 选择器，这两条只能由面板自己写。
+  const rootRule = ruleFor("html, body");
+  check("html/body 有高度规则", rootRule !== null);
+  check(
+    "html/body 取 100%（宿主定高容器的百分比，不是 100vh）",
+    /height\s*:\s*100%/.test(rootRule?.body || ""),
+    rootRule?.body || "",
+  );
+  check("不用 100vh 当高度基准", css.includes("100vh") === false);
+
+  // 根容器：吃满高度、自己不出滚动条、纵向 flex。
+  const pageRule = ruleFor(".page");
+  check("根容器规则在", pageRule !== null);
+  check(
+    "根容器高度 100% + 纵向 flex",
+    /height\s*:\s*100%/.test(pageRule?.body || "") &&
+      /display\s*:\s*flex/.test(pageRule?.body || "") &&
+      /flex-direction\s*:\s*column/.test(pageRule?.body || ""),
+    pageRule?.body || "",
+  );
+  check(
+    "根容器不自滚（overflow: hidden）",
+    /overflow\s*:\s*hidden/.test(pageRule?.body || ""),
+    pageRule?.body || "",
+  );
+  check(
+    "根容器带 box-sizing: border-box（padding 不算进高度）",
+    /box-sizing\s*:\s*border-box/.test(pageRule?.body || ""),
+    pageRule?.body || "",
+  );
+
+  // 内容区：吃掉剩余高度；min-height: 0 是让子元素能收缩的关键。
+  const panelRule = ruleFor(".tab-panel");
+  check("内容区规则在", panelRule !== null);
+  check(
+    "内容区 flex: 1 1 auto",
+    /flex\s*:\s*1 1 auto/.test(panelRule?.body || ""),
+    panelRule?.body || "",
+  );
+  check(
+    "内容区 min-height: 0",
+    /min-height\s*:\s*0/.test(panelRule?.body || ""),
+    panelRule?.body || "",
+  );
+  check(
+    "内容区纵向 flex 列",
+    /flex-direction\s*:\s*column/.test(panelRule?.body || ""),
+    panelRule?.body || "",
+  );
+
+  // 三页各自的内容区都要吃满剩余高度，而不是只有全局页。
+  for (const name of ["global", "memory", "skill"]) {
+    const tag = new RegExp(`<div[^>]*id="panel-${name}"[^>]*>`).exec(html)?.[0] ?? "";
+    check(`panel-${name} 挂的是同一套 tab-panel 契约`, /class="tab-panel"/.test(tag), tag);
+  }
+  check(
+    "全局页上面几块按内容定高、只有日志卡让步",
+    [".master", ".prelude", ".cols"].every((sel) =>
+      new RegExp(`#panel-global > \\${sel}`).test(css),
+    ),
+  );
+  const recallRule = ruleFor(".recall");
+  check("召回管理吃满记忆页剩余高度", /flex\s*:\s*1 1 auto/.test(recallRule?.body || ""),
+    recallRule?.body || "");
+  check("召回管理内部可收缩", /min-height\s*:\s*0/.test(recallRule?.body || ""),
+    recallRule?.body || "");
+  check("召回管理溢出时自己滚（两段展开 + 通道多也不会裁掉按钮）",
+    /overflow-y\s*:\s*auto/.test(recallRule?.body || ""), recallRule?.body || "");
+  check("技能页不为了填满拉伸", /#panel-skill > \.skill-route \{[\s\S]{0,80}flex\s*:\s*0 0 auto/.test(css));
+
+  // 日志：固定 120px，超出自己滚；被挤压时留 64px 下限。
+  const logRule = ruleFor(".log");
+  check("日志区规则在", logRule !== null);
+  check("日志区有固定高度 120px", /height\s*:\s*120px/.test(logRule?.body || ""),
+    logRule?.body || "");
+  check("日志区自己滚", /overflow\s*:\s*auto/.test(logRule?.body || ""), logRule?.body || "");
+  check("日志区保留可读下限 64px", /min-height\s*:\s*64px/.test(logRule?.body || ""),
+    logRule?.body || "");
+  const logsRule = ruleFor(".logs");
+  check("日志卡可收缩但不会缩没", /flex\s*:\s*0 1 auto/.test(logsRule?.body || "") &&
+    /min-height\s*:\s*124px/.test(logsRule?.body || ""), logsRule?.body || "");
+
+  // peer 名单：区内滚，不再靠 296px 的固定上限。
+  const peerRule = ruleFor(".peer-list");
+  check("peer 名单规则在", peerRule !== null);
+  check("peer 名单吃满召回管理剩余高度", /flex\s*:\s*1 1 auto/.test(peerRule?.body || ""),
+    peerRule?.body || "");
+  check("peer 名单自己滚", /overflow-y\s*:\s*auto/.test(peerRule?.body || ""),
+    peerRule?.body || "");
+  check("peer 名单不再用固定 max-height", /max-height/.test(peerRule?.body || "") === false,
+    peerRule?.body || "");
+  const channelRule = ruleFor(".channel-list");
+  check("通道列表条目多时区内滚", /overflow-y\s*:\s*auto/.test(channelRule?.body || "") &&
+    /max-height\s*:\s*\d+px/.test(channelRule?.body || ""), channelRule?.body || "");
+
+  // 矮屏降级：640px 以下允许整页滚（压一屏会把控件挤成一条线）。
+  const mediaIdx = css.indexOf("@media (max-height: 640px)");
+  check("矮屏媒体查询存在且阈值是 640px", mediaIdx >= 0);
+  check("矮屏阈值不是别的数", /@media \(max-height: (?!640px\))/.test(css) === false);
+  const mediaBody = mediaIdx < 0 ? "" : css.slice(mediaIdx, css.lastIndexOf("}"));
+  check(
+    "矮屏下 html/body 放开高度与滚动",
+    /html,\s*\n?\s*body \{[\s\S]{0,120}height\s*:\s*auto/.test(mediaBody) &&
+      /html,\s*\n?\s*body \{[\s\S]{0,160}overflow\s*:\s*visible/.test(mediaBody),
+    mediaBody.slice(0, 200),
+  );
+  check(
+    "矮屏下根容器改回自适应高度",
+    /\.page \{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody),
+    mediaBody.slice(0, 200),
+  );
 }
 
 // ================= ui: 召回下拉的收笔逻辑 =================
