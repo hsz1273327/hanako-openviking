@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# ui-src 的依赖不入库（产物入库，源码留在仓库）
+ui-src/node_modules/

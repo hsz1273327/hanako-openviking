@@ -2078,13 +2078,30 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
 
   // 技能路由从开关排里搬出来，与记忆召回平级；探针归到「前置」卡。
+  // 这一页已经迁到 Vue（ui-src → ui/assets/panel-vue.js）：HTML 里只剩挂载点，
+  // 卡片本体（标题 / n-switch / 说明）在组件源码里，挂载由入口完成。
   const preludeStart = html.indexOf('<section id="prelude"');
   const preludeEnd = html.indexOf("</section>", preludeStart);
   const preludeBlock = html.slice(preludeStart, preludeEnd);
-  const skillRouteStart = html.indexOf('<section id="skillRoute"');
-  const skillRouteEnd = html.indexOf("</section>", skillRouteStart);
-  const skillRouteBlock = html.slice(skillRouteStart, skillRouteEnd);
+  const skillPanelBlock = html.slice(html.lastIndexOf("<div", skillPanelStart), footStart);
+  const skillRouteStart = html.indexOf('id="skill-route-app"');
+  const skillRouteEnd = html.indexOf("</div>", skillRouteStart);
   const masterStart = html.indexOf('<section id="masterCard"');
+  const readUiSrc = (name) =>
+    fs.readFileSync(path.join(import.meta.dirname, "../ui-src", name), "utf8");
+  const skillRouteVue = readUiSrc("src/components/SkillRoute.vue");
+  const appVue = readUiSrc("src/App.vue");
+  const settingsAppVue = readUiSrc("src/SettingsApp.vue");
+  const settingsEntry = readUiSrc("src/entries/settings.js");
+  const themeJs = readUiSrc("src/theme.js");
+  const builtPanelJs = fs.readFileSync(
+    path.join(import.meta.dirname, "../ui/assets/panel-vue.js"),
+    "utf8",
+  );
+  const builtSettingsJs = fs.readFileSync(
+    path.join(import.meta.dirname, "../ui/assets/settings-vue.js"),
+    "utf8",
+  );
 
   check("前置一块存在", preludeStart > masterStart, `prelude=${preludeStart} master=${masterStart}`);
   check("前置里有探针开关", preludeBlock.includes('data-key="probe"'));
@@ -2098,23 +2115,196 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("前置里只有一个开关（探针）",
     (preludeBlock.match(/role="switch"/g) || []).length === 1, preludeBlock);
 
-  check("技能路由独立成一块", skillRouteStart > preludeEnd, `skill=${skillRouteStart} preludeEnd=${preludeEnd}`);
-  check("技能路由那块有标题", /<h2 class="card-title">技能路由<\/h2>/.test(skillRouteBlock), skillRouteBlock);
-  check("技能路由那块有开关", skillRouteBlock.includes('data-key="skillRouting"'));
-  check(
-    "技能路由那块只有一行说明",
-    skillRouteBlock.includes("把共享技能交给助手按需调用") &&
-      (skillRouteBlock.match(/class="skill-route-hint"/g) || []).length === 1,
-    skillRouteBlock,
+  check("技能路由仍独立成一块（挂载点在前置之后）", skillRouteStart > preludeEnd, `skill=${skillRouteStart} preludeEnd=${preludeEnd}`);
+  eq(
+    "技能页内容只剩一个挂载点（卡片本体交给 Vue）",
+    skillPanelBlock
+      .replace(/^<div[^>]*id="panel-skill"[^>]*>/, "")
+      .replace(/<\/div>\s*$/, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .trim(),
+    '<div id="skill-route-app"></div>',
   );
   check(
-    "技能路由那块没有空壳列表或占位文案",
-    skillRouteBlock.includes("<ul") === false &&
-      skillRouteBlock.includes("即将") === false &&
-      skillRouteBlock.includes("敬请") === false,
-    skillRouteBlock,
+    "技能页不再写死技能路由 DOM",
+    ['data-key="skillRouting"', 'id="skillRoute"', 'class="switch'].every(
+      (needle) => skillPanelBlock.includes(needle) === false,
+    ),
+    skillPanelBlock,
+  );
+  check("Vue 组件用 n-switch 画那个开关", /<NSwitch\b/.test(skillRouteVue), skillRouteVue.slice(0, 160));
+  check(
+    "根组件把主题对齐到面板色板（n-config-provider + darkTheme + theme.js）",
+    /<NConfigProvider\b/.test(appVue) &&
+      appVue.includes("darkTheme") &&
+      appVue.includes("darkThemeOverrides") &&
+      appVue.includes('from "./theme.js"'),
+    appVue.slice(0, 160),
+  );
+  check(
+    "Vue 组件读写 /controls 的 skillRouting",
+    skillRouteVue.includes('"/controls"') && skillRouteVue.includes("skillRouting"),
+  );
+  check(
+    "构建产物只负责把组件挂到挂载点",
+    builtPanelJs.includes('mount("#skill-route-app")') &&
+      /["']\.\/chunk-vue\.js["']/.test(builtPanelJs),
+    builtPanelJs.slice(0, 120),
+  );
+  check(
+    "设置页构建产物只负责把组件挂到挂载点",
+    builtSettingsJs.includes('mount("#settings-app")') &&
+      /["']\.\/chunk-vue\.js["']/.test(builtSettingsJs) &&
+      /["']\.\/sdk\.js["']/.test(builtSettingsJs),
+    builtSettingsJs.slice(0, 120),
+  );
+  check(
+    "设置页入口文件只做挂载",
+    settingsEntry.includes('mount("#settings-app")') &&
+      settingsEntry.includes('from "../SettingsApp.vue"') &&
+      settingsEntry.includes("/recall-mode") === false,
+    settingsEntry.slice(0, 160),
+  );
+  check(
+    "theme.js 导出共用的 darkThemeOverrides",
+    /export const darkThemeOverrides\s*=/.test(themeJs),
+  );
+  check(
+    "面板与设置页共同 import theme.js（不各写一份）",
+    appVue.includes('from "./theme.js"') &&
+      settingsAppVue.includes('from "./theme.js"') &&
+      appVue.includes("const themeOverrides") === false &&
+      settingsAppVue.includes("const themeOverrides") === false,
+  );
+  check(
+    "主题色对齐手写 CSS（accent / ok / bad）",
+    ["#6f8f68", "#7ea176", "#5f7d59", "#5d7d56", "#b8564d"].every((color) =>
+      themeJs.includes(color),
+    ),
+  );
+  check(
+    "SettingsApp 用 n-form / n-form-item / n-input / n-button / n-alert",
+    ["NForm", "NFormItem", "NInput", "NButton", "NAlert"].every((name) =>
+      new RegExp(`<${name}\\b`).test(settingsAppVue),
+    ),
+  );
+  check(
+    "SettingsApp 读写 /conn，只提交一次",
+    (settingsAppVue.match(/hana\.api\.fetch\(/g) || []).length === 2 &&
+      settingsAppVue.includes('hana.api.fetch("/conn"') &&
+      settingsAppVue.includes('hana.api.fetch("/conn", {'),
+  );
+  check(
+    "SettingsApp 字段名仍是 serverUrl / apiKey / peerPrefix",
+    ["serverUrl", "apiKey", "peerPrefix"].every((name) =>
+      new RegExp(`\\b${name}\\b`).test(settingsAppVue),
+    ),
+  );
+  check(
+    "SettingsApp 不再碰召回配置",
+    ["/recall-mode", "recallGate", "queryMode", "<select"].every(
+      (needle) => settingsAppVue.includes(needle) === false,
+    ),
+  );
+  check(
+    "API Key 掩码行为保持不变（聚焦清空 / 失焦恢复 / 等于掩码视为没改）",
+    settingsAppVue.includes("buildMask") &&
+      settingsAppVue.includes('"•".repeat(8)') &&
+      settingsAppVue.includes("apiKey.value === mask") &&
+      settingsAppVue.includes('apiKey.value.trim() === "" && mask') &&
+      settingsAppVue.includes("typed !== mask") &&
+      settingsAppVue.includes('placeholder="未填写"'),
+  );
+  check(
+    "保存成功/失败的状态文案不变，失败显示服务端错误",
+    settingsAppVue.includes('setStatus("保存中…")') &&
+      settingsAppVue.includes('setStatus("已保存", "ok")') &&
+      settingsAppVue.includes("data.error") &&
+      settingsAppVue.includes('type="error"'),
+  );
+  check(
+    "vue 单独成块（chunk-vue.js 存在）",
+    fs.existsSync(path.join(import.meta.dirname, "../ui/assets/chunk-vue.js")),
+  );
+  check(
+    "产物保留宿主的 sdk.js 外链（不把宿主文件打进 bundle）",
+    /["']\.\/sdk\.js["']/.test(builtPanelJs),
+  );
+  check(
+    "技能路由不再由手写面板驱动",
+    panelJs.includes('SWITCH_KEYS = ["probe"]') &&
+      panelJs.includes('data-key="skillRouting"') === false,
+    panelJs.match(/const SWITCH_KEYS = [^\n]*/)?.[0] ?? "",
   );
   check("toggleGrid 容器已拆掉", html.includes('id="toggleGrid"') === false);
+
+  // ---- ui-src 构建链（试点）：依赖、产物位置与几个不能再丢的设定 ----
+  const uiPackage = JSON.parse(readUiSrc("package.json"));
+  const viteConfig = readUiSrc("vite.config.mjs");
+  eq("ui-src 工程名", uiPackage.name, "hanako-openviking-ui");
+  eq("ui-src 的构建命令", uiPackage.scripts?.build, "vite build");
+  check(
+    "ui-src 依赖版本与参照工程一致（vue 3.5 / naive-ui 2.45 / vite 6）",
+    /^\^3\.5\./.test(uiPackage.dependencies?.vue ?? "") &&
+      /^\^2\.45\./.test(uiPackage.dependencies?.["naive-ui"] ?? "") &&
+      /^\^6\./.test(uiPackage.devDependencies?.vite ?? "") &&
+      /^\^5\.2\./.test(uiPackage.devDependencies?.["@vitejs/plugin-vue"] ?? ""),
+    JSON.stringify(uiPackage.dependencies) + JSON.stringify(uiPackage.devDependencies),
+  );
+  check(
+    "构建不清空 ui/assets（里面还有宿主下发的 sdk.js / app-ui.*）",
+    /emptyOutDir:\s*false/.test(viteConfig),
+  );
+  check(
+    "sdk.js 保持外链且相对产物目录解析",
+    /external:\s*\["\.\/sdk\.js"\]/.test(viteConfig) &&
+      /makeAbsoluteExternalsRelative:\s*false/.test(viteConfig),
+  );
+  check(
+    "产物文件名不带 hash、vue 单独成块、目标 es2020",
+    /entryFileNames:\s*"\[name\]\.js"/.test(viteConfig) &&
+      /chunkFileNames:\s*"chunk-\[name\]\.js"/.test(viteConfig) &&
+      /manualChunks:\s*\{\s*vue:\s*\["vue"\]\s*\}/.test(viteConfig) &&
+      /target:\s*"es2020"/.test(viteConfig),
+  );
+  const assetsDir = path.join(import.meta.dirname, "../ui/assets");
+  check(
+    "构建入口按 -vue 后缀命名（panel-vue / settings-vue）",
+    /"panel-vue":\s*resolve\(here, "src\/entries\/panel\.js"\)/.test(viteConfig) &&
+      /"settings-vue":\s*resolve\(here, "src\/entries\/settings\.js"\)/.test(viteConfig) &&
+      /"panel":\s/.test(viteConfig) === false &&
+      /"settings":\s/.test(viteConfig) === false,
+    viteConfig.slice(viteConfig.indexOf("input:"), viteConfig.indexOf("output:")),
+  );
+  check(
+    "构建产物带 -vue：panel-vue.js / settings-vue.js",
+    ["panel-vue.js", "settings-vue.js"].every((name) =>
+      fs.existsSync(path.join(assetsDir, name)),
+    ),
+  );
+  check(
+    "手写脚本保留原名：panel.js / settings.js / card.js",
+    ["panel.js", "settings.js", "card.js"].every((name) =>
+      fs.existsSync(path.join(assetsDir, name)),
+    ),
+  );
+  check(
+    "面板 HTML 引用手写 panel.js 与构建产物 panel-vue.js",
+    [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)]
+      .map((match) => match[1])
+      .join(",") === "panel.js,panel-vue.js",
+  );
+  check(
+    "设置页 HTML 只引用构建产物 settings-vue.js，旧 settings.js 已断链",
+    settingsHtml.includes('src="./assets/settings-vue.js"') &&
+      settingsHtml.includes('src="./assets/settings.js"') === false,
+  );
+  // 参考工程的 assetFileNames 是 [name].[ext]：SFC 里一旦写 <style>，
+  // 构建就会把整份手写 panel.css 覆盖成只剩这一页的几条规则。
+  check(
+    "SFC 里不写 <style>（样式集中在手写的 panel.css）",
+    /^\s*<style[\s>]/m.test(skillRouteVue + appVue + settingsAppVue) === false,
+  );
   check("召回管理在前置之后", recallStart > preludeEnd, `recall=${recallStart} preludeEnd=${preludeEnd}`);
 
   const logsStart = html.indexOf('<section class="card logs"');
@@ -2134,7 +2324,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     `memory=${memoryPanelStart} scoped=${scopedIdx} recall=${recallStart}..${recallEnd} skill=${skillPanelStart}`,
   );
   check(
-    "技能页位置：技能路由在记忆页之后、页脚之前",
+    "技能页位置：技能路由挂载点在记忆页之后、页脚之前",
     skillRouteStart > skillPanelStart && skillRouteEnd < footStart,
     `skill=${skillRouteStart}..${skillRouteEnd} panel=${skillPanelStart} foot=${footStart}`,
   );
@@ -2412,14 +2602,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("两份重排默认提示词逐字一致", UI_DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_PROMPT);
 
   // 设置页只剩连接：不再有召回分组、下拉、也不再碰 /recall-mode。
+  const settingsVue = fs.readFileSync(
+    path.join(import.meta.dirname, "../ui-src/src/SettingsApp.vue"),
+    "utf8",
+  );
   check("设置页不再有召回判断", settingsHtml.includes("recallGate") === false);
   check("设置页不再有召回查询", settingsHtml.includes("queryMode") === false);
   check("设置页不再有下拉", settingsHtml.includes("<select") === false);
   check("设置页不再有召回分组标题", settingsHtml.includes("group-title") === false);
-  check("设置页只留连接三字段", ["serverUrl", "apiKey", "peerPrefix"].every((id) =>
-    settingsHtml.includes(`id="${id}"`),
-  ));
-  check("页脚说清开关在 OpenViking 页面", settingsHtml.includes("「OpenViking」页面"));
+  check(
+    "设置页只剩 Vue 挂载点（连接三字段已移进 SettingsApp.vue）",
+    settingsHtml.includes('<div id="settings-app"></div>') &&
+      /<input\b/.test(settingsHtml) === false &&
+      ["serverUrl", "apiKey", "peerPrefix"].every((name) =>
+        new RegExp(`\\b${name}\\b`).test(settingsVue),
+      ),
+    settingsHtml.slice(settingsHtml.indexOf("<main"), settingsHtml.indexOf("</main>")),
+  );
+  check(
+    "设置页说明仍指向 OpenViking 页面，字段说明没有丢",
+    settingsHtml.includes("「OpenViking」页面") &&
+      settingsVue.includes("本机直连用默认值即可") &&
+      settingsVue.includes("同机不同助手各自一个门牌"),
+  );
   check("settings.js 不再调 /recall-mode", settingsJs.includes("/recall-mode") === false);
   check("settings.js 不再有召回下拉的状态", settingsJs.includes("recallGate") === false);
   check(
@@ -2556,9 +2761,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     memoryPanel.indexOf('class="scoped-note"') > 0 &&
       memoryPanel.indexOf('class="scoped-note"') < memoryPanel.indexOf('class="card recall"'),
   );
-  for (const needle of ['id="skillRoute"', 'data-key="skillRouting"']) {
-    check(`技能页包含 ${needle}`, skillPanel.includes(needle), needle);
-  }
+  check("技能页包含 Vue 挂载点", skillPanel.includes('id="skill-route-app"'));
+  check(
+    "技能页不再包含手写开关",
+    skillPanel.includes('data-key="skillRouting"') === false &&
+      skillPanel.includes('id="skillRoute"') === false,
+    skillPanel,
+  );
+  eq(
+    "面板先跑手写页、再挂 Vue（顺序决定挂载点已经存在）",
+    [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
+      (match) => match[1],
+    ),
+    ["panel.js", "panel-vue.js"],
+  );
   for (const needle of ["recallGate", "peerList", "skillRouting"]) {
     check(`全局页不包含 ${needle}`, globalPanel.includes(needle) === false, needle);
   }
@@ -2816,7 +3032,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     recallRule?.body || "");
   check("召回管理溢出时自己滚（两段展开 + 通道多也不会裁掉按钮）",
     /overflow-y\s*:\s*auto/.test(recallRule?.body || ""), recallRule?.body || "");
-  check("技能页不为了填满拉伸", /#panel-skill > \.skill-route \{[\s\S]{0,80}flex\s*:\s*0 0 auto/.test(css));
+  check(
+    "技能页不为了填满拉伸（拉伸约束落在挂载点上）",
+    /#panel-skill > #skill-route-app \{[\s\S]{0,80}flex\s*:\s*0 0 auto/.test(css),
+  );
 
   // 日志：固定 120px，超出自己滚；被挤压时留 64px 下限。
   const logRule = ruleFor(".log");

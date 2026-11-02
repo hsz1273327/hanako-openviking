@@ -1007,9 +1007,15 @@ html, body {
   flex: 0 0 auto;
 }
 
-/* 技能页只有一个开关：顶部对齐，不为了填满视野而拉伸。 */
-#panel-skill > .skill-route {
+/* 技能页只有一个开关：顶部对齐，不为了填满视野而拉伸。
+   卡片本体是 Vue 挂进来的，所以拉伸约束落在挂载点上，卡片自己的 flex 不再生效。 */
+#panel-skill > #skill-route-app {
   flex: 0 0 auto;
+}
+/* 说明行在出错时短暂变红，和手写面板的 .save-hint.bad 同一档颜色。 */
+.skill-route-hint.bad {
+  color: #c2554b;
+  opacity: 0.9;
 }
 
 .foot {

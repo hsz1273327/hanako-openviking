@@ -64,7 +64,9 @@ import {
 
 const $ = (id) => document.getElementById(id);
 
-const SWITCH_KEYS = ["skillRouting", "probe"];
+// 技能路由（skillRouting）已迁到 Vue 试点页（ui/assets/panel-vue.js +
+// #skill-route-app），不再由这里渲染；剩下的开关仍走这套 data-key 绑定。
+const SWITCH_KEYS = ["probe"];
 
 // localStorage 只在浏览器里有；取不到（隐私模式 / 被禁）就当没有记忆。
 function safeLocalStorage() {

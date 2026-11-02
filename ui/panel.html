@@ -236,19 +236,18 @@
       </section>
     </div>
 
-    <!-- 能力：和召回同级的一块。现在只有一个开关，内容就是标题 + 开关 + 一行说明。 -->
+    <!-- 能力：与召回同级的一块。这是 Vue 试点页：静态结构只剩一个挂载点，
+         卡片本体（标题 / 开关 / 说明）由 ui-src 构建出的 panel-vue.js 挂进去。 -->
     <div id="panel-skill" class="tab-panel" role="tabpanel" aria-labelledby="tab-skill" hidden>
-      <section id="skillRoute" class="card skill-route" aria-label="技能路由">
-        <header class="skill-route-head">
-          <h2 class="card-title">技能路由</h2>
-          <button class="switch sm" type="button" role="switch" data-key="skillRouting" aria-checked="false"><span class="knob"></span></button>
-        </header>
-        <p class="skill-route-hint">把共享技能交给助手按需调用</p>
-      </section>
+      <div id="skill-route-app"></div>
     </div>
 
     <footer id="foot" class="foot"></footer>
   </main>
+  <!-- 两个入口，顺序有意义：
+       panel.js 是手写的旧面板（全局配置 / 记忆配置两页，本轮不动）；
+       panel-vue.js 是 ui-src 构建产物，只把「共享技能」挂到 #skill-route-app。 -->
   <script type="module" src="./assets/panel.js"></script>
+  <script type="module" src="./assets/panel-vue.js"></script>
 </body>
 </html>
