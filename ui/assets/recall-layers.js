@@ -22,7 +22,7 @@ export const SERVICE_URL_MAX = 512;
 // fallback 就是留空时的默认值，输入框的 placeholder 用它。
 export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
   rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
-  systemone: Object.freeze({ min: 100, max: 15000, fallback: 3500 }),
+  systemone: Object.freeze({ min: 100, max: 8000, fallback: 3500 }),
 });
 // 结果行的三种开头词，与失败原因一起拼成一行字。
 export const SERVICE_TEST_TEXT = Object.freeze({

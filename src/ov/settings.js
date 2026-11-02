@@ -69,7 +69,9 @@ export const SERVICE_MODEL_MAX = 128;
  */
 export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
   rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
-  systemone: Object.freeze({ min: 100, max: 15000, fallback: 3500 }),
+  // 运行时 systemoneTimeoutFor 的硬上限也是 8000：配置允许更大的值只会被压回去，
+  // 所以写入侧直接对齐，不让两个数字打架。
+  systemone: Object.freeze({ min: 100, max: 8000, fallback: 3500 }),
 });
 
 /** 两类打分服务的名字。路由与界面按它取边界，认不出来的一律按精排那组。 */
@@ -201,11 +203,11 @@ export function serializeServiceTimeout(raw, kind = "rerank") {
 }
 
 /**
- * 地址与模型成对：配了地址就必须填模型名，清空时两个一起清。
+ * 地址与模型成对：两边要么都有，要么都空。
  *
- * 只看最终生效的那一对（请求体里的值叠在已存值上），所以「先存地址、再补模型」
- * 两步提交不会被拆成一次非法状态。只给模型不给地址是允许的：地址为空等于该服务
- * 未配置，孤立的模型名不会拿去拼端点（见 resolveRerankChannel 的整对回退）。
+ * 只看最终生效的那一对（请求体里的值叠在已存值上），所以一次提交里给全两个字段
+ * 不会被拆成中间状态。只给模型不给地址同样拒绝：地址为空等于该服务未配置，
+ * 孤立的模型名运行时会被整对回退静默忽略，不如在写入侧直接说清楚。
  *
  * 返回错误文案，null 表示这一对没问题。
  */
@@ -214,6 +216,9 @@ export function servicePairError(url, model, urlField, modelField) {
   const hasModel = Boolean(normalizeServiceModel(model));
   if (hasUrl && !hasModel) {
     return `${urlField} 配了地址就要填模型名（${modelField}）`;
+  }
+  if (hasModel && !hasUrl) {
+    return `${urlField} 配了模型名就要填地址`;
   }
   return null;
 }

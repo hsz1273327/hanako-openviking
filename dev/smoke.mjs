@@ -1916,7 +1916,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("决策超时可填区间", [
     SERVICE_TIMEOUT_LIMITS.systemone.min,
     SERVICE_TIMEOUT_LIMITS.systemone.max,
-  ], [100, 15000]);
+  ], [100, 8000]);
   eq("超时字符串归一成数字", normalizeServiceTimeout(" 1200 ", "rerank"), 1200);
   eq("数字也能归一", normalizeServiceTimeout(1200, "rerank"), 1200);
   eq("小数向下取整", normalizeServiceTimeout("1200.9", "rerank"), 1200);
@@ -1924,7 +1924,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("非数字 = 没配", normalizeServiceTimeout("abc", "rerank"), null);
   eq("低于下限 = 没配", normalizeServiceTimeout(99, "rerank"), null);
   eq("高于上限 = 没配", normalizeServiceTimeout(10001, "rerank"), null);
-  eq("决策那组的上限更宽", normalizeServiceTimeout(12000, "systemone"), 12000);
+  eq("决策那组的上限也是 8000（与运行时上限一致）", normalizeServiceTimeout(8000, "systemone"), 8000);
+  eq("决策超时 8001 越界", normalizeServiceTimeout(8001, "systemone"), null);
   eq("同一个值对精排越界", normalizeServiceTimeout(12000, "rerank"), null);
   eq("认不出的类型按精排那组", normalizeServiceTimeout("99999", "nope"), null);
   eq("未配置取默认值", [
@@ -1933,8 +1934,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   ], [800, 3500]);
   eq("配了就用自己的", [
     serviceTimeoutOrDefault("1200", "rerank"),
-    serviceTimeoutOrDefault(9000, "systemone"),
-  ], [1200, 9000]);
+    serviceTimeoutOrDefault(8000, "systemone"),
+  ], [1200, 8000]);
   eq("写回：合法值存数字串", serializeServiceTimeout("1200", "rerank"), "1200");
   eq("写回：非法值存空串（= 回默认值，不留非法值）", [
     serializeServiceTimeout("99999", "rerank"),
@@ -1973,9 +1974,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "rerankServiceUrl 配了地址就要填模型名（rerankServiceModel）",
   );
   eq(
-    "只给模型不拦（地址空 = 服务未配置）",
+    "只给模型 400 理由写明配了模型名就要填地址",
     servicePairError("", "bge", "rerankServiceUrl", "rerankServiceModel"),
-    null,
+    "rerankServiceUrl 配了模型名就要填地址",
   );
   eq(
     "两个都空 = 都清空，不拦",
@@ -2113,9 +2114,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("召回管理在前置之后", recallStart > preludeEnd, `recall=${recallStart} preludeEnd=${preludeEnd}`);
 
   const logsStart = html.indexOf('<section class="card logs"');
-  const globalOrder = [masterStart, preludeStart, colsStart, logsStart];
+  const globalOrder = [masterStart, colsStart, preludeStart, logsStart];
   check(
-    "全局页内顺序：总闸 → 前置 → 两栏 → 日志",
+    "全局页内顺序：总闸 → 中枢 / 身份 → 前置 → 日志",
     globalOrder.every((value, index) =>
       value > globalPanelStart && value < memoryPanelStart &&
       (index === 0 || value > globalOrder[index - 1]),
@@ -2145,8 +2146,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     `scoring=${scoringIdx} prelude=${preludeStart} global=${globalPanelStart} memory=${memoryPanelStart} scoped=${scopedIdx}`,
   );
   check(
-    "打分服务不在两栏里",
-    scoringIdx < colsStart,
+    "打分服务不在两栏里（在前置里，位于两栏之后）",
+    scoringIdx > colsEnd,
     `scoring=${scoringIdx} cols=${colsStart}..${colsEnd}`,
   );
   for (const id of [
@@ -2195,7 +2196,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "两个超时输入框的上下限跟着各自类型",
     [
       /id="rerankServiceTimeoutMs"[^>]*max="10000"/.test(html),
-      /id="systemoneServiceTimeoutMs"[^>]*max="15000"/.test(html),
+      /id="systemoneServiceTimeoutMs"[^>]*max="8000"/.test(html),
     ],
     [true, true],
   );
@@ -2499,7 +2500,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       String(props.rerankServiceTimeoutMs?.description).includes("100") &&
       String(props.rerankServiceTimeoutMs?.description).includes("10000") &&
       String(props.systemoneServiceTimeoutMs?.description).includes("3500") &&
-      String(props.systemoneServiceTimeoutMs?.description).includes("15000"),
+      String(props.systemoneServiceTimeoutMs?.description).includes("8000"),
     JSON.stringify([props.rerankServiceTimeoutMs?.description, props.systemoneServiceTimeoutMs?.description]),
   );
   check(
@@ -4387,19 +4388,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("有地址无模型零写入", writes.length, 0);
   eq("旧地址没被写进去", store.rerankServiceUrl ?? "", "");
 
+  // 只给模型、不给地址同样拒绝：孤立的模型名运行时会整对回退静默忽略。
+  store.systemoneServiceUrl = "";
   writes.length = 0;
-  const modelOnly = await post({ systemoneServiceModel: "kev-4b" });
-  eq("只有模型时照旧可写", modelOnly.status, 200);
-  eq("孤立模型名可以落库", store.systemoneServiceModel, "kev-4b");
-
-  // 两步提交：先存模型、再补地址，也能过。
-  writes.length = 0;
-  const stepOne = await post({ rerankServiceModel: "bge-reranker-v2-m3" });
-  eq("第一步：先存模型", stepOne.status, 200);
-  const stepTwo = await post({ rerankServiceUrl: "http://127.0.0.1:8098" });
-  eq("第二步：补上地址", stepTwo.status, 200);
+  const modelOnly = await post({ systemoneServiceModel: "isolated-model" });
+  eq("只给模型不给地址 400", modelOnly.status, 400);
   eq(
-    "两步之后是一对完整的值",
+    "拒绝理由写明配了模型名就要填地址",
+    modelOnly.body.error,
+    "systemoneServiceUrl 配了模型名就要填地址",
+  );
+  eq("只给模型零写入", writes.length, 0);
+  eq("孤立模型名没有落库", store.systemoneServiceModel, "kev-4b");
+
+  // 地址与模型要一次成对提交，服务端不会停在半对上。
+  writes.length = 0;
+  const oneShot = await post({
+    rerankServiceUrl: "http://127.0.0.1:8098",
+    rerankServiceModel: "bge-reranker-v2-m3",
+  });
+  eq("一次提交成对写入", oneShot.status, 200);
+  eq(
+    "成对的值落库",
     [store.rerankServiceUrl, store.rerankServiceModel],
     ["http://127.0.0.1:8098", "bge-reranker-v2-m3"],
   );
@@ -4449,6 +4459,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("超时越界不报错", timeoutOutOfRange.status, 200);
   eq("超时越界落库为空串（= 回默认值）", store.rerankServiceTimeoutMs, "");
   eq("越界后 GET 回 null", timeoutOutOfRange.body.rerankServiceTimeoutMs, null);
+
+  // systemone 上限 8000：9000 按越界回退成空串，不夹到 8000。
+  writes.length = 0;
+  const systemoneTooHigh = await post({ systemoneServiceTimeoutMs: "9000" });
+  eq("决策超时填 9000 不报错", systemoneTooHigh.status, 200);
+  eq("决策超时填 9000 回退为空串（= 用默认 3500）", store.systemoneServiceTimeoutMs, "");
+  eq("回退后 GET 回 null", systemoneTooHigh.body.systemoneServiceTimeoutMs, null);
+
+  writes.length = 0;
+  const systemoneAtLimit = await post({ systemoneServiceTimeoutMs: "8000" });
+  eq("决策超时正好 8000 可写", systemoneAtLimit.status, 200);
+  eq("8000 落库", store.systemoneServiceTimeoutMs, "8000");
 
   writes.length = 0;
   const timeoutNumeric = await post({ systemoneServiceTimeoutMs: "abc" });
@@ -5717,6 +5739,55 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("探针记保留数", probes[0].invocation.kept, 2);
     eq("正常解析不算兜底", probes[0].invocation.fallback, false);
     check("探针记了耗时", typeof probes[0].invocation.elapsedMs === "number");
+    eq("模型通道的探针 scoreScale 是 probability",
+      probes[0].invocation.channels[0].scoreScale, "probability");
+  }
+
+  // ---- 精排服务返回 logit：探针把这一批标成 logit ----
+  {
+    const logitBody = {
+      results: [
+        { index: 0, relevance_score: 2.5 },
+        { index: 1, relevance_score: -1.2 },
+        { index: 2, relevance_score: 0.4 },
+      ],
+    };
+    const fetchImpl = async (url) => {
+      const body = String(url).includes("/v1/rerank")
+        ? logitBody
+        : bodyWith(entries);
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          rerankChannels: JSON.stringify([
+            {
+              type: "rerank",
+              url: "http://127.0.0.1:9999",
+              model: "bge-reranker",
+              weight: 1,
+              enabled: true,
+            },
+          ]),
+        },
+        fetchImpl,
+        dataDir: dir,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    await handler({
+      payload: { messages: [{ role: "user", content: "精排服务返回 logit" }] },
+      session: { sessionId: "rerank-logit-probe" },
+    });
+    eq("rerank 探针记一次（logit）", probes.length, 1);
+    eq("精排通道的探针 scoreScale 是 logit",
+      probes[0].invocation.channels[0].scoreScale, "logit");
   }
 
   // ---- 自选模型走 stream，自定义模板生效 ----
@@ -6146,6 +6217,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       RERANK_DOCUMENT_CHARS,
     );
     eq("rerank 分数按 relevance_score 读", outcome.channels[0].scores, [0.9, 0.25, 0]);
+    eq(
+      "0..1 相关度在探针里标为 probability",
+      outcome.channels[0].scoreScale,
+      "probability",
+    );
     // 真机 bge-reranker 返回的是交叉编码器 logit（实测 7.88 / -8.32 / -10.69）：
     // 直接 clamp 会把负分全变 0（当反对票丢掉）、正分全变 1（排序没了）。
     {
@@ -6185,6 +6261,50 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [1, 0.28, 0],
     );
     eq("rerank 0 分候选被丢掉", outcome.indexes, [0, 1]);
+  }
+
+  // ---- rerank 返回越界值：探针标为 logit，说明这批过了 sigmoid ----
+  {
+    resetRuntimeTransport();
+    const logitBody = {
+      results: [
+        { index: 0, relevance_score: 2.5 },
+        { index: 1, relevance_score: -1.2 },
+        { index: 2, relevance_score: 0.4 },
+      ],
+    };
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async () =>
+        new Response(JSON.stringify(logitBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: { rerankChannels: [], rerankPrompt: "", rerankModel: "" },
+      query: "用户问题",
+      items,
+      channels: [
+        {
+          type: "rerank",
+          name: "logit 服务",
+          url: "http://127.0.0.1:9999",
+          model: "bge-reranker",
+          weight: 1,
+          enabled: true,
+        },
+      ],
+    });
+    eq("越界值在探针里标为 logit", outcome.channels[0].scoreScale, "logit");
+    check(
+      "logit 那一路的分已过 sigmoid（0..1）",
+      outcome.channels[0].scores.every((value) => value > 0 && value < 1),
+      JSON.stringify(outcome.channels[0].scores),
+    );
+    resetRuntimeTransport();
   }
 
   // ---- 通道不写 URL / 模型时，用打分服务配置 ----

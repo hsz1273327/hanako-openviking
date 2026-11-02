@@ -48,73 +48,6 @@
         </button>
       </section>
 
-      <!-- 前置：不管宏观行为，只管「下面那些能力有没有底座」。
-           探针决定日志记不记钩子事实，打分服务决定精排通道能不能选那两类。 -->
-      <section id="prelude" class="card prelude" aria-label="前置">
-        <h2 class="card-title">前置</h2>
-
-        <div class="toggle" data-key="probe">
-          <div class="toggle-copy">
-            <b>探针</b>
-            <span>把钩子事实记进日志</span>
-          </div>
-          <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
-        </div>
-
-        <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
-             每组是「地址 + 模型 + 超时 + 测试」四项：地址与模型成对（配了地址就要填模型名），
-             超时留空就用该类型的默认值（placeholder 里写着那个数）。
-             两块都留空时，通道里就只剩「宿主模型」这一类。 -->
-        <div id="scoringServices" class="services">
-          <div class="service-grid">
-            <div class="service" data-kind="rerank">
-              <div class="service-title">精排服务</div>
-              <div class="service-fields">
-                <div class="field">
-                  <label for="rerankServiceUrl">地址</label>
-                  <input id="rerankServiceUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8098">
-                </div>
-                <div class="field">
-                  <label for="rerankServiceModel">模型</label>
-                  <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
-                </div>
-                <div class="field narrow">
-                  <label for="rerankServiceTimeoutMs">超时</label>
-                  <input id="rerankServiceTimeoutMs" type="number" min="100" max="10000" step="100" placeholder="800 ms">
-                </div>
-                <div class="field service-test">
-                  <button id="rerankServiceTest" class="btn ghost sm" type="button">测试</button>
-                </div>
-              </div>
-              <p id="rerankServiceResult" class="service-result" hidden></p>
-              <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 800 ms。</p>
-            </div>
-            <div class="service" data-kind="systemone">
-              <div class="service-title">决策服务</div>
-              <div class="service-fields">
-                <div class="field">
-                  <label for="systemoneServiceUrl">地址</label>
-                  <input id="systemoneServiceUrl" type="url" spellcheck="false" placeholder="http://192.168.50.142:8097">
-                </div>
-                <div class="field">
-                  <label for="systemoneServiceModel">模型</label>
-                  <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
-                </div>
-                <div class="field narrow">
-                  <label for="systemoneServiceTimeoutMs">超时</label>
-                  <input id="systemoneServiceTimeoutMs" type="number" min="100" max="15000" step="100" placeholder="3500 ms">
-                </div>
-                <div class="field service-test">
-                  <button id="systemoneServiceTest" class="btn ghost sm" type="button">测试</button>
-                </div>
-              </div>
-              <p id="systemoneServiceResult" class="service-result" hidden></p>
-              <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。地址与模型成对，超时留空用默认 3500 ms。</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <section class="cols">
         <article class="card">
           <h2 class="card-title">中枢</h2>
@@ -155,6 +88,73 @@
             <input id="budgetTokens" type="number" min="200" max="32000" step="100">
           </div>
         </article>
+      </section>
+
+      <!-- 前置：辅助设施，排在「中枢 / 身份」之后。
+           探针决定日志记不记钩子事实，打分服务决定精排通道能不能选那两类。 -->
+      <section id="prelude" class="card prelude" aria-label="前置">
+        <h2 class="card-title">前置</h2>
+
+        <div class="toggle" data-key="probe">
+          <div class="toggle-copy">
+            <b>探针</b>
+            <span>把钩子事实记进日志</span>
+          </div>
+          <button class="switch sm" type="button" role="switch" data-key="probe" aria-checked="false"><span class="knob"></span></button>
+        </div>
+
+        <!-- 打分服务：精排 / 决策两类的端点先在这里声明一次，下面的精排通道只选类型。
+             每组是「地址 + 模型 + 超时 + 测试」四项：地址与模型成对（两边都要填，或都留空），
+             超时留空就用该类型的默认值（placeholder 里写着那个数）。
+             两块都留空时，通道里就只剩「宿主模型」这一类。 -->
+        <div id="scoringServices" class="services">
+          <div class="service-grid">
+            <div class="service" data-kind="rerank">
+              <div class="service-title">精排服务</div>
+              <div class="service-fields">
+                <div class="field">
+                  <label for="rerankServiceUrl">地址</label>
+                  <input id="rerankServiceUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8098">
+                </div>
+                <div class="field">
+                  <label for="rerankServiceModel">模型</label>
+                  <input id="rerankServiceModel" type="text" spellcheck="false" placeholder="bge-reranker-v2-m3">
+                </div>
+                <div class="field narrow">
+                  <label for="rerankServiceTimeoutMs">超时</label>
+                  <input id="rerankServiceTimeoutMs" type="number" min="100" max="10000" step="100" placeholder="800 ms">
+                </div>
+                <div class="field service-test">
+                  <button id="rerankServiceTest" class="btn ghost sm" type="button">测试</button>
+                </div>
+              </div>
+              <p id="rerankServiceResult" class="service-result" hidden></p>
+              <p class="field-hint">交叉编码器服务，走 /v1/rerank。留空则精排通道里不能选这一类。地址与模型成对（两边都要填，或都留空），超时留空用默认 800 ms。</p>
+            </div>
+            <div class="service" data-kind="systemone">
+              <div class="service-title">决策服务</div>
+              <div class="service-fields">
+                <div class="field">
+                  <label for="systemoneServiceUrl">地址</label>
+                  <input id="systemoneServiceUrl" type="url" spellcheck="false" placeholder="http://192.168.50.142:8097">
+                </div>
+                <div class="field">
+                  <label for="systemoneServiceModel">模型</label>
+                  <input id="systemoneServiceModel" type="text" spellcheck="false" placeholder="kev-4b">
+                </div>
+                <div class="field narrow">
+                  <label for="systemoneServiceTimeoutMs">超时</label>
+                  <input id="systemoneServiceTimeoutMs" type="number" min="100" max="8000" step="100" placeholder="3500 ms">
+                </div>
+                <div class="field service-test">
+                  <button id="systemoneServiceTest" class="btn ghost sm" type="button">测试</button>
+                </div>
+              </div>
+              <p id="systemoneServiceResult" class="service-result" hidden></p>
+              <p class="field-hint">决策模型服务，走 /v1/systemone。留空则精排通道里不能选这一类。地址与模型成对（两边都要填，或都留空），超时留空用默认 3500 ms，上限 8000 ms。</p>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="card logs">

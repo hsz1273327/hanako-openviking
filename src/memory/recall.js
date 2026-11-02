@@ -717,7 +717,23 @@ async function scoreRerankChannel(sdk, channel, query, items) {
     const index = Number.isInteger(entry.index) ? entry.index : position;
     if (index >= 0 && index < items.length) scores[index] = raw;
   });
-  return squashRerankScores(scores, rawScores);
+  return {
+    scores: squashRerankScores(scores, rawScores),
+    scoreScale: rerankScoreScale(rawScores),
+  };
+}
+
+/**
+ * 这一批 rerank 原始分被当成哪种量纲处理：出现越界值就是 logit，否则是 probability。
+ *
+ * 判定本身是启发式：真有服务返回大于 1 的相关度会被误判成 logit。这里不改判定，
+ * 只把结果显式记进探针，排序反常时能直接看出是不是误判，不用猜。
+ */
+export function rerankScoreScale(probe = []) {
+  const list = (Array.isArray(probe) ? probe : []).filter((value) => Number.isFinite(Number(value)));
+  return list.some((value) => Number(value) < 0 || Number(value) > 1)
+    ? "logit"
+    : "probability";
 }
 
 /**
@@ -731,8 +747,7 @@ async function scoreRerankChannel(sdk, channel, query, items) {
  * null（服务没给这一条的分）不参与，保持 null。
  */
 export function squashRerankScores(scores, probe = scores) {
-  const list = (Array.isArray(probe) ? probe : []).filter((value) => Number.isFinite(Number(value)));
-  const looksLikeLogit = list.some((value) => Number(value) < 0 || Number(value) > 1);
+  const looksLikeLogit = rerankScoreScale(probe) === "logit";
   return scores.map((raw) => {
     if (raw === null || raw === undefined) return null;
     const value = Number(raw);
@@ -938,8 +953,8 @@ function normalizeChannelTimeoutValue(raw) {
  * 这一行没用自己的值；运行时不读它。
  *
  * 超时优先级：通道自带 > 服务配置 > 缺省。缺省时 rerank 落到
- * RERANK_CHANNEL_TIMEOUT_MS（800），systemone 落到按候选数自适应；服务配置允许
- * 填到 15000，但 systemone 实际发出去前仍会被 systemoneTimeoutFor 压到 8000。
+ * RERANK_CHANNEL_TIMEOUT_MS（800），systemone 落到按候选数自适应；服务配置与
+ * systemoneTimeoutFor 的上限同为 8000，配置侧与运行时不再各自压一个数。
  */
 export function resolveRerankChannel(channel, switches) {
   if (!channel || typeof channel !== "object") return channel;
@@ -1168,6 +1183,7 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   const results = await Promise.all(
     list.map(async (channel) => {
       const channelStarted = Date.now();
+      let scoreScale = "probability";
       try {
         // 端点解析完之后仍为空：这一类打分服务没配，这一路直接弃权。
         if ((channel.type === "rerank" || channel.type === "systemone") && !channel.url) {
@@ -1175,7 +1191,9 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
         }
         let scores;
         if (channel.type === "rerank") {
-          scores = await scoreRerankChannel(sdk, channel, query, candidates);
+          const result = await scoreRerankChannel(sdk, channel, query, candidates);
+          scores = result.scores;
+          scoreScale = result.scoreScale;
         } else if (channel.type === "systemone") {
           scores = await scoreSystemOneChannel(sdk, channel, query, candidates);
         } else if (channel.type === "model") {
@@ -1193,6 +1211,7 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
             ok: false,
             abstained: true,
             scores,
+            scoreScale,
             error: Array.isArray(scores) && scores.some((score) => score !== null && score !== undefined)
               ? "候选全部同分，这一路没有区分力"
               : "这一路没有给任何候选打分",
@@ -1204,6 +1223,7 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
           weight: channel.weight,
           ok: true,
           scores,
+          scoreScale,
           normalized: scaled.normalized,
           range: [scaled.min, scaled.max],
           elapsedMs: Date.now() - channelStarted,
@@ -1213,6 +1233,7 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
           channel,
           weight: channel.weight,
           ok: false,
+          scoreScale,
           error: reasonOf(error),
           elapsedMs: Date.now() - channelStarted,
         };
@@ -1234,6 +1255,9 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
       weight: result.channel.weight,
       ok: result.ok,
       abstained: result.abstained === true,
+      // 这一批原始分被当成 logit 还是 probability。判定是启发式的，把结果留下，
+      // 排序反常时看探针就能判断是不是误判。
+      scoreScale: result.scoreScale,
       elapsedMs: result.elapsedMs,
       // 这一路实际用的端点 / 超时 / 整对回退的原因，面板「测试」结果行直接展开。
       url: result.channel.url || "",

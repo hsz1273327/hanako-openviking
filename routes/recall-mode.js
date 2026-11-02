@@ -254,9 +254,9 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push([key, serializeServiceTimeout(raw, kind)]);
     }
 
-    // 地址与模型成对：配了地址就必须有模型名，否则整单拒，一个字段不写。
-    // 只校验这一单动到的那一对：存量里已经有「有地址缺模型」的老配置时，
-    // 改别的键不该被连坐——那一对的回退另由 resolveRerankChannel 整对处理。
+    // 地址与模型成对：两边要么都有、要么都空，缺一边整单拒，一个字段不写。
+    // 只校验这一单动到的那一对：存量里已经有半对的老配置时，改别的键不该被连坐——
+    // 那一对的回退另由 resolveRerankChannel 整对处理。
     const pending = new Map(changes);
     for (const [urlField, modelField] of SERVICE_PAIRS) {
       if (!has(body, urlField) && !has(body, modelField)) continue;

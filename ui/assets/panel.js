@@ -994,12 +994,13 @@ function applyLayers(next) {
   paintGatePanels();
   paintRerankPanels();
   // 打分服务：正在输入的那一格不被一次刷新抢走光标与内容。
+  // 半对是还没填完的草稿，服务端不会回这种值，也不拿刷新把它抹掉。
   for (const [id, key] of SERVICE_FIELDS) {
-    if (document.activeElement !== $(id)) {
-      $(id).value = id.endsWith("TimeoutMs")
-        ? serviceTimeoutInput(layers[key], kindOfServiceField(id))
-        : layers[key] || "";
-    }
+    if (document.activeElement === $(id)) continue;
+    if (!id.endsWith("TimeoutMs") && servicePairHalfFilled(id)) continue;
+    $(id).value = id.endsWith("TimeoutMs")
+      ? serviceTimeoutInput(layers[key], kindOfServiceField(id))
+      : layers[key] || "";
   }
   renderRerankChannels([...layers.rerankChannels, ...pending]);
   paintModelSelect();
@@ -1017,12 +1018,11 @@ function readLayers() {
     // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
     rerankChannels: rerankChannelsDraft.filter(isCompleteRerankChannel),
     // 打分服务：原样发，合法性由服务端整单校验；被拒就整组回滚。
-    rerankServiceUrl: $("rerankServiceUrl").value.trim(),
-    rerankServiceModel: $("rerankServiceModel").value.trim(),
+    // 半对停在本地草稿里，两边填齐后一次提交（服务端两个方向都要求成对）。
+    ...readServicePair("rerankServiceUrl", "rerankServiceModel"),
+    ...readServicePair("systemoneServiceUrl", "systemoneServiceModel"),
     // 超时收成数字或 null，与服务端投影同形：否则「没改」与「改了」比不出来。
     rerankServiceTimeoutMs: normalizeServiceTimeout($("rerankServiceTimeoutMs").value, "rerank"),
-    systemoneServiceUrl: $("systemoneServiceUrl").value.trim(),
-    systemoneServiceModel: $("systemoneServiceModel").value.trim(),
     systemoneServiceTimeoutMs: normalizeServiceTimeout(
       $("systemoneServiceTimeoutMs").value,
       "systemone",
@@ -1044,6 +1044,43 @@ const SERVICE_FIELDS = [
   ["systemoneServiceModel", "systemoneServiceModel"],
   ["systemoneServiceTimeoutMs", "systemoneServiceTimeoutMs"],
 ];
+
+// 地址与模型是一对：服务端只接受两边都有或两边都空。
+const SERVICE_PAIRS = [
+  ["rerankServiceUrl", "rerankServiceModel"],
+  ["systemoneServiceUrl", "systemoneServiceModel"],
+];
+
+/** 输入框 id 的另一半；超时框没有配对，返回空串。 */
+function servicePartnerOf(id) {
+  for (const [urlId, modelId] of SERVICE_PAIRS) {
+    if (id === urlId) return modelId;
+    if (id === modelId) return urlId;
+  }
+  return "";
+}
+
+/** 本地的这一对是不是半对（正在填的草稿）：半对不发服务端，等填齐再整对提交。 */
+function servicePairHalfFilled(id) {
+  const partner = servicePartnerOf(id);
+  if (!partner) return false;
+  return Boolean($(id).value.trim()) !== Boolean($(partner).value.trim());
+}
+
+/** 清空一半时把另一半也清掉，不留下孤立值。 */
+function clearServicePartner(id) {
+  if (id.endsWith("TimeoutMs") || $(id).value.trim()) return;
+  const partner = servicePartnerOf(id);
+  if (partner) $(partner).value = "";
+}
+
+/** 读一对服务字段：两边都有或两边都空才提交，半对留在界面上继续编辑。 */
+function readServicePair(urlId, modelId) {
+  const url = $(urlId).value.trim();
+  const model = $(modelId).value.trim();
+  if (Boolean(url) !== Boolean(model)) return {};
+  return { [urlId]: url, [modelId]: model };
+}
 
 // 两组服务的「测试」按钮：kind -> 按钮 id。结果行 id 按 kind 推出来。
 const SERVICE_TESTS = [
@@ -1185,6 +1222,8 @@ $("rerankModel").addEventListener("change", saveLayers);
 
 for (const [id] of SERVICE_FIELDS) {
   $(id).addEventListener("change", () => {
+    // 地址与模型成对：清空任意一半时把另一半也清掉。
+    clearServicePartner(id);
     // 改了一格，上一次的测试结果就不是对这一组值的结论了。
     clearServiceResult(kindOfServiceField(id));
     saveLayers();
