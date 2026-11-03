@@ -136,7 +136,7 @@
           "systemoneServiceUrl": {
             "type": "string",
             "title": "决策服务地址",
-            "description": "决策模型（/v1/systemone）服务地址，例如 http://192.168.50.142:8097。只接受 http:// 或 https://，留空表示未配置，精排通道里不能选这一类。",
+            "description": "决策模型（/v1/systemone）服务地址。只接受 http:// 或 https://，留空表示未配置，精排通道里不能选这一类。",
             "default": ""
           },
           "systemoneServiceModel": {

@@ -40,7 +40,7 @@ export const SCORING_SERVICES = Object.freeze([
     timeoutKey: "rerankServiceTimeoutMs",
     defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.rerank.fallback,
     hint: "交叉编码器走 /v1/rerank",
-    urlPlaceholder: "http://127.0.0.1:8098",
+    urlPlaceholder: "http://主机:端口",
     modelPlaceholder: "bge-reranker-v2-m3",
   }),
   Object.freeze({
@@ -51,7 +51,7 @@ export const SCORING_SERVICES = Object.freeze([
     timeoutKey: "systemoneServiceTimeoutMs",
     defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.systemone.fallback,
     hint: "决策模型走 /v1/systemone",
-    urlPlaceholder: "http://192.168.50.142:8097",
+    urlPlaceholder: "http://主机:端口",
     modelPlaceholder: "kev-4b",
   }),
 ]);

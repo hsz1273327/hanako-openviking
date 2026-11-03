@@ -378,7 +378,7 @@ function ndjsonResponse(events) {
     body: { status: "ok", healthy: true, version: "v0.4.16" },
   });
   const client = createClient({
-    serverUrl: "http://192.168.50.142:8000/",
+    serverUrl: "http://127.0.0.1:8000/",
     apiKey: "k-123",
     peer: "mbp-hanako",
     fetchImpl,
@@ -387,9 +387,9 @@ function ndjsonResponse(events) {
   const result = await client.health();
   eq("health 返回顶层字段", result, { status: "ok", healthy: true, version: "v0.4.16" });
   eq("health 里能拿到版本", result?.version, "v0.4.16");
-  eq("base 去掉尾部斜杠", client.baseUrl, "http://192.168.50.142:8000");
+  eq("base 去掉尾部斜杠", client.baseUrl, "http://127.0.0.1:8000");
   eq("health 走 GET", calls[0].init.method, "GET");
-  eq("health URL", calls[0].url, "http://192.168.50.142:8000/health");
+  eq("health URL", calls[0].url, "http://127.0.0.1:8000/health");
   eq("带上 X-API-Key", calls[0].init.headers["X-API-Key"], "k-123");
   eq("带上 actor peer", calls[0].init.headers["X-OpenViking-Actor-Peer"], "mbp-hanako");
 }
@@ -584,7 +584,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   });
   const transport = createRuntimeTransport({ runtimeFetch, token: "tk-test", runtimeId: "rt-7", timeoutMs: 1800 });
   const client = createClient({
-    serverUrl: "http://192.168.50.142:8000/",
+    serverUrl: "http://127.0.0.1:8000/",
     apiKey: "secret-key",
     peer: "mbp-hanako",
     timeoutMs: 1800,
@@ -601,7 +601,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("代理请求体是 JSON 字符串", typeof calls[0].init.body, "string");
 
   const envelope = JSON.parse(calls[0].init.body);
-  eq("信封 url", envelope.url, "http://192.168.50.142:8000/api/v1/search/search");
+  eq("信封 url", envelope.url, "http://127.0.0.1:8000/api/v1/search/search");
   eq("信封 method", envelope.method, "POST");
   eq("信封带 API Key", envelope.headers["X-API-Key"], "secret-key");
   eq("信封带 actor peer", envelope.headers["X-OpenViking-Actor-Peer"], "mbp-hanako");
@@ -1748,7 +1748,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("argv 里的 token", parseArgs(["--token=abc"]).token, "abc");
 
   const ok = normalizeEnvelope({
-    url: "http://192.168.50.142:8000/health",
+    url: "http://127.0.0.1:8000/health",
     method: "get",
     headers: { Host: "evil", "X-API-Key": "k", "Content-Length": "9" },
     timeoutMs: 999999,
@@ -5368,7 +5368,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const servicesOk = await post({
     rerankServiceUrl: "  http://127.0.0.1:8098/  ",
     rerankServiceModel: "  bge-reranker-v2-m3  ",
-    systemoneServiceUrl: "http://192.168.50.142:8097",
+    systemoneServiceUrl: "http://127.0.0.1:8097",
     systemoneServiceModel: "  kev-4b  ",
   });
   eq("服务四字段可写", servicesOk.status, 200);
@@ -5382,7 +5382,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       servicesOk.body.systemoneServiceUrl,
       servicesOk.body.systemoneServiceModel,
     ],
-    ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "http://192.168.50.142:8097", "kev-4b"],
+    ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "http://127.0.0.1:8097", "kev-4b"],
   );
   check("applied 列出服务字段",
     ["rerankServiceUrl", "rerankServiceModel", "systemoneServiceUrl", "systemoneServiceModel"]
@@ -5395,7 +5395,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("非法服务 URL 不会静默清空旧值", store.rerankServiceUrl, "http://127.0.0.1:8098");
 
   writes.length = 0;
-  const missingScheme = await post({ systemoneServiceUrl: "192.168.50.142:8097" });
+  const missingScheme = await post({ systemoneServiceUrl: "127.0.0.1:8097" });
   eq("缺协议的服务 URL 400", missingScheme.status, 400);
   eq("缺协议零写入", writes.length, 0);
 
@@ -5531,7 +5531,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 
   // 存量里已经有「有地址缺模型」时，改别的键不能被连坐。
-  store.systemoneServiceUrl = "http://192.168.50.142:8097";
+  store.systemoneServiceUrl = "http://127.0.0.1:8097";
   store.systemoneServiceModel = "";
   writes.length = 0;
   const otherKey = await post({ queryMode: "last" });
@@ -5794,12 +5794,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   respond = async () => jsonOf({ answers: { q: { noul: 0.83 } } });
   const systemoneOk = await test({
     kind: "systemone",
-    url: "http://192.168.50.142:8097",
+    url: "http://127.0.0.1:8097",
     model: "kev-4b",
     timeoutMs: 3500,
   });
   eq("service-test systemone 可用", systemoneOk.body.ok, true);
-  eq("systemone 打到自己的端点", calls[0].url, "http://192.168.50.142:8097/v1/systemone");
+  eq("systemone 打到自己的端点", calls[0].url, "http://127.0.0.1:8097/v1/systemone");
   eq("systemone 请求体带模型名", calls[0].body.model, "kev-4b");
   eq("systemone state 是一段 text", calls[0].body.state, { type: "text", content: "连通性测试" });
   eq("systemone 只问一个问题", Object.keys(calls[0].body.questions), ["q"]);
@@ -7501,7 +7501,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         {
           type: "rerank",
           name: "远端",
-          url: "http://10.0.0.5:8080",
+          url: "http://127.0.0.1:8080",
           model: "m",
           weight: 1,
           timeoutMs: 321,
@@ -7509,7 +7509,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     });
     eq("通道走受管运行时出口", calls.length, 1);
-    eq("运行时出口接收通道自己的 URL", calls[0].url, "http://10.0.0.5:8080/v1/rerank");
+    eq("运行时出口接收通道自己的 URL", calls[0].url, "http://127.0.0.1:8080/v1/rerank");
     eq("运行时信封带这一路的超时", calls[0].init.timeoutMs, 321);
     eq("运行时信封 body 仍是 rerank 形状", calls[0].body.model, "m");
     eq(
@@ -8485,7 +8485,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 近白色（见上面的 theme 断言）；这里把「拿到响应 → 填字段」钉住，
   // 将来真的丢了值会立刻红。
   const real = {
-    serverUrl: "http://192.168.50.142:8000",
+    serverUrl: "http://127.0.0.1:8000",
     peerPrefix: "desktop",
     peerPrefixValid: true,
     apiKeySet: true,
@@ -8493,7 +8493,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     apiKeyTail: "9f3c",
   };
   const fields = connFields(real);
-  eq("服务地址被填进去", fields.serverUrl, "http://192.168.50.142:8000");
+  eq("服务地址被填进去", fields.serverUrl, "http://127.0.0.1:8000");
   eq("门牌前缀被填进去", fields.peerPrefix, "desktop");
   eq("API Key 填的是掩码，不是明文", fields.apiKey, "ov-1••••••••9f3c");
   eq("掩码与「没改过」的判据一致", fields.mask, fields.apiKey);
@@ -9016,6 +9016,76 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     cardOptimisticReset({ autoRecall: false }, "autoRecall", { autoRecall: true }).autoRecall === true &&
       cardOptimisticReset({ recallPeerScope: "all" }, "recallPeerScope", { recallScope: "self" }).recallPeerScope === "self");
 }
+
+// ================= 源码与产物：不含私有网段地址 =================
+// 占位符、文案、manifest 描述、测试假数据里都不许出现内网网段：那是某个人家里的拓扑，
+// 不该进仓库。只扫源码与构建产物；ui/assets/app-ui.js 是宿主下发的压缩代码，扫它没意义。
+const PRIVATE_ADDR_RE =
+  /(?:^|[^\d.])(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?:[^\d]|$)/;
+const REPO_ROOT = path.join(import.meta.dirname, "..");
+const PRIVATE_SCAN_DIRS = ["ui-src/src", "src", "routes", "docs", "dev"];
+const PRIVATE_SCAN_FILES = ["manifest.json", "AGENTS.md"];
+const PRIVATE_SCAN_SKIP = new Set(["node_modules", ".git", "dist", "app-ui.js"]);
+const PRIVATE_SCAN_EXT = /\.(?:js|vue|mjs|md|json)$/;
+
+/** 递归收集要扫的文件：目录里的源码 + 手挑的根文件 + ui/assets 下的构建产物。 */
+function privateScanFiles() {
+  const files = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (PRIVATE_SCAN_SKIP.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (PRIVATE_SCAN_EXT.test(entry.name)) files.push(full);
+    }
+  };
+  for (const dir of PRIVATE_SCAN_DIRS) walk(path.join(REPO_ROOT, dir));
+  for (const name of PRIVATE_SCAN_FILES) files.push(path.join(REPO_ROOT, name));
+  const assetDir = path.join(REPO_ROOT, "ui/assets");
+  for (const name of fs.readdirSync(assetDir)) {
+    if (name.endsWith(".js") && !PRIVATE_SCAN_SKIP.has(name)) files.push(path.join(assetDir, name));
+  }
+  return files;
+}
+
+/** 扫描结果：每个命中一条 `相对路径:行号: 片段`，没命中为空。 */
+function privateAddrHits(files) {
+  const hits = [];
+  for (const file of files) {
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    lines.forEach((line, index) => {
+      if (!PRIVATE_ADDR_RE.test(line)) return;
+      hits.push(`${path.relative(REPO_ROOT, file)}:${index + 1}: ${line.trim().slice(0, 160)}`);
+    });
+  }
+  return hits;
+}
+
+// 自检：正则得真能认出样例，也不能把回环 / 版本号错当成私有网段。
+const privateSample = ["192", "168", "50", "1"].join(".");
+check("私有网段正则认得出样例", PRIVATE_ADDR_RE.test(`http://${privateSample}:8097/`), privateSample);
+check("私有网段正则不误伤回环", PRIVATE_ADDR_RE.test("http://127.0.0.1:8098") === false);
+check("私有网段正则不误伤版本号", PRIVATE_ADDR_RE.test("naive-ui 2.10.0.0") === false);
+
+const privateScanList = privateScanFiles();
+check("源码与产物都进了扫描范围", privateScanList.length > 40, `${privateScanList.length} 个文件`);
+const privateHits = privateAddrHits(privateScanList);
+check(
+  "源码与产物里没有私有网段地址",
+  privateHits.length === 0,
+  privateHits.length ? `共 ${privateHits.length} 处，第一处 ${privateHits[0]}` : "",
+);
+check(
+  "placeholder 用占位式写法（http://主机:端口）而不是具体地址",
+  SCORING_SERVICES.every((service) => service.urlPlaceholder === "http://主机:端口"),
+  SCORING_SERVICES.map((service) => service.urlPlaceholder).join(" / "),
+);
 
 // ================= 结果 =================
 if (failures.length) {
