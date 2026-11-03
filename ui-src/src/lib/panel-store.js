@@ -160,7 +160,7 @@ export function createPanelStore(deps = {}) {
     // peer 名单。
     peers: { list: [], loaded: false, error: "", pending: false },
     // 日志尾部。
-    logs: { lines: [], open: false },
+    logs: { lines: [] },
     // 提示位。
     note: { text: "", bad: false },
     foot: "",
@@ -752,11 +752,7 @@ export function createPanelStore(deps = {}) {
     }
   }
 
-  /* ---------------- 日志 / 标签 ---------------- */
-
-  function toggleLogs() {
-    state.logs.open = !state.logs.open;
-  }
+  /* ---------------- 提示词 ---------------- */
 
   /** 提示词状态小字：默认 / 已修改 / 空（不拦截）。 */
   function gatePromptStatusOf() {
@@ -869,7 +865,6 @@ export function createPanelStore(deps = {}) {
     channelView,
     channelTypeChoices,
     togglePeer,
-    toggleLogs,
     touchPrompt,
     setPrompt,
     resetPrompt,

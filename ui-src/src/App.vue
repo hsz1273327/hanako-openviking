@@ -1,9 +1,9 @@
 <script setup>
-// 面板根组件：主题 + 顶部身份条 + 标签栏 + 三页 + 页脚。
+// 面板根组件：主题 + 顶部身份条 + 标签栏 + 四页 + 页脚。
 //
 // 结构对应手写的 ui/panel.html，一屏布局的契约没变：
 //   .page（定高、不自滚）→ .top / .tabs / .tab-panel / .foot
-// 三页**始终挂载**，只用 hidden 切显隐：切页不重算、不重读、不丢输入中的内容。
+// 四页**始终挂载**，只用 hidden 切显隐：切页不重算、不重读、不丢输入中的内容。
 // 这也意味着隐藏页里的节点照旧存在（peer 名单 / 通道行都在内存里）。
 //
 // 主题：宿主是亮色，用 theme.js 的 lightThemeOverrides，不引 darkTheme（见该文件注释）。
@@ -13,6 +13,7 @@
 import { computed, onMounted, ref } from "vue";
 import { NButton, NConfigProvider } from "naive-ui";
 import GlobalPanel from "./components/GlobalPanel.vue";
+import LogsPanel from "./components/LogsPanel.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
 import SkillPanel from "./components/SkillPanel.vue";
 import TabBar from "./components/TabBar.vue";
@@ -111,7 +112,7 @@ onMounted(() => {
 
       <TabBar :active="tab" @select="selectTab" />
 
-      <!-- 三页共用顶部身份条与页脚；标签只决定中间哪一块可见，不引入路由。 -->
+      <!-- 四页共用顶部身份条与页脚；标签只决定中间哪一块可见，不引入路由。 -->
       <div
         id="panel-global"
         class="tab-panel"
@@ -138,6 +139,15 @@ onMounted(() => {
         :hidden="tab !== 'skill'"
       >
         <SkillPanel />
+      </div>
+      <div
+        id="panel-logs"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-logs"
+        :hidden="tab !== 'logs'"
+      >
+        <LogsPanel />
       </div>
 
       <footer id="foot" class="foot">{{ foot }}</footer>

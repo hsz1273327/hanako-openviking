@@ -153,11 +153,12 @@ import {
   statsText as cardStatsText,
   withOverride as cardWithOverride,
 } from "../ui-src/src/lib/card-view.js";
-// 面板三页标签与记忆键：纯逻辑，node 直接验。
+// 面板四页标签与记忆键：纯逻辑，node 直接验。
 import {
   DEFAULT_TAB,
   TAB_KEY,
   TABS,
+  nextTab,
   normalizeTab,
   readTab,
   writeTab,
@@ -1023,12 +1024,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const master = uiCode("components/MasterCard.vue");
   const hub = uiCode("components/HubIdentity.vue");
   const prelude = uiCode("components/PreludeCard.vue");
-  const logsCard = uiCode("components/LogsCard.vue");
+  const logsPanel = uiCode("components/LogsPanel.vue");
   const memoryPanel = uiCode("components/MemoryPanel.vue");
   const recall = uiCode("components/RecallCard.vue");
   const peerList = uiCode("components/PeerList.vue");
   const skillPanel = uiCode("components/SkillPanel.vue");
-  const globalSources = [globalPanel, master, hub, prelude, logsCard];
+  const globalSources = [globalPanel, master, hub, prelude];
   const memorySources = [memoryPanel, recall, peerList, uiCode("components/ChannelList.vue")];
 
   // ---- panel.html：只剩挂载点，只引构建产物 panel.js ----
@@ -1056,7 +1057,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     'id="prelude"',
     'id="scoringServices"',
     'class="cols"',
-    'class="logs"',
   ]) {
     check(
       `全局页（组件）包含 ${needle}`,
@@ -1064,6 +1064,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       needle,
     );
   }
+  check(
+    "日志页（组件）包含卡片壳 / 计数条 / 正文",
+    ['class="logs"', 'id="logChips"', 'id="logBody"'].every((needle) =>
+      logsPanel.includes(needle),
+    ),
+    logsPanel.slice(0, 200),
+  );
+  check(
+    "全局页（组件）里不再出现日志相关任何字样",
+    ["LogsCard", "日志", "logBody", "logChips"].every(
+      (needle) => uiSrcRaw("components/GlobalPanel.vue").includes(needle) === false,
+    ),
+    uiSrcRaw("components/GlobalPanel.vue"),
+  );
+  check(
+    "LogsCard.vue 文件已删（不是留着没人引用的死文件）",
+    fs.existsSync(path.join(UI_SRC_DIR, "components/LogsCard.vue")) === false,
+  );
   for (const needle of [
     'class="scoped-note"',
     'class="recall"',
@@ -1095,11 +1113,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ));
 
   // ---- 页面内顺序 ----
-  const globalOrder = ["<MasterCard", "<HubIdentity", "<PreludeCard", "<LogsCard"].map((needle) =>
+  const globalOrder = ["<MasterCard", "<HubIdentity", "<PreludeCard"].map((needle) =>
     globalPanel.indexOf(needle),
   );
   check(
-    "全局页内顺序：总闸 → 中枢 / 身份 → 前置 → 日志",
+    "全局页内顺序：总闸 → 中枢 / 身份 → 前置",
     globalOrder.every((value, index) => value > 0 && (index === 0 || value > globalOrder[index - 1])),
     globalOrder.join(" < "),
   );
@@ -1110,14 +1128,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     memoryPanel,
   );
   check(
-    "根组件按 标签栏 → 全局 → 记忆 → 技能 排列",
+    "根组件按 标签栏 → 全局 → 记忆 → 技能 → 日志 排列",
     app.indexOf("<TabBar") < app.indexOf('id="panel-global"') &&
       app.indexOf('id="panel-global"') < app.indexOf('id="panel-memory"') &&
-      app.indexOf('id="panel-memory"') < app.indexOf('id="panel-skill"'),
+      app.indexOf('id="panel-memory"') < app.indexOf('id="panel-skill"') &&
+      app.indexOf('id="panel-skill"') < app.indexOf('id="panel-logs"'),
     app,
   );
-  check("三页都在根组件里挂载（不是切页才创建）",
-    ["<GlobalPanel", "<MemoryPanel", "<SkillPanel"].every((needle) => app.includes(needle)));
+  check("四页都在根组件里挂载（不是切页才创建）",
+    ["<GlobalPanel", "<MemoryPanel", "<SkillPanel", "<LogsPanel"].every((needle) => app.includes(needle)));
 
   // ---- 中枢 / 身份两栏：NGrid 两列 > 两张 NCard ----
   check(
@@ -2973,11 +2992,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 // ================= ui: 面板标签页（组件） =================
 {
-  // 标签栏现在是 TabBar.vue，三块内容在 App.vue 里始终挂载、用 hidden 切显隐。
-  // 键名 / 默认页 / 非法值回退 / storage 容错全部还在 lib/tabs.js（纯逻辑，下面直接验）。
+  // 标签栏现在是 TabBar.vue，四块内容在 App.vue 里始终挂载、用 hidden 切显隐。
+  // 键名 / 默认页 / 非法值回退 / 键盘换页 / storage 容错全部在 lib/tabs.js（纯逻辑，下面直接验）。
   const app = uiCode("App.vue");
   const tabBar = uiCode("components/TabBar.vue");
-  const logsCard = uiCode("components/LogsCard.vue");
+  const logsPanel = uiCode("components/LogsPanel.vue");
   const css = panelCss();
   const storeJs = uiSrcRaw("lib/panel-store.js");
 
@@ -2986,13 +3005,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 标签按钮 ----
   check(
-    "TabBar 用 TABS 渲染（不是写死三个按钮）",
+    "TabBar 用 TABS 渲染（不是写死四个按钮）",
     tabBar.includes('v-for="tab in TABS"') && tabBar.includes('from "../lib/tabs.js"'),
   );
-  check("三个标签 id 由 TABS 生成", tabBar.includes(":id=\"`tab-${tab}`\""), tabBar.slice(0, 200));
+  check("四个标签 id 由 TABS 生成", tabBar.includes(":id=\"`tab-${tab}`\""), tabBar.slice(0, 200));
   check(
-    "三个标签文案齐全",
-    ["全局配置", "记忆配置", "共享技能"].every((label) => tabBar.includes(label)),
+    "四个标签文案齐全（日志排最后）",
+    ["全局配置", "记忆配置", "共享技能", "日志"].every((label) => tabBar.includes(label)) &&
+      tabBar.indexOf('global: "全局配置"') < tabBar.indexOf('logs: "日志"'),
+    tabBar.slice(0, 400),
   );
   check("标签栏只有一个 tablist", (tabBar.match(/role="tablist"/g) || []).length === 1);
   eq("每枚标签都是 role=tab", (tabBar.match(/role="tab"/g) || []).length, 1);
@@ -3005,13 +3026,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("data-tab 带着页名", tabBar.includes(":data-tab=\"tab\""));
   check("点击发 select", tabBar.includes('@click="select(tab)"'));
   check(
-    "键盘左右 / Home / End 都能换",
-    ["ArrowRight", "ArrowLeft", "Home", "End"].every((key) => tabBar.includes(`"${key}"`)),
+    "键盘左右 / Home / End 都能换（映射在 lib/tabs.js 的 nextTab，下面直接测）",
+    tabBar.includes("nextTab") && tabBar.includes("event.key") &&
+      ["ArrowRight", "ArrowLeft", "Home", "End"].every((key) => tabBar.includes(key) === false),
+    tabBar.slice(0, 200),
   );
   check("键盘切换后焦点跟着走", tabBar.includes(".focus?.()"));
 
   // ---- tabpanel ----
-  eq("role=tabpanel 恰好三块", (app.match(/role="tabpanel"/g) || []).length, 3);
+  eq("role=tabpanel 恰好四块", (app.match(/role="tabpanel"/g) || []).length, 4);
   for (const name of TABS) {
     const tag = panelTag(name);
     check(`${name} 内容块有 id`, tag.includes(`id="panel-${name}"`), tag);
@@ -3019,8 +3042,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     check(`${name} 内容块有 tab-panel 类`, /class="tab-panel"/.test(tag), tag);
     check(`${name} 内容块按当前页切 hidden`, tag.includes(`:hidden="tab !== '${name}'"`), tag);
   }
-  check("三页都挂在根组件里", ["<GlobalPanel", "<MemoryPanel", "<SkillPanel"].every((n) => app.includes(n)));
-  eq("三页的 tabpanel 主键齐全", ["global", "memory", "skill"].map((name) => panelTag(name).includes(`id="panel-${name}"`)), [true, true, true]);
+  check("四页都挂在根组件里", ["<GlobalPanel", "<MemoryPanel", "<SkillPanel", "<LogsPanel"].every((n) => app.includes(n)));
+  eq("四页的 tabpanel 主键齐全", ["global", "memory", "skill", "logs"].map((name) => panelTag(name).includes(`id="panel-${name}"`)), [true, true, true, true]);
   check("切页用 hidden，不用 v-if（隐藏页的节点不能消失）", /v-if="tab\b/.test(app) === false);
 
   // ---- 切页接线 ----
@@ -3044,30 +3067,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     selectTabBody,
   );
 
-  // ---- 日志折叠（行为第 9 条） ----
-  check("日志折叠仍在全局页", logsCard.includes('id="logToggle"') && logsCard.includes('id="logBody"'));
-  check("日志正文用 NCollapse + NCollapseItem 折叠",
-    logsCard.includes("<NCollapse") && logsCard.includes("<NCollapseItem"));
-  check("折叠是受控的（展开名单由 state.logs.open 决定）",
-    /:expanded-names="open \? \['logs'\] : \[\]"/.test(logsCard),
-    logsCard.slice(logsCard.indexOf("<NCollapse"), logsCard.indexOf("<NCollapse") + 200));
-  check("折叠头的回写只在状态真变了时落 store",
-    /function onExpanded\(names\)[\s\S]{0,200}if \(next !== open\.value\) toggle\(\)/.test(logsCard),
-    logsCard.slice(logsCard.indexOf("function onExpanded"), logsCard.indexOf("function onExpanded") + 200));
-  check("折叠头的 extra 区不重复触发（trigger-areas 只留 main / arrow）",
-    /:trigger-areas="\['main', 'arrow'\]"/.test(logsCard));
-  check("折叠头标题是「日志正文」", /title="日志正文"/.test(logsCard));
+  // ---- 日志页（折叠已彻底删除，行为第 9 条只剩数据与区内滚） ----
+  check("日志页有正文与计数条", logsPanel.includes('id="logBody"') && logsPanel.includes('id="logChips"'));
+  check("折叠控件彻底删掉（NCollapse / NCollapseItem / 折叠按钮 / logToggle）",
+    ["NCollapse", "NCollapseItem", "NButton", "logToggle", "onExpanded"].every(
+      (needle) => logsPanel.includes(needle) === false),
+    logsPanel.slice(0, 200));
   check("正文在 NScrollbar 里（区内滚）",
-    /<NScrollbar class="log">[\s\S]{0,120}id="logBody"/.test(logsCard));
-  check("计数条 #logChips 在卡的 #header-extra 里（始终可见）",
-    /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsCard));
-  check(
-    "折叠按钮只切隐藏与文案",
-    logsCard.includes('open ? "收起" : "展开"') && logsCard.includes("@click=\"toggle()\""),
-  );
-  check("折叠状态在 store 里（切页不丢）", /function toggleLogs\(\)[\s\S]{0,120}state\.logs\.open = !state\.logs\.open/.test(storeJs));
-  check("日志计数条来自 logChips", logsCard.includes("chips") && storeJs.includes("logChips(state.logs.lines)"));
+    /<NScrollbar class="log">[\s\S]{0,120}id="logBody"/.test(logsPanel));
+  check("计数条 #logChips 在卡的 #header-extra 里（标题在左、计数在右）",
+    /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsPanel));
+  check("后端没有清空接口，所以日志页没有清空 / 刷新按钮",
+    /<NButton\b|<button\b/.test(logsPanel) === false);
+  check("日志计数条来自 logChips", logsPanel.includes("chips") && storeJs.includes("logChips(state.logs.lines)"));
   check("日志正文来自 logBodyText", storeJs.includes("logBodyText(state.logs.lines)"));
+  check("折叠状态与切换函数已从 store 删干净",
+    ["toggleLogs", "logs.open"].every((needle) => storeJs.includes(needle) === false));
+  check("useLogs 不再返回 open / toggle",
+    ["open:", "toggle:"].every((needle) => uiSrcRaw("composables/useLogs.js").includes(needle) === false),
+    uiSrcRaw("composables/useLogs.js"));
 
   // ---- 置灰覆盖三页（行为第 8 条） ----
   const dimBindings = [
@@ -3091,16 +3109,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("tab 记忆键", TAB_KEY, "hanako-openviking:tab");
   check("tab 记忆键带 app 前缀", TAB_KEY.startsWith("hanako-openviking:"));
   eq("默认页", DEFAULT_TAB, "global");
-  eq("三个页名", TABS, ["global", "memory", "skill"]);
-  for (const value of [null, undefined, "", "nope", "Global", "MEMORY", " memory "]) {
+  eq("四个页名", TABS, ["global", "memory", "skill", "logs"]);
+  for (const value of [null, undefined, "", "nope", "Global", "MEMORY", " memory ", "log", "Logs", "LOGS"]) {
     eq(`非法值 ${JSON.stringify(value)} 回默认页`, normalizeTab(value), "global");
   }
-  for (const value of ["global", "memory", "skill"]) {
+  for (const value of ["global", "memory", "skill", "logs"]) {
     eq(`合法值 ${value} 原样返回`, normalizeTab(value), value);
   }
+  // 键盘换页：左右成圈、Home / End 到两端（纯函数，能看到第四个真的参与循环）。
+  eq("ArrowRight 从第四页绕回第一页", nextTab("logs", "ArrowRight"), "global");
+  eq("ArrowRight 从第三页到第四页", nextTab("skill", "ArrowRight"), "logs");
+  eq("ArrowLeft 从第四页到第三页", nextTab("logs", "ArrowLeft"), "skill");
+  eq("ArrowLeft 从第一页绕到第四页", nextTab("global", "ArrowLeft"), "logs");
+  eq("Home 回第一页", nextTab("logs", "Home"), "global");
+  eq("End 落到第四页", nextTab("global", "End"), "logs");
+  eq("End 在第四页保持第四页", nextTab("logs", "End"), "logs");
+  eq("别的键不换页", nextTab("global", "Enter"), null);
   eq("空 storage 回默认页", readTab(null), "global");
   eq("storage 读不到回默认页", readTab({ getItem: () => null }), "global");
   eq("storage 读到合法值", readTab({ getItem: () => "memory" }), "memory");
+  eq("storage 读到第四页 logs", readTab({ getItem: () => "logs" }), "logs");
   eq("storage 读到非法值回默认页", readTab({ getItem: () => "xx" }), "global");
   eq(
     "storage 读抛错不崩、回默认页",
@@ -3120,6 +3148,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     writeTab(fake, "skill");
     eq("writeTab 写入正确的键值", [store.get(TAB_KEY), store.size], ["skill", 1]);
     eq("writeTab 后 readTab 能读回", readTab(fake), "skill");
+    writeTab(fake, "logs");
+    eq("writeTab 认第四页 logs", [store.get(TAB_KEY), store.size], ["logs", 1]);
+    eq("writeTab 之后 readTab 能读回 logs", readTab(fake), "logs");
   }
   eq(
     "writeTab 在 setItem 抛错时不崩",
@@ -3169,7 +3200,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const master = uiCode("components/MasterCard.vue");
   const hub = uiCode("components/HubIdentity.vue");
   const prelude = uiCode("components/PreludeCard.vue");
-  const logsCard = uiCode("components/LogsCard.vue");
+  const logsPanel = uiCode("components/LogsPanel.vue");
   const skillPanel = uiCode("components/SkillPanel.vue");
 
   // 高度基准：宿主把整页 iframe 装进定高容器，html/body 的 100% 就是它给的高度。
@@ -3209,19 +3240,27 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("内容区 min-height: 0", /min-height\s*:\s*0/.test(panelRule || ""), panelRule || "");
   check("内容区纵向 flex 列", /flex-direction\s*:\s*column/.test(panelRule || ""), panelRule || "");
 
-  // 三页各自的内容区都要吃满剩余高度，而不是只有全局页。
+  // 四页各自的内容区都要吃满剩余高度，而不是只有全局页。
   for (const name of TABS) {
     const tag = new RegExp(`<div[\\s\\S]{0,120}id="panel-${name}"[\\s\\S]{0,240}?>`).exec(app)?.[0] ?? "";
     check(`panel-${name} 挂的是同一套 tab-panel 契约`, /class="tab-panel"/.test(tag), tag);
   }
   check(
-    "全局页上面几块按内容定高、只有日志卡让步",
-    [".master", ".prelude", ".cols"].every((sel) =>
+    "全局页上两块按内容定高，前置卡吃掉余量但不会被压扁",
+    [".master", ".cols"].every((sel) =>
       new RegExp(`#panel-global > \\${sel}`).test(css),
-    ),
+    ) &&
+      /#panel-global > \.prelude \{[\s\S]{0,80}flex\s*:\s*1 0 auto/.test(css) &&
+      /#panel-global > \.prelude \{[\s\S]{0,160}min-height\s*:\s*0/.test(css),
   );
-  // 这三块现在是组件的根节点：选择器仍然落在同一个位置（tab-panel 的直接子元素）。
-  // 三块现在是组件的根节点：n-card / n-grid 的根元素都接 attrs，
+  check("前置卡的说明行贴到卡底（margin-top: auto）",
+    /margin-top\s*:\s*auto/.test(ruleBody(css, ".services-note") || ""),
+    ruleBody(css, ".services-note") || "");
+  check("前置卡内部的链能吃满：卡 → 内容区 → NSpace → 服务块",
+    /#panel-global > \.prelude > \.n-card-content \{[\s\S]{0,160}min-height\s*:\s*0/.test(css) &&
+      /#panel-global > \.prelude > \.n-card-content > \.n-space \{[\s\S]{0,80}flex\s*:\s*1 1 auto/.test(css) &&
+      /#panel-global > \.prelude \.services \{[\s\S]{0,80}flex\s*:\s*1 1 auto/.test(css));
+  // 这三块现在是组件的根节点：n-card / n-grid 的根元素都接 attrs，
   // 所以 #panel-global > .master 这类选择器仍然落在同一个位置。
   check("总闸组件根节点是 n-card.master（title=总闸）",
     /<NCard\b[\s\S]{0,240}class="master"/.test(master) && master.includes('title="总闸"'));
@@ -3229,7 +3268,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /<NCard\b[\s\S]{0,240}id="prelude"/.test(prelude) && prelude.includes('title="前置"'));
   check("两栏组件根节点是 n-grid.cols", /<NGrid class="cols"/.test(hub));
   check("日志组件根节点是 n-card.logs（title=日志）",
-    /<NCard\b[\s\S]{0,240}class="logs"/.test(logsCard) && logsCard.includes('title="日志"'));
+    /<NCard\b[\s\S]{0,240}class="logs"/.test(logsPanel) && logsPanel.includes('title="日志"'));
 
   const recallRule = ruleBody(css, ".recall");
   check("召回管理吃满记忆页剩余高度", /flex\s*:\s*1 1 auto/.test(recallRule || ""), recallRule || "");
@@ -3242,22 +3281,32 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /<div id="skill-route-app">/.test(skillPanel),
   );
 
-  // 日志：固定 120px，超出自己滚；被挤压时留 64px 下限。
+  // 日志页：自己不自滚（#panel-logs 盖掉 .tab-panel 的 overflow-y），卡吃满页，
+  // 正文吃满卡片内容区并在 NScrollbar 里自己滚。
+  const logPanelRule = ruleBody(css, "#panel-logs");
+  check("日志页规则在", logPanelRule !== null);
+  check("日志页不允许整页滚（overflow: hidden）",
+    /overflow\s*:\s*hidden/.test(logPanelRule || ""), logPanelRule || "");
+  const logsRule = ruleBody(css, ".logs");
+  check("日志卡吃满日志页（flex: 1 1 auto + min-height:0）",
+    /flex\s*:\s*1 1 auto/.test(logsRule || "") && /min-height\s*:\s*0/.test(logsRule || ""),
+    logsRule || "");
+  check("日志卡内容区也是 flex 列 + min-height:0（正文才拿得到确定高度）",
+    /\.logs > \.n-card-content \{[\s\S]{0,200}flex-direction\s*:\s*column[\s\S]{0,120}min-height\s*:\s*0/.test(css));
   const logRule = ruleBody(css, ".log");
   check("日志区规则在", logRule !== null);
-  check("日志区有固定高度 120px", /height\s*:\s*120px/.test(logRule || ""), logRule || "");
+  check("日志区吃满剩余高度（flex: 1 1 auto）",
+    /flex\s*:\s*1 1 auto/.test(logRule || ""), logRule || "");
+  check("日志区可收缩（min-height: 0）", /min-height\s*:\s*0/.test(logRule || ""), logRule || "");
+  check("日志区不再钉 120px / 64px（折叠盒的遗产）",
+    /height\s*:\s*120px/.test(logRule || "") === false &&
+      /min-height\s*:\s*64px/.test(logRule || "") === false,
+    logRule || "");
   check("日志区用 n-scrollbar 内滚",
-    logsCard.includes("<NScrollbar") && logsCard.includes('class="log"'),
-    logsCard.slice(0, 240));
+    logsPanel.includes("<NScrollbar") && logsPanel.includes('class="log"'),
+    logsPanel.slice(0, 240));
   check("日志正文在 n-scrollbar 里（内层 pre 保留 id）",
-    /<NScrollbar[\s\S]*id="logBody"/.test(logsCard));
-  check("日志区保留可读下限 64px", /min-height\s*:\s*64px/.test(logRule || ""), logRule || "");
-  // 日志卡默认折叠（NCollapse），所以它不再靠「卡高 124px」撑出一屏；
-  // 展开后的高度下限落在 .log 上（120px，被挤时 64px），超出在 NScrollbar 里滚。
-  const logsRule = ruleBody(css, ".logs");
-  check("日志卡按内容定高（不再为折叠态预留 124px）",
-    /flex\s*:\s*none/.test(logsRule || "") && /min-height\s*:\s*124px/.test(logsRule || "") === false,
-    logsRule || "");
+    /<NScrollbar[\s\S]*id="logBody"/.test(logsPanel));
 
   // peer 名单：NScrollbar 接管滚动，.peer-list 只负责「吃满剩余高度 + 能收缩」。
   const peerRule = ruleBody(css, ".peer-list");
@@ -3292,6 +3341,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     mediaBody.slice(0, 200));
   check("矮屏下 peer 名单退回固定高度上限",
     /\.peer-list \{[\s\S]{0,120}max-height/.test(mediaBody));
+  check("矮屏下日志区退回固定上限 200px + 自己滚",
+    /\.logs \.log \{[^}]*flex\s*:\s*none[^}]*height\s*:\s*200px/.test(mediaBody),
+    mediaBody.slice(0, 400));
 }
 
 // ================= ui: naive-ui 控件替换（原生控件清零） =================
@@ -3322,7 +3374,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const recall = sources["components/RecallCard.vue"];
   const channels = sources["components/ChannelList.vue"];
   const prelude = sources["components/PreludeCard.vue"];
-  const logs = sources["components/LogsCard.vue"];
+  const logs = sources["components/LogsPanel.vue"];
   const app = sources["App.vue"];
   const settings = sources["SettingsApp.vue"];
   const hub = sources["components/HubIdentity.vue"];
@@ -3352,15 +3404,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     (prelude.match(/@update:value="onFieldInput\(/g) || []).length >= 2);
   check("通道数字框用 update:value",
     (channels.match(/@update:value="\(value\) => on(Weight|Timeout)\(/g) || []).length === 2);
-  check("按钮一律 n-button",
+  check("按钮一律 n-button（日志页无按钮：后端没有清空 / 刷新接口）",
     ["<NButton", "</NButton>"].every(
       (needle) =>
         app.includes(needle) &&
         recall.includes(needle) &&
         channels.includes(needle) &&
-        prelude.includes(needle) &&
-        logs.includes(needle),
-    ));
+        prelude.includes(needle),
+    ) && /<NButton\b|<button\b/.test(logs) === false);
 
   // 数值框清空：n-input-number 给 null，不提交 0（沿用上一轮的取舍）。
   check("预算 / 超时清空（null）收成空串交给 setControlsNumber",
@@ -3378,8 +3429,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /overflow\s*:\s*hidden/.test(ruleBody(css, ".page") || ""));
   check("一屏：.tab-panel 仍 min-height:0",
     /min-height\s*:\s*0/.test(ruleBody(css, ".tab-panel") || ""));
-  check("一屏：日志区改成 n-scrollbar 但仍固定 120px",
-    logs.includes("<NScrollbar") && /height\s*:\s*120px/.test(ruleBody(css, ".log") || ""));
+  check("一屏：日志区吃满剩余高度并在 n-scrollbar 里内滚",
+    logs.includes("<NScrollbar") &&
+      /flex\s*:\s*1 1 auto/.test(ruleBody(css, ".log") || "") &&
+      /min-height\s*:\s*0/.test(ruleBody(css, ".log") || ""));
   check("一屏：640px 降级还在", css.includes("@media (max-height: 640px)"));
 }
 
@@ -3909,16 +3962,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "测试失败：当前会话还没绑定，先打开一次对话再试");
   }
 
-  // ---- 日志折叠 / 编辑中的格子不被刷新覆盖 ----
+  // ---- 日志折叠已删 / 编辑中的格子不被刷新覆盖 ----
   {
     createConfig({ get, post, sessionKey: async () => "01a1585b-86d2", schedule: () => 0 });
     const fresh = useConfig();
     await fresh.refresh();
-    eq("日志默认折叠", fresh.state.logs.open, false);
-    fresh.store.toggleLogs();
-    eq("点一下展开", fresh.state.logs.open, true);
-    fresh.store.toggleLogs();
-    eq("再点收回", fresh.state.logs.open, false);
+    eq("store 里日志只剩尾部数据（折叠状态已删）", Object.keys(fresh.state.logs), ["lines"]);
+    eq("折叠切换函数已从 store 删除", typeof fresh.store.toggleLogs, "undefined");
+    check("日志正文仍由 logBody 投影（数据没跟着折叠一起丢）",
+      fresh.store.logBody().split("\n")[0] === JSON.stringify(backend["/probe"].lines[2]),
+      fresh.store.logBody().slice(0, 80));
     fresh.setFocus("serverUrl");
     backend["/status"].serverUrl = "http://changed:9000";
     await fresh.refresh();
@@ -8579,7 +8632,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 // ================= ui: 组件容器化（naive-ui 说了算） =================
 {
   // 这一轮把「手绘卡片 / 栅格 / peer 行 / 日志壳」全甩给 naive-ui：
-  // 结构断言查组件（NCard / NGrid / NList / NCollapse / NScrollbar / title / clickable），
+  // 结构断言查组件（NCard / NGrid / NList / NScrollbar / title / clickable），
   // 样式只查四条一屏硬规矩与行数上限。手写类名（.card / .card-title / .cols /
   // .service-row / .peer-row / .channel-row / .logs-head / .skill-route 之类）
   // 一律不再出现，出现的只能是它们的组件替身。
@@ -8590,7 +8643,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const prelude = uiCode("components/PreludeCard.vue");
   const recall = uiCode("components/RecallCard.vue");
   const channels = uiCode("components/ChannelList.vue");
-  const logsCard = uiCode("components/LogsCard.vue");
+  const logsPanel = uiCode("components/LogsPanel.vue");
   const peers = uiCode("components/PeerList.vue");
   const skillRoute = uiCode("components/SkillRoute.vue");
   const tabBar = uiCode("components/TabBar.vue");
@@ -8607,12 +8660,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("panel.css 不再有手写卡片 / 栅格 / 行壳的选择器",
     deadSelectors.every((needle) => css.includes(needle) === false),
     deadSelectors.filter((needle) => css.includes(needle)).join(", "));
-  // `#panel-global > .cols` 那一条要留着：它是「不为了填满视野而拉伸」的约束，
-  // 现在落在 NGrid 根节点上，位置没变。
-  check("全局页三块仍按内容定高（选择器落到 n-card / n-grid 根节点上）",
+  // `#panel-global > .cols` 那一条要留着：它是「不为了填满视野而拉伸」的约束；
+  // 前置卡则相反，它要吃掉本页剩余高度（日志挪走后不再留白）。
+  check("全局页：总闸 / 两栏按内容定高，前置卡吃掉余量",
     /#panel-global > \.master/.test(css) &&
-      /#panel-global > \.prelude/.test(css) &&
-      /#panel-global > \.cols/.test(css));
+      /#panel-global > \.cols/.test(css) &&
+      /#panel-global > \.prelude \{[\s\S]{0,80}flex\s*:\s*1 0 auto/.test(css));
 
   // ---- 一屏四条：必须同时成立，任一条掉了都会破版 ----
   const rootRule = ruleBody(css, "html, body");
@@ -8649,7 +8702,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["中枢", /<NCard\b[\s\S]{0,240}title="中枢"/, hub],
     ["身份", /<NCard\b[\s\S]{0,240}title="身份"/, hub],
     ["前置", /<NCard\b[\s\S]{0,240}title="前置"/, prelude],
-    ["日志", /<NCard\b[\s\S]{0,240}title="日志"/, logsCard],
+    ["日志", /<NCard\b[\s\S]{0,240}title="日志"/, logsPanel],
     ["召回管理", /<NCard\b[\s\S]{0,240}title="召回管理"/, recall],
     ["技能路由", /<NCard\b[\s\S]{0,240}title="技能路由"/, skillRoute],
   ];
@@ -8661,13 +8714,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("需要右侧附件的地方用 #header-extra（总闸开关 / peer 计数 / 日志计数 / 技能开关）",
     [/<template #header-extra>[\s\S]{0,160}<NSwitch/.test(master),
       /<template #header-extra>[\s\S]{0,160}id="peerCount"/.test(recall),
-      /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsCard),
+      /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsPanel),
       /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute)].every(Boolean));
   check("NCard 不降到 tiny（压内边距，不压字号）",
-    /size="tiny"/.test([master, hub, prelude, recall, channels, logsCard, skillRoute].join("\n")) === false &&
-      [master, prelude, recall, logsCard, skillRoute].every((source) => source.includes('size="small"')));
+    /size="tiny"/.test([master, hub, prelude, recall, channels, logsPanel, skillRoute].join("\n")) === false &&
+      [master, prelude, recall, logsPanel, skillRoute].every((source) => source.includes('size="small"')));
   check("手写 .card / .card-title 彻底不在模板里",
-    [master, hub, prelude, recall, channels, logsCard, skillRoute, peers].every(
+    [master, hub, prelude, recall, channels, logsPanel, skillRoute, peers].every(
       (source) => /class="card\b/.test(source) === false && source.includes("card-title") === false,
     ));
 
@@ -8741,16 +8794,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /id="peerHint"[\s\S]{0,80}:hidden="!hintVisible"/.test(peers));
   check("pending 时行不可点", /if \(!row\.tappable \|\| pending\.value\) return;/.test(peers));
 
-  // ---- 日志：NCard > NCollapse > NScrollbar，受控于 state.logs.open ----
-  check("日志是 NCard > NCollapse > NCollapseItem > NScrollbar",
-    /<NCard\b[\s\S]{0,700}<NCollapse\b[\s\S]{0,400}<NCollapseItem\b[\s\S]{0,400}<NScrollbar/.test(logsCard),
-    logsCard.slice(logsCard.indexOf("<NCard"), logsCard.indexOf("<NCard") + 200));
-  check("折叠受控于 state.logs.open（不是第二套本地状态）",
-    /:expanded-names="open \? \['logs'\] : \[\]"/.test(logsCard) &&
-      /@update:expanded-names="onExpanded"/.test(logsCard) &&
-      /if \(next !== open\.value\) toggle\(\)/.test(logsCard));
-  check("日志正文只走 store 的 toggle（没有自建 open ref）",
-    logsCard.includes("useLogs()") && /ref\(false\)/.test(logsCard) === false);
+  // ---- 日志页：NCard > NScrollbar > pre，折叠已删 ----
+  check("日志页是 NCard > NScrollbar > pre",
+    /<NCard\b[\s\S]{0,700}<NScrollbar\b[\s\S]{0,200}id="logBody"/.test(logsPanel),
+    logsPanel.slice(logsPanel.indexOf("<NCard"), logsPanel.indexOf("<NCard") + 200));
+  check("折叠组件与开关彻底不在日志页里",
+    ["NCollapse", "NCollapseItem", "NButton", "logToggle"].every(
+      (needle) => logsPanel.includes(needle) === false));
+  check("日志正文只走 store 投影（没有自建状态）",
+    logsPanel.includes("useLogs()") && /\bref\(/.test(logsPanel) === false);
 
   // ---- 召回 5 个 NSelect：id 一律走 :input-props，不许裸 id= ----
   const selectTags = recall.match(/<NSelect\b[\s\S]*?\/>/g) || [];

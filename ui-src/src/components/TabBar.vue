@@ -1,21 +1,22 @@
 <script setup>
-// 三页标签：点一下切页并记住；左右方向键 / Home / End 也能换，焦点跟着走。
+// 四页标签：点一下切页并记住；左右方向键 / Home / End 也能换，焦点跟着走。
 //
-// 纯逻辑（键名、默认页、非法值回退、读写 storage 的容错）在 lib/tabs.js，
-// 这里只管按键与 aria。切页不触发任何读 / 写 / 重算（见行为清单第 10 条）。
+// 纯逻辑（键名、默认页、非法值回退、键盘换页、读写 storage 的容错）在 lib/tabs.js，
+// 这里只管绑定按键与 aria。切页不触发任何读 / 写 / 重算（见行为清单第 10 条）。
 //
 // 为什么不用 n-tabs：n-tabs 的标签是它自己生成的节点，无法同时保留
 //   id="tab-<name>" / aria-controls / aria-labelledby / data-tab 与 roving tabindex
-// 这套现有契约 —— 换过去只会让 App.vue 里三个 role="tabpanel" 的标注脱钩。
+// 这套现有契约 —— 换过去只会让 App.vue 里四个 role="tabpanel" 的标注脱钩。
 // 所以标签栏继续手写 <button role="tab">，样式只留等分 / nowrap / 选中态 / focus 环
 // （不画渐变，也不模拟卡片边框：那是 n-card 的活）。
 import { nextTick, ref } from "vue";
-import { TABS } from "../lib/tabs.js";
+import { TABS, nextTab } from "../lib/tabs.js";
 
 const LABELS = Object.freeze({
   global: "全局配置",
   memory: "记忆配置",
   skill: "共享技能",
+  logs: "日志",
 });
 
 const props = defineProps({
@@ -31,17 +32,8 @@ function select(name) {
   emit("select", name);
 }
 
-function nextTabOf(tab, key) {
-  const index = TABS.indexOf(tab);
-  if (key === "ArrowRight") return TABS[(index + 1) % TABS.length];
-  if (key === "ArrowLeft") return TABS[(index - 1 + TABS.length) % TABS.length];
-  if (key === "Home") return TABS[0];
-  if (key === "End") return TABS[TABS.length - 1];
-  return null;
-}
-
 function onKeydown(event, tab) {
-  const next = nextTabOf(tab, event.key);
+  const next = nextTab(tab, event.key);
   if (!next) return;
   event.preventDefault();
   select(next);
@@ -51,7 +43,12 @@ function onKeydown(event, tab) {
 </script>
 
 <template>
-  <!-- 三个中文标签窄屏也放得下一行：等分宽度、绝不换行（.tabs / .tab）。 -->
+  <!-- 四个中文标签窄屏也放得下一行：等分宽度（flex: 1 1 0）、绝不换行（.tabs / .tab）。
+       宽度账：.page 左右各 16px、标签栏三处 4px 间隙，所以每格 = (宽 − 44) / 4；
+       560px 时约 129px、760px 时约 179px，减去 20px 内边距还剩 109 / 159px，
+       而最长标签「全局配置」四个 12px 汉字约 48px。够用。
+       极限在 ~316px 视口（4 × 48 + 4 × 20 + 12 + 32），更窄时 nowrap 会溢出：
+       那时仍不改字号、不换行（等分 + nowrap 是有意的取舍）。 -->
   <div ref="listEl" class="tabs" role="tablist" aria-label="配置分类">
     <button
       v-for="tab in TABS"

@@ -116,7 +116,10 @@ html, body {
 
 /* ---------- 标签页 ---------- */
 
-/* 三个中文标签窄屏也放得下一行：等分宽度、绝不换行。
+/* 四个中文标签窄屏也放得下一行：等分宽度、绝不换行。
+   宽度账：(宽 − .page 两侧 32px − 三处 4px 间隙) / 4；560px 时每格约 129px、
+   760px 时约 179px，减 20px 内边距还剩 109 / 159px，最长标签四个 12px 字约 48px。
+   极限在 ~316px 视口，更窄时 nowrap 会溢出（有意不改字号、不换行）。
    不画渐变、不模拟卡片边框（那是 n-card 的活），只留选中态与 focus 环。 */
 .tabs {
   flex: none;
@@ -145,11 +148,12 @@ html, body {
 .tab[aria-selected="true"] { opacity: 1; font-weight: 600; }
 .tab:focus-visible { outline: 2px solid rgba(128, 128, 128, 0.45); outline-offset: -2px; }
 
-/* 三页内容各自成组；隐藏仍由 .page [hidden] 兜底。
+/* 四页内容各自成组；隐藏仍由 .page [hidden] 兜底。
    内容区吃满剩余高度（flex:1 + min-height:0）。少了 min-height:0，子元素
    的内容高度会把 flex 项顶回去，整页跟着长——这是这类布局最主要的破版点。
    溢出优先让日志 / 名单自己滚（见 .log、.peer-scroll）；两者都压到极限仍放
-   不下时，退一步由内容区自己滚，而不是裁掉卡片底部，也不把滚动交回整页。 */
+   不下时，退一步由内容区自己滚，而不是裁掉卡片底部，也不把滚动交回整页。
+   日志页是唯一的例外：那块自己再写 overflow: hidden（见 #panel-logs）。 */
 .tab-panel {
   flex: 1 1 auto;
   min-height: 0;
@@ -202,7 +206,7 @@ html, body {
 .toggle-copy b { font-size: 12.5px; font-weight: 600; }
 .toggle-copy span { font-size: 11px; opacity: 0.55; line-height: 1.35; }
 
-.services { display: grid; gap: 6px; min-width: 0; }
+.services { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .services-title { font-size: 12px; font-weight: 600; }
 .service-list { display: grid; gap: 6px; min-width: 0; }
 
@@ -260,8 +264,10 @@ html, body {
 .service-result.bad { color: #b8564d; }
 .service-result.muted { color: currentColor; opacity: 0.45; }
 
-/* 列表下方唯一一段总说明；每行不再各带一句。 */
-.services-note { margin: 0; font-size: 10.5px; line-height: 1.4; opacity: 0.55; }
+/* 列表下方唯一一段总说明；每行不再各带一句。
+   margin-top: auto 让它落到底：前置卡吃满全局页剩余高度之后，抬高的是卡，
+   不是页面留白（见下面的 #panel-global > .prelude）。 */
+.services-note { margin: 0; margin-top: auto; font-size: 10.5px; line-height: 1.4; opacity: 0.55; }
 
 /* ---------- 中枢 / 身份：事实行 + 服务端检查项 ---------- */
 /* 列交给 NGrid（cols="1 520:3"），这里只留分隔线与上下留白。 */
@@ -459,11 +465,14 @@ html, body {
 .peer-item.excluded .peer-name,
 .peer-item.excluded .peer-meta { opacity: 0.6; }
 
-/* ---------- 日志 ---------- */
+/* ---------- 日志页 ---------- */
 
-/* 日志卡是全局页里唯一可以让步的一块：默认折叠，展开后日志框 120px，
-   不够时压到 64px 并在 NScrollbar 里自己滚。 */
-.logs { flex: none; }
+/* 日志不再是全局页最下面那块折叠卡，而是一个独立页：
+   #panel-logs 不自滚（.tab-panel 的 overflow-y:auto 被这条盖掉），
+   .logs 吃满本页，正文 .log 吃满卡片内容区并在 NScrollbar 里自己滚。
+   后端没有清空 / 刷新接口，所以页头只有标题与计数条 #logChips。 */
+#panel-logs { overflow: hidden; }
+
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -480,20 +489,28 @@ html, body {
   white-space: nowrap;
 }
 
-/* 日志区用 n-scrollbar 在框内滚。根节点给确定高度，文字样式落在内层 pre 上，
-   以免 padding 被算到滚动容器里。 */
+/* 卡吃满本页剩余高度；卡内容区必须也做成 flex 列 + min-height:0，
+   否则 .log 拿到的“剩余高度”不是确定值，滚动会退化成把卡撑高。
+   n-card 根节点本身就是 flex 列（naive-ui 的 .n-card），这里只补伸缩与下限。 */
+.logs { flex: 1 1 auto; min-height: 0; }
+.logs > .n-card-header { flex: none; }
+.logs > .n-card-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 正文吃掉剩余高度。n-scrollbar 自己带 height:100%（.n-scrollbar 与
+   .n-scrollbar-container 都是定高），所以这里不再钉任意像素高度，
+   也不再有 .logs .log 那条压 naive-ui 的补丁 —— 那是给折叠盒钉 120px 用的。
+   文字样式落在内层 pre 上，以免 padding 被算到滚动容器里。 */
 .log {
   box-sizing: border-box;
-  height: 120px;
-  min-height: 64px;
+  flex: 1 1 auto;
+  min-height: 0;
   background: rgba(128, 128, 128, 0.06);
   border-radius: 8px;
-}
-/* naive-ui 的 .n-scrollbar 自己也写了 height: 100%，同权重下谁后注入谁赢。
-   这里用一条更高权重的规则把 120px 钉死，免得滚动区被内容撑开。 */
-.logs .log {
-  height: 120px;
-  min-height: 64px;
 }
 .log-body {
   margin: 0;
@@ -517,10 +534,35 @@ html, body {
 .scoped-note { flex: none; margin: 0 2px; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
 .scoped-note b { font-weight: 600; opacity: 0.9; }
 
-/* ---------- 全局页：只有日志可以让步 ---------- */
+/* ---------- 全局页：只有前置卡可以让步 ---------- */
 #panel-global > .master,
-#panel-global > .prelude,
 #panel-global > .cols { flex: 0 0 auto; }
+
+/* 日志挪走后本页空出一截：让前置卡吃掉它，别把留白留在页面底部。
+   卡内的链是 n-card → .n-card-content → .n-space（NSpace 自己就是 flex 列）
+   → .services；每一层都要能伸缩 + min-height:0，最后一段靠 .services-note
+   的 margin-top:auto 贴到卡底。服务行本身仍按内容定高，不被拉松。
+
+   shrink 写 0 而不是 1（与任务书的 flex: 1 1 auto 差这一个数，有意的）：
+   卡里没有自己的滚动点，压扁它只会把服务行与说明挤出卡片边界；旧的退法
+   是让内容区自己滚（.tab-panel 的 overflow-y:auto）。grow 1 负责吃余量，
+   真放不下时就不压卡，交给内容区滚——一屏契约不靠让卡片溢出维持。 */
+#panel-global > .prelude { flex: 1 0 auto; min-height: 0; }
+#panel-global > .prelude > .n-card-header { flex: none; }
+#panel-global > .prelude > .n-card-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#panel-global > .prelude > .n-card-content > .n-space {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#panel-global > .prelude .services {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 .foot { flex: none; font-size: 11px; opacity: 0.45; text-align: center; padding-top: 0; }
 
@@ -542,6 +584,11 @@ html, body {
   .recall > .n-card-content > .peer-list { flex: 0 0 auto; }
   .peer-scroll .n-scrollbar-container { max-height: 296px; }
   .channel-scroll .n-scrollbar-container { max-height: 220px; }
+  /* 日志页在这个高度下父级已经没有确定高度（.tab-panel 退回 auto），
+     所以不能靠 flex 吃剩余，改成固定上限 + 自己滚，跟上面两个滚动点一致。
+     权重写成 .logs .log：naive-ui 的 .n-scrollbar 也写了 height:100%，
+     同权重下后注入的它赢，height 这一条必须压过它。 */
+  .logs .log { flex: none; height: 200px; }
 }
 
 /* ---------- 窄屏：chips 让一步 ---------- */
