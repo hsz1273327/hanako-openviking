@@ -3,9 +3,8 @@
 // 现在有三个入口（panel / settings / card），刻意写成对象：加一页只是多一个键，
 // 不用回来改构建。
 //
-// 过渡期命名约定：构建产物一律带 -vue 后缀（panel-vue.js / settings-vue.js / card-vue.js），
-// 手写脚本保留原名（panel.js / settings.js / card.js）。全部迁完之后再删手写脚本，
-// 那时把 -vue 后缀去掉。
+// 手写脚本已全部删除，产物直接用页面名：panel.js / settings.js / card.js。
+// 历史实现只在 ui-src/src 里，ui/assets 下同名的三个文件都是构建产物。
 //
 // 产物文件名不带 hash：HTML 是我们自己手写的，引用路径要稳定可读。
 // 源码留在仓库给要改的人看；产物也提交进仓库，装了 App 的人不需要 node。
@@ -26,7 +25,7 @@ export default defineConfig({
   build: {
     outDir: resolve(here, "../ui/assets"),
     // 这个目录里除了我们的产物，还有宿主随面板下发的 app-ui.css / app-ui.js /
-    // sdk.js，以及手写的 panel.css / panel.js 等文件。构建只能覆盖同名产物，
+    // sdk.js，以及手写的 panel.css / card.css。构建只能覆盖同名产物，
     // 不能把整个目录清空，否则面板会直接坏掉。
     emptyOutDir: false,
     target: "es2020",
@@ -41,12 +40,10 @@ export default defineConfig({
       makeAbsoluteExternalsRelative: false,
       input: {
         // 每个键就是一个页面的入口，产物叫 <键>.js / <键>.css。
-        // 键带 -vue 是为了不和手写脚本同名：panel.js / settings.js / card.js 仍是手写的，
-        // 打开 assets 目录时不会先撞见打包代码。
-        "panel-vue": resolve(here, "src/entries/panel.js"),
-        "settings-vue": resolve(here, "src/entries/settings.js"),
-        // 边栏会话卡：产物 ui/assets/card-vue.js，ui/card.html 只挂 #card-app。
-        "card-vue": resolve(here, "src/entries/card.js"),
+        "panel": resolve(here, "src/entries/panel.js"),
+        "settings": resolve(here, "src/entries/settings.js"),
+        // 边栏会话卡：产物 ui/assets/card.js，ui/card.html 只挂 #card-app。
+        "card": resolve(here, "src/entries/card.js"),
       },
       output: {
         entryFileNames: "[name].js",

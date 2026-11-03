@@ -1031,16 +1031,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const globalSources = [globalPanel, master, hub, prelude, logsCard];
   const memorySources = [memoryPanel, recall, peerList, uiCode("components/ChannelList.vue")];
 
-  // ---- panel.html：只剩挂载点；手写脚本已断链，但文件留着能回退 ----
+  // ---- panel.html：只剩挂载点，只引构建产物 panel.js ----
   check("panel.html 只剩挂载点", html.includes('<div id="panel-app"></div>'), html);
   eq(
-    "panel.html 只引一个 module script（构建产物）",
+    "panel.html 只引一个 module script（构建产物 panel.js）",
     [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
       (match) => match[1],
     ),
-    ["panel-vue.js"],
+    ["panel.js"],
   );
-  check("panel.html 不再引用手写 panel.js", html.includes("assets/panel.js") === false, html);
   check(
     "panel.html 里不再写死面板 DOM",
     ["masterCard", "recallGate", "peerList", "tab-global", "scoringServices", "logBody"].every(
@@ -1051,14 +1050,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("panel.html 仍挂静态 panel.css（不改成构建产出）",
     html.includes('href="./assets/panel.css"'));
   check("panel.html 没有内联样式块", html.includes("<style") === false);
-  check(
-    "手写脚本与旧副本都还在（这一轮失败可以回退）",
-    [
-      "panel.js", "settings.js", "card.js", "tabs.js", "recall-layers.js",
-      "check-summary.js", "check-tone.js", "session-key.js",
-    ].every((name) => fs.existsSync(path.join(import.meta.dirname, "../ui/assets", name))),
-  );
-
   // ---- 哪一块在哪个组件里（卡片都是 n-card，所以认 id / title / class） ----
   for (const needle of [
     'id="masterCard"',
@@ -2267,7 +2258,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 // ================= ui: 召回策略在主面板（组件 + 状态机） =================
 {
-  // 旧版读 ui/panel.html + ui/assets/panel.js。整页迁到 Vue 后：
+  // 手写版已删除；整页现在只有 Vue 实现：
   //   控件在 components/RecallCard.vue / ChannelList.vue / PreludeCard.vue；
   //   读 / 写 / 回滚在 lib/panel-store.js（冒烟后面用假 fetch 真跑一遍）。
   const html = panelHtml();
@@ -2280,7 +2271,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const storeJs = uiSrcRaw("lib/panel-store.js");
   const layersJs = uiSrcRaw("lib/recall-layers.js");
   const settingsHtml = fs.readFileSync(path.join(import.meta.dirname, "../ui/settings.html"), "utf8");
-  const settingsJs = fs.readFileSync(path.join(import.meta.dirname, "../ui/assets/settings.js"), "utf8");
+  const settingsAppSrc = uiSrcRaw("SettingsApp.vue");
 
   // 五个 NSelect 的 id 都走 :input-props（裸 id 会落到外层 div，label for 就指空了）。
   const gateIdx = recall.indexOf("id: 'recallGate'");
@@ -2628,11 +2619,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const themeJs = uiSrcRaw("theme.js");
   const connFieldsJs = uiSrcRaw("conn-fields.js");
   const builtPanelJs = fs.readFileSync(
-    path.join(import.meta.dirname, "../ui/assets/panel-vue.js"),
+    path.join(import.meta.dirname, "../ui/assets/panel.js"),
     "utf8",
   );
   const builtSettingsJs = fs.readFileSync(
-    path.join(import.meta.dirname, "../ui/assets/settings-vue.js"),
+    path.join(import.meta.dirname, "../ui/assets/settings.js"),
     "utf8",
   );
 
@@ -2805,12 +2796,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "产物保留宿主的 sdk.js 外链（不把宿主文件打进 bundle）",
     /["']\.\/sdk\.js["']/.test(builtPanelJs),
   );
-  check(
-    "手写面板不再驱动技能路由",
-    fs
-      .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.js"), "utf8")
-      .includes('data-key="skillRouting"') === false,
-  );
   check("toggleGrid 容器已拆掉", html.includes('id="toggleGrid"') === false);
 
   // ---- ui-src 构建链：依赖、产物位置与几个不能再丢的设定 ----
@@ -2851,31 +2836,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   const assetsDir = path.join(import.meta.dirname, "../ui/assets");
   check(
-    "构建入口按 -vue 后缀命名（panel-vue / settings-vue / card-vue）",
-    /"panel-vue":\s*resolve\(here, "src\/entries\/panel\.js"\)/.test(viteConfig) &&
-      /"settings-vue":\s*resolve\(here, "src\/entries\/settings\.js"\)/.test(viteConfig) &&
-      /"card-vue":\s*resolve\(here, "src\/entries\/card\.js"\)/.test(viteConfig) &&
-      /"panel":\s/.test(viteConfig) === false &&
-      /"settings":\s/.test(viteConfig) === false &&
-      /"card":\s/.test(viteConfig) === false,
+    "构建入口用页面名（panel / settings / card）",
+    /"panel":\s*resolve\(here, "src\/entries\/panel\.js"\)/.test(viteConfig) &&
+      /"settings":\s*resolve\(here, "src\/entries\/settings\.js"\)/.test(viteConfig) &&
+      /"card":\s*resolve\(here, "src\/entries\/card\.js"\)/.test(viteConfig) &&
+      /-vue":\s/.test(viteConfig) === false,
     viteConfig.slice(viteConfig.indexOf("input:"), viteConfig.indexOf("output:")),
   );
   check(
-    "构建产物带 -vue：panel-vue.js / settings-vue.js / card-vue.js",
-    ["panel-vue.js", "settings-vue.js", "card-vue.js"].every((name) =>
+    "构建产物：panel.js / settings.js / card.js",
+    ["panel.js", "settings.js", "card.js"].every((name) =>
       fs.existsSync(path.join(assetsDir, name)),
     ),
   );
   check(
-    "手写脚本保留原名：panel.js / settings.js / card.js（card.css 也留着回退）",
-    ["panel.js", "settings.js", "card.js", "card.css"].every((name) =>
-      fs.existsSync(path.join(assetsDir, name)),
-    ),
+    "手写副本已删除：只剩构建产物与本轮保留的静态 CSS",
+    ["recall-layers.js", "tabs.js", "check-summary.js", "check-tone.js", "session-key.js"].every(
+      (name) => fs.existsSync(path.join(assetsDir, name)) === false,
+    ) && fs.existsSync(path.join(assetsDir, "card.css")),
   );
   check(
-    "设置页 HTML 只引用构建产物 settings-vue.js，旧 settings.js 已断链",
-    settingsHtml.includes('src="./assets/settings-vue.js"') &&
-      settingsHtml.includes('src="./assets/settings.js"') === false,
+    "设置页 HTML 只引用构建产物 settings.js",
+    settingsHtml.includes('src="./assets/settings.js"') &&
+      settingsHtml.includes("-vue") === false,
   );
   // 参考工程的 assetFileNames 是 [name].[ext]：SFC 里一旦写 <style>，
   // 构建就会把整份手写 panel.css 覆盖成只剩这一页的几条规则。
@@ -2886,7 +2869,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ),
   );
   check("CSS 仍是手写的静态文件（构建不产出 panel.css）",
-    !viteConfig.includes('"panel-vue.css"') && !/input:\s*\{[^}]*panel\.css/.test(viteConfig));
+    !viteConfig.includes('"panel.css"') && !/input:\s*\{[^}]*panel\.css/.test(viteConfig));
 
   // ---- 设置页只剩连接 ----
   const settingsVue = uiSrcRaw("SettingsApp.vue");
@@ -2909,12 +2892,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       settingsVue.includes("本机直连用默认值即可") &&
       settingsVue.includes("同机不同助手各自一个门牌"),
   );
-  check("settings.js 不再调 /recall-mode", settingsJs.includes("/recall-mode") === false);
-  check("settings.js 不再有召回下拉的状态", settingsJs.includes("recallGate") === false);
+  check("SettingsApp.vue 不再调 /recall-mode", settingsAppSrc.includes("/recall-mode") === false);
+  check("SettingsApp.vue 不再有召回下拉的状态", settingsAppSrc.includes("recallGate") === false);
   check(
-    "settings.js 保存只走 /conn",
-    (settingsJs.match(/hana\.api\.fetch\(/g) || []).length === 2 &&
-      settingsJs.includes('hana.api.fetch("/conn", {'),
+    "SettingsApp.vue 保存只走 /conn",
+    (settingsAppSrc.match(/hana\.api\.fetch\(/g) || []).length === 2 &&
+      settingsAppSrc.includes('hana.api.fetch("/conn", {'),
   );
 
   // ---- manifest 声明 ----
@@ -3073,13 +3056,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "总闸关着时总闸卡自己也是灰底（data-off）",
     /:data-off="state\.controls\.enabled \? 'false' : 'true'"/.test(uiCode("components/MasterCard.vue")),
   );
-  check(
-    "手写面板的 paintDim 不再参与（旧脚本已断链）",
-    fs
-      .readFileSync(path.join(import.meta.dirname, "../ui/panel.html"), "utf8")
-      .includes("panel.js") === false,
-  );
-
   // ---- localStorage 键与归一化（纯逻辑，直接验） ----
   eq("tab 记忆键", TAB_KEY, "hanako-openviking:tab");
   check("tab 记忆键带 app 前缀", TAB_KEY.startsWith("hanako-openviking:"));
@@ -3378,7 +3354,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 // ================= ui: 面板视图投影（纯函数） =================
 {
-  // 这些是从手写 ui/assets/panel.js 里搬出来的字符串 / 档位逻辑（lib/panel-view.js）。
+  // 这些是从已删除的手写面板里搬出来的字符串 / 档位逻辑（lib/panel-view.js）。
   // 组件不再各自拼一遍文案，所以它们必须能单独验。
   eq("出口念法：受管代理", transportTextOf("runtime"), "受管代理");
   eq("出口念法：直连", transportTextOf("direct"), "直连（仅白名单）");
@@ -8906,17 +8882,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .readFileSync(path.join(import.meta.dirname, "../ui/assets/card.css"), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "");
 
-  // ---- HTML：只剩挂载点，宿主识别标记还在，旧 card.js 只断链不删 ----
+  // ---- HTML：只剩挂载点，宿主识别标记还在，只引构建产物 card.js ----
   check("card.html 只剩 #card-app 挂载点", cardHtml.includes('<div id="card-app"></div>'), cardHtml);
   check("card.html 的 main 仍带 data-hana-app-ui", /<main\b[^>]*\bdata-hana-app-ui\b[^>]*>/.test(cardHtml), cardHtml);
   eq(
-    "card.html 只引一个 module script（card-vue.js）",
+    "card.html 只引一个 module script（card.js）",
     [...cardHtml.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
       (match) => match[1],
     ),
-    ["card-vue.js"],
+    ["card.js"],
   );
-  check("card.html 不再引用手写 card.js", cardHtml.includes("assets/card.js") === false, cardHtml);
   check("card.html 仍挂静态 card.css", cardHtml.includes('href="./assets/card.css"'));
   check("card.html 没有内联样式块", cardHtml.includes("<style") === false);
   check("入口只负责挂载 CardApp", /\.mount\("#card-app"\)/.test(cardEntry), cardEntry);

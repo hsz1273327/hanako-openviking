@@ -15,7 +15,7 @@ export const HINT_SET = "已保存在本机。要换 key 就在框里输入新�
  * API Key 的掩码：头四位 + 八个圆点 + 后四位。
  *
  * 后端对短 key（< 12 位）只给后四位，所以 head 可能是空串；tail 为空说明
- * 「没填」，整个掩码也就是空串。逐字对齐手写的 ui/assets/settings.js。
+ * 「没填」，整个掩码也就是空串。逐字对齐已删除的手写设置页（现为 SettingsApp.vue）。
  */
 export function buildMask(head, tail) {
   if (!tail) return "";

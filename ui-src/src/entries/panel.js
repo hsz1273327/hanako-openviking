@@ -1,7 +1,7 @@
 // 面板入口：只做接线与挂载，不写业务逻辑。
 //
-// 构建时变成 ui/assets/panel-vue.js。整页现在是一个 Vue 应用（App.vue），
-// 手写的 ui/assets/panel.js 不再被 ui/panel.html 引用（文件留到下一轮清理）。
+// 构建时变成 ui/assets/panel.js。整页是一个 Vue 应用（App.vue）；
+// 历史手写实现已删除，现在只有 ui-src/src。
 //
 // 顺序有意义：
 //   1. createConfig 把「真实网络 + 会话读取」注入状态机（组件里的 useConfig()
