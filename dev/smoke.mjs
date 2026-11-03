@@ -8741,10 +8741,113 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"]
       .filter((id) => new RegExp(`:input-props="\\{ id: '${id}' }"`).test(recall) === false)
       .join(", "));
-  check("每个 NSelect 都有对应的 label for（点标签能落到输入框上）",
-    ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"].every((id) =>
-      recall.includes(`<label for="${id}">`),
-    ));
+  // ---- 五个下拉的标签：纯文本 + 控件 aria-label ----
+  // 事实（naive-ui 2.45）：非 filterable 的 NSelect 走 _internal/selection 的非 filterable
+  // 分支，那个分支不创建内部 <input>；Select.mjs 也没有 role=combobox / aria-*；
+  // FormItem 也不写 for / aria。所以 <label for> 在这个组件上只能指到外层 div，等于指空。
+  // 定论：纯文本标签 + 控件自带 aria-label，文字逐字不变（不改 filterable）。
+  const selectLabels = [
+    ["recallGate", "召回判断"],
+    ["queryMode", "召回查询"],
+    ["rerank", "结果重排"],
+    ["gateModel", "判断模型"],
+    ["rerankModel", "兜底模型（无启用通道时）"],
+  ];
+  const selectTagFor = (id) =>
+    selectTags.find((tag) => tag.includes(`:input-props="{ id: '${id}' }"`)) || "";
+  eq("五个下拉都能按 id 定位到各自的 NSelect tag",
+    selectLabels.filter(([id]) => selectTagFor(id) === "").map(([id]) => id), []);
+  check("五个下拉都带 aria-label，文字与旁边的纯文本标签逐字一致",
+    selectLabels.every(([id, text]) =>
+      selectTagFor(id).includes(`aria-label="${text}"`) &&
+      recall.includes(`<span class="field-label">${text}</span>`)),
+    selectLabels
+      .filter(([id, text]) =>
+        selectTagFor(id).includes(`aria-label="${text}"`) === false ||
+        recall.includes(`<span class="field-label">${text}</span>`) === false)
+      .map(([id, text]) => `${id}=${text}`)
+      .join(", "));
+  check("五个下拉的标签控件不再是 label（no <label for> 指空）",
+    selectLabels.every(([id]) => recall.includes(`for="${id}"`) === false) &&
+      (recall.match(/<label\b/g) || []).length === 2,
+    selectLabels.filter(([id]) => recall.includes(`for="${id}"`)).map(([id]) => id).join(", "));
+
+  // ---- 标签关联的全量体检（ui-src/src/components 下每一个 .vue） ----
+  // 三条规矩：
+  //   1) <label for=id> 的 id 必须在同一个组件的 :input-props 里出现（真控件、真关联）；
+  //   2) 不带 for 的 <label> 只允许「包住控件」那一种写法（channel-cell 三格）；
+  //   3) 裸 label（既没 for 也没包控件）为 0。
+  const componentFiles = fs
+    .readdirSync(path.join(UI_SRC_DIR, "components"))
+    .filter((name) => name.endsWith(".vue"));
+  check("面板组件清单不是空的（体检样本）", componentFiles.length >= 10, `${componentFiles.length} 个`);
+  const reEscape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const forTargets = [];
+  const forIssues = [];
+  const wrappingLabels = [];
+  const bareLabels = [];
+  for (const file of componentFiles) {
+    const code = uiCode(`components/${file}`);
+    for (const match of code.matchAll(/<label\b([^>]*)>/g)) {
+      const attrs = match[1];
+      // 先认 :for=，再认静态 for=（\b 在 :for= 的冒号后也成立，顺序反了会把动态当成静态）
+      const dynamicFor = /:for="([^"]+)"/.exec(attrs);
+      const staticFor = dynamicFor ? null : /(?<!:)for="([^"]+)"/.exec(attrs);
+      const target = staticFor ? staticFor[1] : dynamicFor ? dynamicFor[1] : null;
+      if (target) {
+        forTargets.push([file, target]);
+        // :input-props="{ id: 'x' }" / "{ id: row.x.id, ... }" / "{ id: row.x.id }" 都算
+        const bound = new RegExp(`id:\\s*${staticFor ? `'${reEscape(target)}'` : reEscape(target)}\\s*[,}]`).test(code);
+        if (bound === false) forIssues.push(`${file} for=${target}`);
+        continue;
+      }
+      // 没有 for：唯一允许的是包住控件（且必须是 channel-cell 那三格）
+      const classAttr = /\bclass="([^"]*)"/.exec(attrs);
+      const classes = classAttr ? classAttr[1].split(/\s+/) : [];
+      const body = code.slice(match.index + match[0].length, code.indexOf("</label>", match.index));
+      if (classes.includes("channel-cell") && /<NInput\b|<NInputNumber\b/.test(body)) {
+        wrappingLabels.push(`${file}:${classes.join(".")}`);
+      } else {
+        bareLabels.push(`${file} <label${attrs}>`);
+      }
+    }
+  }
+  eq("面板组件里没有裸 label（既没 for 也没包住控件）", bareLabels, []);
+  eq("不带 for 的 label 只剩 channel-cell 三格（名称 / 权重 / 超时）", wrappingLabels.length, 3);
+  eq("每个 label for 的目标都能在同类组件的 :input-props 里找到", forIssues, []);
+  check("label for 目标清单非空（HubIdentity 五处 + RecallCard 两个提示词框 + PreludeCard 三处）",
+    forTargets.length === 10, forTargets.map(([file, id]) => `${file}:${id}`).join(", "));
+  // 黑名单：这五个 id 的控件拿不到程序化关联，任何组件里都不许再为它们写 for=
+  const NO_FOR_IDS = selectLabels.map(([id]) => id);
+  check("五个下拉的 id 在「禁止出现 for=」的黑名单里，且面板组件里确实没有引用",
+    NO_FOR_IDS.every((id) =>
+      forTargets.every(([, target]) => target !== id) &&
+      componentFiles.every((file) => uiCode(`components/${file}`).includes(`for="${id}"`) === false)),
+    NO_FOR_IDS.filter((id) => forTargets.some(([, target]) => target === id)).join(", "));
+
+  // ---- 通道列表：类型那格改 div + aria-label，名称 / 权重 / 超时仍是包控件的 label ----
+  check("精排通道标题是纯文本 span.field-label",
+    channels.includes('<span class="field-label">精排通道</span>'));
+  check("类型那格是 div.channel-cell + NSelect 自带 aria-label=\"类型\"",
+    /<div class="channel-cell">[\s\S]{0,240}?aria-label="类型"/.test(channels));
+  eq("名称 / 权重 / 超时三格仍是包住控件的 label.channel-cell",
+    (channels.match(/<label class="channel-cell">/g) || []).length, 3);
+  check("channel-cell 的样式仍对 div / label 两种标签生效（选择器按 class 走）",
+    /\.channel-cell \{/.test(css) && /\.channel-cell > span \{/.test(css));
+
+  // ---- .field-label 的排版必须与原 label 一致（改标签等于改字号是破版） ----
+  const fieldLabelRule = ruleBody(css, ".field .field-label") || "";
+  check(".field-label 继承了原来 label 的字号 / 行高 / 透明度",
+    /\bfont-size:\s*11\.5px/.test(fieldLabelRule) &&
+      /\bline-height:\s*1\.35/.test(fieldLabelRule) &&
+      /\bopacity:\s*0\.62/.test(fieldLabelRule),
+    fieldLabelRule || "缺 .field .field-label 规则");
+  check("原来的 .field label 规则还在（NInput / NInputNumber 的真 label 照旧）",
+    css.includes(".field label,"));
+  const promptFieldLabelRule = ruleBody(css, ".prompt-head .field-label") || "";
+  check(".prompt-head 里的 .field-label 也补了 margin:0（和原 label 同排版）",
+    /\bmargin\s*:\s*0/.test(promptFieldLabelRule),
+    promptFieldLabelRule || "缺 .prompt-head .field-label 规则");
 
   // ---- 行为六条：控件一律直绑 store，没有本地副本 ----
   check("三个主下拉直绑 state.form（失败时跟着 store 退回）",

@@ -12,8 +12,12 @@
 // 形态交给 naive-ui：整块一张 n-card（title="召回管理"，peer 计数在 #header-extra）；
 // 三个主下拉 NGrid :cols="3"（700px 以下收成一列）；两个展开区各自 NGrid / NSpace。
 //
-// NSelect 的 id 必须走 :input-props —— naive-ui 的 n-select 不关 attrs 继承，
-// 裸 id 会落到外层 <div class="n-select">，<label for> 就指空了。
+// 标签分两种写法，按控件内部有没有真 <input> 决定：
+//   - NInput / NInputNumber 里有真 <input>，<label for=id> + :input-props 的 id 是有效关联；
+//   - NSelect（naive-ui 2.45）非 filterable 时不渲染内部 <input>，也没有 role/aria，
+//     <label for> 只能指到外层 div 上，等于指空。这五个下拉一律用纯文本标签
+//     （span.field-label）+ 控件自带 aria-label，文字逐字一致。
+// NSelect 的 id 仍走 :input-props：裸 id 会落到外层 <div class="n-select">，别让 id 与标签错位。
 import { computed } from "vue";
 import { NButton, NCard, NGrid, NGridItem, NInput, NSelect } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
@@ -85,9 +89,10 @@ function onPromptChange(which, value) {
     <NGrid class="recall-grid" cols="1 700:3" responsive="screen" :x-gap="10" :class="{ dim: !enabled }">
       <NGridItem>
         <div class="field">
-          <label for="recallGate">召回判断</label>
+          <span class="field-label">召回判断</span>
           <NSelect
             size="small"
+            aria-label="召回判断"
             :options="GATE_OPTIONS"
             :input-props="{ id: 'recallGate' }"
             :value="state.form.recallGate"
@@ -98,9 +103,10 @@ function onPromptChange(which, value) {
       </NGridItem>
       <NGridItem>
         <div class="field">
-          <label for="queryMode">召回查询</label>
+          <span class="field-label">召回查询</span>
           <NSelect
             size="small"
+            aria-label="召回查询"
             :options="QUERY_MODE_OPTIONS"
             :input-props="{ id: 'queryMode' }"
             :value="state.form.queryMode"
@@ -111,9 +117,10 @@ function onPromptChange(which, value) {
       </NGridItem>
       <NGridItem>
         <div class="field">
-          <label for="rerank">结果重排</label>
+          <span class="field-label">结果重排</span>
           <NSelect
             size="small"
+            aria-label="结果重排"
             :options="RERANK_OPTIONS"
             :input-props="{ id: 'rerank' }"
             :value="state.form.rerank"
@@ -156,10 +163,11 @@ function onPromptChange(which, value) {
 
         <NGridItem>
           <div class="field">
-            <label for="gateModel">判断模型</label>
+            <span class="field-label">判断模型</span>
             <!-- 一个下拉选到底：首项是默认（走宿主辅助模型），其余就是目录里的每个模型。 -->
             <NSelect
               size="small"
+              aria-label="判断模型"
               :options="gateModelOptions"
               :input-props="{ id: 'gateModel' }"
               :value="state.form.gateModel"
@@ -201,9 +209,10 @@ function onPromptChange(which, value) {
 
         <NGridItem>
           <div class="field">
-            <label for="rerankModel">兜底模型（无启用通道时）</label>
+            <span class="field-label">兜底模型（无启用通道时）</span>
             <NSelect
               size="small"
+              aria-label="兜底模型（无启用通道时）"
               :options="rerankModelOptions"
               :input-props="{ id: 'rerankModel' }"
               :value="state.form.rerankModel"

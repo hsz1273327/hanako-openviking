@@ -89,7 +89,7 @@ function timeoutTitle(row) {
 <template>
   <div class="channel-field">
     <div class="prompt-head">
-      <label>精排通道</label>
+      <span class="field-label">精排通道</span>
       <span id="rerankChannelsCount" class="prompt-status">{{ countText }}</span>
       <NButton
         id="rerankTestBtn"
@@ -141,15 +141,18 @@ function timeoutTitle(row) {
 
             <NGrid cols="1 520:2 700:4" responsive="screen" :x-gap="8" :y-gap="6">
               <NGridItem>
-                <label class="channel-cell">
+                <!-- 类型那格包的是 NSelect：非 filterable 时内部没有 <input>，
+                     包在 <label> 里也关联不上，所以用 div + 控件自己的 aria-label。 -->
+                <div class="channel-cell">
                   <span>类型</span>
                   <NSelect
                     size="small"
+                    aria-label="类型"
                     :options="row.options"
                     :value="row.channel.type"
                     @update:value="(value) => onType(row.index, value)"
                   />
-                </label>
+                </div>
               </NGridItem>
               <NGridItem>
                 <label class="channel-cell">
