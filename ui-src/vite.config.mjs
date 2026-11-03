@@ -1,7 +1,7 @@
 // 面板 UI 的标准构建配置：.vue 单文件组件 → 入口产物。
 //
-// 现在有两个入口（panel / settings），刻意写成对象：将来边栏也迁过来，
-// 加一页只是多一个键，不用回来改构建。
+// 现在有三个入口（panel / settings / card），刻意写成对象：加一页只是多一个键，
+// 不用回来改构建。
 //
 // 过渡期命名约定：构建产物一律带 -vue 后缀（panel-vue.js / settings-vue.js / card-vue.js），
 // 手写脚本保留原名（panel.js / settings.js / card.js）。全部迁完之后再删手写脚本，
@@ -41,10 +41,12 @@ export default defineConfig({
       makeAbsoluteExternalsRelative: false,
       input: {
         // 每个键就是一个页面的入口，产物叫 <键>.js / <键>.css。
-        // 键带 -vue 是为了不和手写脚本同名：panel.js / settings.js 仍是手写的，
+        // 键带 -vue 是为了不和手写脚本同名：panel.js / settings.js / card.js 仍是手写的，
         // 打开 assets 目录时不会先撞见打包代码。
         "panel-vue": resolve(here, "src/entries/panel.js"),
         "settings-vue": resolve(here, "src/entries/settings.js"),
+        // 边栏会话卡：产物 ui/assets/card-vue.js，ui/card.html 只挂 #card-app。
+        "card-vue": resolve(here, "src/entries/card.js"),
       },
       output: {
         entryFileNames: "[name].js",

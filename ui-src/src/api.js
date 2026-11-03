@@ -33,6 +33,18 @@ export function appReady() {
 }
 
 /**
+ * 宿主的当前会话对象（title / agentId / sessionPath 都在里面）。
+ * 未授权、或不在主聊天窗口时返回 null；调用方按「没有活动会话」处理。
+ */
+export async function currentSession() {
+  try {
+    return await hana.sessions.getActive();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 当前会话的状态文件 key。
  *
  * 只吃 `sessionPath`：`sessionId` 是宿主的稳定 id，指不到任何文件
@@ -41,9 +53,16 @@ export function appReady() {
  * 不编一个 key 出来。
  */
 export async function currentSessionKey() {
+  return sessionKeyOf(await currentSession()) || null;
+}
+
+/**
+ * 订阅「活动会话变了」。老宿主没有这个能力时返回 null，调用方靠轮询兜底。
+ */
+export function onActiveSessionChanged(handler) {
   try {
-    const active = await hana.sessions.getActive();
-    return sessionKeyOf(active) || null;
+    const off = hana.sessions.onActiveChanged(handler);
+    return typeof off === "function" ? off : null;
   } catch {
     return null;
   }

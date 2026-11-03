@@ -138,6 +138,21 @@ import {
 } from "../src/state/session.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
+// 边栏会话卡的数据投影：覆盖提交语义、统计 / 提示 / peer 文案都在这里，纯函数。
+import {
+  BOOL_KEYS as CARD_BOOL_KEYS,
+  OVERRIDE_KEYS as CARD_OVERRIDE_KEYS,
+  SCOPE_KEY as CARD_SCOPE_KEY,
+  activeSessionView as cardSessionView,
+  hasOverride as hasCardOverride,
+  hintView as cardHintView,
+  noteView as cardNoteView,
+  optimisticResetEffective as cardOptimisticReset,
+  peerView as cardPeerView,
+  resetOverride as cardResetOverride,
+  statsText as cardStatsText,
+  withOverride as cardWithOverride,
+} from "../ui-src/src/lib/card-view.js";
 // 面板三页标签与记忆键：纯逻辑，node 直接验。
 import {
   DEFAULT_TAB,
@@ -2836,22 +2851,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   const assetsDir = path.join(import.meta.dirname, "../ui/assets");
   check(
-    "构建入口按 -vue 后缀命名（panel-vue / settings-vue）",
+    "构建入口按 -vue 后缀命名（panel-vue / settings-vue / card-vue）",
     /"panel-vue":\s*resolve\(here, "src\/entries\/panel\.js"\)/.test(viteConfig) &&
       /"settings-vue":\s*resolve\(here, "src\/entries\/settings\.js"\)/.test(viteConfig) &&
+      /"card-vue":\s*resolve\(here, "src\/entries\/card\.js"\)/.test(viteConfig) &&
       /"panel":\s/.test(viteConfig) === false &&
-      /"settings":\s/.test(viteConfig) === false,
+      /"settings":\s/.test(viteConfig) === false &&
+      /"card":\s/.test(viteConfig) === false,
     viteConfig.slice(viteConfig.indexOf("input:"), viteConfig.indexOf("output:")),
   );
   check(
-    "构建产物带 -vue：panel-vue.js / settings-vue.js",
-    ["panel-vue.js", "settings-vue.js"].every((name) =>
+    "构建产物带 -vue：panel-vue.js / settings-vue.js / card-vue.js",
+    ["panel-vue.js", "settings-vue.js", "card-vue.js"].every((name) =>
       fs.existsSync(path.join(assetsDir, name)),
     ),
   );
   check(
-    "手写脚本保留原名：panel.js / settings.js / card.js",
-    ["panel.js", "settings.js", "card.js"].every((name) =>
+    "手写脚本保留原名：panel.js / settings.js / card.js（card.css 也留着回退）",
+    ["panel.js", "settings.js", "card.js", "card.css"].every((name) =>
       fs.existsSync(path.join(assetsDir, name)),
     ),
   );
@@ -2863,8 +2880,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 参考工程的 assetFileNames 是 [name].[ext]：SFC 里一旦写 <style>，
   // 构建就会把整份手写 panel.css 覆盖成只剩这一页的几条规则。
   check(
-    "SFC 里不写 <style>（样式集中在手写的 panel.css）",
-    ["components/TabBar.vue", "components/GlobalPanel.vue", "components/MemoryPanel.vue", "components/SkillPanel.vue", "App.vue", "SettingsApp.vue"].every(
+    "SFC 里不写 <style>（样式集中在手写的 panel.css / card.css）",
+    ["components/TabBar.vue", "components/GlobalPanel.vue", "components/MemoryPanel.vue", "components/SkillPanel.vue", "App.vue", "SettingsApp.vue", "CardApp.vue", "components/CardRow.vue"].every(
       (name) => /^\s*<style[\s>]/m.test(uiSrcRaw(name)) === false,
     ),
   );
@@ -8874,6 +8891,155 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       tabBar.includes("<button") && /<NTabs\b/.test(tabBar) === false);
   check("TabBar 的注释写清了为什么不用 n-tabs",
     /n-tabs/.test(uiSrcRaw("components/TabBar.vue")) && /aria-controls/.test(uiSrcRaw("components/TabBar.vue")));
+}
+
+
+// ================= ui: 边栏会话卡（Vue + naive-ui） =================
+{
+  // 这张卡不在一屏面板里，但语义最密：三项开关 + 召回范围都改会话覆盖，
+  // 「跟随全局」提交 null 而不是 false。结构断言读组件源码，语义断言读纯函数。
+  const cardHtml = fs.readFileSync(path.join(import.meta.dirname, "../ui/card.html"), "utf8");
+  const cardApp = uiCode("CardApp.vue");
+  const cardRow = uiCode("components/CardRow.vue");
+  const cardEntry = uiCode("entries/card.js");
+  const cardCss = fs
+    .readFileSync(path.join(import.meta.dirname, "../ui/assets/card.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  // ---- HTML：只剩挂载点，宿主识别标记还在，旧 card.js 只断链不删 ----
+  check("card.html 只剩 #card-app 挂载点", cardHtml.includes('<div id="card-app"></div>'), cardHtml);
+  check("card.html 的 main 仍带 data-hana-app-ui", /<main\b[^>]*\bdata-hana-app-ui\b[^>]*>/.test(cardHtml), cardHtml);
+  eq(
+    "card.html 只引一个 module script（card-vue.js）",
+    [...cardHtml.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
+      (match) => match[1],
+    ),
+    ["card-vue.js"],
+  );
+  check("card.html 不再引用手写 card.js", cardHtml.includes("assets/card.js") === false, cardHtml);
+  check("card.html 仍挂静态 card.css", cardHtml.includes('href="./assets/card.css"'));
+  check("card.html 没有内联样式块", cardHtml.includes("<style") === false);
+  check("入口只负责挂载 CardApp", /\.mount\("#card-app"\)/.test(cardEntry), cardEntry);
+
+  // ---- 四个键：名字必须与后端 OVERRIDE_KEYS 对得上 ----
+  eq("会话卡三个布尔键", CARD_BOOL_KEYS, ["autoRecall", "autoCapture", "readOnly"]);
+  eq("会话卡范围键", CARD_SCOPE_KEY, "recallPeerScope");
+  eq("会话卡覆盖键集合", CARD_OVERRIDE_KEYS, ["autoRecall", "autoCapture", "readOnly", "recallPeerScope"]);
+  check("四个键都出现在组件里",
+    CARD_OVERRIDE_KEYS.every((key) => cardApp.includes(`"${key}"`) || cardApp.includes(`'${key}'`)),
+    CARD_OVERRIDE_KEYS.join(", "));
+
+  // ---- 控件：三个开关 + 一组 radio-button；窄栏里 radio 换到第二行 ----
+  eq("三个开关都是 n-switch", (cardApp.match(/<NSwitch\b/g) || []).length, 3);
+  check("召回范围是 n-radio-group + 两枚 n-radio-button",
+    /<NRadioGroup\b/.test(cardApp) &&
+      (cardApp.match(/<NRadioButton\b/g) || []).length === 2 &&
+      cardApp.includes('value="all"') && cardApp.includes('value="self"'));
+  check("召回范围的两枚按钮在宽行里换行（240px 侧边栏放不进同一行）",
+    /class="row-control"/.test(cardRow) &&
+      /\.row-wide \.row-control\s*\{[\s\S]{0,120}flex\s*:\s*0 0 100%/.test(cardCss),
+    ruleBody(cardCss, ".row-wide .row-control") || "");
+  check("小字按钮用 n-button text size=tiny，不是手画胶囊",
+    /<NButton\b[\s\S]{0,160}\btext\b/.test(cardRow) &&
+      /<NButton\b[\s\S]{0,160}size="tiny"/.test(cardRow));
+  check("小字按钮的两态文案来自 card-view（本会话 / 跟随全局）",
+    cardRow.includes("noteView(props.overridden)") &&
+      cardRow.includes("{{ note.text }}"));
+  check("已覆盖时小字用 primary 色（组件库上色，不写虚线边框）",
+    /:type="overridden \? 'primary' : 'default'"/.test(cardRow));
+
+  // ---- 「跟随全局」提交 null，不是 false ----
+  const resetPatch = cardResetOverride({ autoRecall: false, readOnly: true }, "autoRecall");
+  eq("交回全局提交 autoRecall:null", resetPatch.autoRecall, null);
+  eq("同时保留其它覆盖值", resetPatch.readOnly, true);
+  check("交回全局不写 false", resetPatch.autoRecall !== false, JSON.stringify(resetPatch));
+  const withPatch = cardWithOverride({ autoRecall: true }, "autoCapture", false);
+  eq("改一项只合并这一项", withPatch, { autoRecall: true, autoCapture: false });
+  eq("null 不算覆盖", hasCardOverride({ autoRecall: null }, "autoRecall"), false);
+  eq("false 算覆盖", hasCardOverride({ autoRecall: false }, "autoRecall"), true);
+  check("组件走 resetOverride 生成清覆盖补丁", cardApp.includes("resetOverride("), cardApp.slice(0, 200));
+  check("组件里没有把清覆盖写成 false", /\[key\]\s*:\s*false/.test(cardApp) === false);
+
+  // ---- 文案 / 统计规则与旧卡逐字一致 ----
+  eq("跟随中（未覆盖）的小字", cardNoteView(false), { text: "跟随全局", title: "当前跟随全局" });
+  eq("已覆盖的小字", cardNoteView(true), { text: "本会话", title: "点击交回全局" });
+  eq("统计行：召回 / 写回 / 钩子",
+    cardStatsText({
+      state: { recall: { turns: 2 }, capture: { turns: 1 } },
+      probe: { events: { "provider/before-request": 2, "agent/before-start": 1 } },
+    }),
+    "召回 2 · 写回 1 · 钩子 3");
+  eq("没有探针时间时不追加空段",
+    cardStatsText({ state: { recall: { turns: 0 }, capture: { turns: 0 } }, probe: { events: {} } }),
+    "召回 0 · 写回 0");
+  eq("总闸关着时提示红色警告",
+    cardHintView({ overrides: {}, enabled: false, status: { enabled: false, probe: true } }),
+    { text: "全局总闸关着，这里的开关不会生效。", warn: true });
+  eq("探针关着时的有覆盖提示",
+    cardHintView({ overrides: { autoRecall: false }, enabled: true, status: { probe: false } }),
+    { text: "有本会话设置；点小字交回全局。", warn: false });
+  eq("探针开着时的有覆盖提示",
+    cardHintView({ overrides: { autoRecall: false }, enabled: true, status: { probe: true } }),
+    { text: "实心小字是本会话设置，点它交回全局。", warn: false });
+  eq("没有覆盖时不给空话",
+    cardHintView({ overrides: {}, enabled: true, status: { probe: true } }).text,
+    "");
+  eq("peer 优先显示宿主断言的会话归属",
+    cardPeerView({ peer: "ov-mbp", peerSource: "session" }, "hermes").text,
+    "hermes");
+  check("拿不到身份时不编门牌", cardPeerView({ peer: null, peerSource: "unbound" }, "").text === "未绑定助手");
+  eq("没有活动会话时的标题",
+    cardSessionView(null),
+    { sessionKey: null, sessionOwner: "", title: "无活动会话", titleTitle: "" });
+  const active = cardSessionView({
+    sessionPath: "/tmp/sessions/2026-10-20T08-09-15-730Z_01a1585b-1f3e-4b2b-9d9a-5c5d5e5f5a5b.jsonl",
+    title: "",
+    agentId: "hermes",
+  });
+  eq("活动会话取的是路径里的 uuid", active.sessionKey, "01a1585b-1f3e-4b2b-9d9a-5c5d5e5f5a5b");
+  eq("没有标题时显示 key 末八位", active.title, "5e5f5a5b");
+  eq("会话归属来自 agentId", active.sessionOwner, "hermes");
+
+  // ---- 无活动会话：四个键的控件与「跟随全局」全部禁用 ----
+  check("禁用判据同时看会话 key 与已读到的模型",
+    /controlsDisabled\s*=\s*computed\([\s\S]{0,160}!state\.sessionKey[\s\S]{0,80}!state\.hasModel/.test(cardApp),
+    cardApp.slice(0, 600));
+  // 四个 CardRow 各接一次，四个真控件（3 开关 + 1 radio-group）再各接一次。
+  eq("三开关 + 召回范围都接 controlsDisabled",
+    (cardApp.match(/:disabled="controlsDisabled"/g) || []).length,
+    8);
+  check("小字按钮也接同一个禁用态",
+    /:disabled="disabled"/.test(cardRow) &&
+      (cardApp.match(/:disabled="controlsDisabled"/g) || []).length === 8);
+  check("无活动会话时标题写「无活动会话」", cardApp.includes('title: "无活动会话"'));
+  check("无活动会话时提示先打开一个对话", cardApp.includes("先打开一个对话"));
+
+  // ---- 样式：组件接管外观，只留卡片容器 / 行布局 / 状态点 ----
+  const cardCssLines = cardCss.replace(/\n$/, "").split("\n").length;
+  check("card.css 比旧版短（旧 212 行，组件接管后 < 180 行）",
+    cardCssLines < 180, `${cardCssLines} 行`);
+  const deadCardSelectors = ["\n.switch {", "\n.seg {", ".seg button", ".knob", ".row-note.over", "\n.sub {"];
+  check("自绘开关 / 分段 / 胶囊小字的选择器都不在了",
+    deadCardSelectors.every((needle) => cardCss.includes(needle) === false),
+    deadCardSelectors.filter((needle) => cardCss.includes(needle)).join(", "));
+  check("卡片不画自己的底色（容器背景留透明）",
+    /background/.test(ruleBody(cardCss, ".ov") || "") === false &&
+      /background/.test(ruleBody(cardCss, ".card") || "") === false,
+    `${ruleBody(cardCss, ".ov")} | ${ruleBody(cardCss, ".card")}`);
+  check("状态点用宿主 accent #537d96（warm-paper 亮色）",
+    /\.dot\.ok\s*\{[\s\S]{0,120}#537d96/.test(cardCss));
+  check("行布局仍在 `.row` 上，小字靠 margin-left:auto 推到行尾",
+    /\.row\s*\{[\s\S]{0,160}display\s*:\s*flex/.test(cardCss) &&
+      /\.row-note\s*\{[\s\S]{0,80}margin-left\s*:\s*auto/.test(cardCss));
+  check("挂载层不撑破侧边栏",
+    /#card-app,[\s\S]{0,80}\.card\s*\{[\s\S]{0,80}min-width\s*:\s*0/.test(cardCss),
+    ruleBody(cardCss, "#card-app,\n.card") || "");
+  check("卡片主题是亮色，不引 darkTheme", cardApp.includes("darkTheme") === false);
+  check("卡片局部用宿主 accent #537D96，不写在共享 theme.js 里",
+    cardApp.includes("#537D96") && uiCode("theme.js").includes("#537D96") === false);
+  check("交回全局的乐观回退用全局状态值",
+    cardOptimisticReset({ autoRecall: false }, "autoRecall", { autoRecall: true }).autoRecall === true &&
+      cardOptimisticReset({ recallPeerScope: "all" }, "recallPeerScope", { recallScope: "self" }).recallPeerScope === "self");
 }
 
 // ================= 结果 =================

@@ -10,47 +10,12 @@
   <!-- 会话卡：这段对话里的记忆行为，全部按会话算。
        三个开关改的是本会话覆盖值，点小字交回全局；
        召回范围也按会话走——这段对话查本机还是查跨门牌，不该由别的对话决定。
-       机器级的地址、key、总闸、技能路由、探针在整页。 -->
-  <main class="ov" data-hana-app-ui>
-    <header class="head">
-      <span id="dot" class="dot idle" aria-hidden="true"></span>
-      <span id="title" class="title">无活动会话</span>
-      <span id="pill" class="pill">—</span>
-    </header>
-    <div class="ident">
-      <span class="ident-label">peer</span>
-      <span id="peer" class="ident-value">—</span>
-    </div>
+       机器级的地址、key、总闸、技能路由、探针在整页。
 
-    <div class="rows">
-      <div class="row" data-key="autoRecall">
-        <span class="row-label">记忆召回</span>
-        <button class="row-note follow" type="button" data-reset="autoRecall">跟随全局</button>
-        <button class="switch sm" type="button" role="switch" data-key="autoRecall" aria-checked="false"><span class="knob"></span></button>
-      </div>
-      <div class="row" data-key="autoCapture">
-        <span class="row-label">写回</span>
-        <button class="row-note follow" type="button" data-reset="autoCapture">跟随全局</button>
-        <button class="switch sm" type="button" role="switch" data-key="autoCapture" aria-checked="false"><span class="knob"></span></button>
-      </div>
-      <div class="row" data-key="readOnly">
-        <span class="row-label">只读</span>
-        <button class="row-note follow" type="button" data-reset="readOnly">跟随全局</button>
-        <button class="switch sm" type="button" role="switch" data-key="readOnly" aria-checked="false"><span class="knob"></span></button>
-      </div>
-      <div class="row" data-key="recallPeerScope">
-        <span class="row-label">召回范围</span>
-        <button class="row-note follow" type="button" data-reset="recallPeerScope">跟随全局</button>
-        <div class="seg" id="scopeSeg" role="group" aria-label="召回范围">
-          <button type="button" data-value="all">跨门牌</button>
-          <button type="button" data-value="self">只看本机</button>
-        </div>
-      </div>
-    </div>
-
-    <p id="stats" class="stats">—</p>
-    <p id="hint" class="hint"></p>
-  </main>
-  <script type="module" src="./assets/card.js"></script>
+       结构已经交给 Vue：源码 ui-src/src/CardApp.vue + components/CardRow.vue，
+       构建产物 ui/assets/card-vue.js。HTML 里只剩挂载点；
+       data-hana-app-ui 必须留在 main 上，宿主靠它识别这张 App 卡。 -->
+  <main class="ov" data-hana-app-ui><div id="card-app"></div></main>
+  <script type="module" src="./assets/card-vue.js"></script>
 </body>
 </html>

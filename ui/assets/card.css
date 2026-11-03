@@ -1,4 +1,11 @@
-/* 常驻小卡。同一条硬规矩：不依赖宿主主题变量，只用中性 rgba 与 currentColor。 */
+/* 常驻小卡（边栏）。
+   开关 / 小字按钮 / 召回范围全部交给 naive-ui（源码 ui-src/src/CardApp.vue），
+   这里只留真正属于这张卡的东西：容器、头部、peer 行、四行布局、状态点、统计与提示。
+
+   宿主当前是 warm-paper 亮色，卡片所在侧边栏 --sidebar-bg #F4F0EA。
+   所以卡片不画自己的底色：容器背景留透明，让宿主的暖白透出来。
+   主色用宿主 accent #537D96（只在这一页的 themeOverrides 里，不动面板的品牌绿）。
+   仍不引用宿主主题变量：App 的 iframe 里没有 --text / --accent 这类变量。 */
 
 html, body {
   margin: 0;
@@ -9,10 +16,19 @@ html, body {
 }
 
 .ov {
+  display: block;
+  min-width: 0;
+  padding: 12px 13px 13px;
+}
+
+#card-app,
+.card {
+  min-width: 0;
+}
+
+.card {
   display: grid;
   gap: 8px;
-  padding: 12px 13px 13px;
-  min-width: 0;
 }
 
 .head {
@@ -29,7 +45,10 @@ html, body {
   border-radius: 50%;
   background: rgba(128, 128, 128, 0.4);
 }
-.dot.ok { background: #6f8f68; box-shadow: 0 0 0 3px rgba(111, 143, 104, 0.15); }
+.dot.ok {
+  background: #537d96;
+  box-shadow: 0 0 0 3px rgba(83, 125, 150, 0.15);
+}
 .dot.down { background: #c2554b; }
 
 .title {
@@ -54,22 +73,12 @@ html, body {
   white-space: nowrap;
 }
 .pill.on {
-  border-color: rgba(111, 143, 104, 0.5);
-  background: rgba(111, 143, 104, 0.12);
-  color: #5d7d56;
+  border-color: rgba(83, 125, 150, 0.5);
+  background: rgba(83, 125, 150, 0.12);
+  color: #476b82;
   opacity: 1;
 }
 .pill.off { opacity: 0.55; }
-
-.sub {
-  margin: -3px 0 0;
-  font-size: 10.5px;
-  opacity: 0.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.sub:empty { display: none; }
 
 /* 这一段对话的 peer：会话级身份，不跟着机器走 */
 .ident {
@@ -106,94 +115,39 @@ html, body {
 .row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 5px 0;
   min-width: 0;
 }
 
 .row-label {
+  flex: none;
   font-size: 12px;
   white-space: nowrap;
 }
 
+/* 小字按钮自己不带 margin；靠它把「本会话 / 跟随全局」和右侧控件一起推到行尾。 */
 .row-note {
-  font: inherit;
-  font-size: 10px;
-  line-height: 1;
+  flex: none;
   margin-left: auto;
-  padding: 3px 6px;
-  border-radius: 999px;
-  border: 1px dashed rgba(128, 128, 128, 0.32);
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  opacity: 0.55;
-  white-space: nowrap;
-  transition: opacity 0.15s, border-color 0.15s;
-}
-.row-note:hover { opacity: 0.85; }
-
-.row-note.over {
-  border-style: solid;
-  border-color: rgba(111, 143, 104, 0.5);
-  background: rgba(111, 143, 104, 0.1);
-  color: #5d7d56;
-  opacity: 1;
-}
-
-/* 窄栏里的分段控件：比整页的小一号，待在手边 */
-.seg {
-  flex: none;
-  display: inline-flex;
-  padding: 1.5px;
-  border-radius: 8px;
-  border: 1px solid rgba(128, 128, 128, 0.26);
-  background: rgba(128, 128, 128, 0.05);
-}
-.seg button {
-  font: inherit;
-  font-size: 10px;
-  line-height: 1;
-  padding: 4px 7px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  opacity: 0.55;
-  cursor: pointer;
   white-space: nowrap;
 }
-.seg button[aria-pressed="true"] {
-  background: rgba(128, 128, 128, 0.18);
-  opacity: 1;
+
+.row-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
-.switch {
-  flex: none;
-  position: relative;
-  width: 38px;
-  height: 22px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.32);
-  background: rgba(128, 128, 128, 0.16);
-  cursor: pointer;
-  transition: background 0.18s, border-color 0.18s, opacity 0.18s;
+/* 召回范围的两枚 radio-button 在 240px 侧边栏里放不进同一行：
+   「召回范围 + 跟随全局 + 两枚按钮」约 270px，可用宽度约 214px。
+   所以这一行允许换行，控件独占第二行（两枚按钮约 154px，放得下）。 */
+.row-wide .row-control {
+  flex: 0 0 100%;
+  margin-top: 2px;
 }
-.switch .knob {
-  position: absolute;
-  top: 2.5px;
-  left: 2.5px;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  background: #f6f6f6;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  transition: transform 0.18s cubic-bezier(0.3, 0.7, 0.3, 1);
-}
-.switch[aria-checked="true"] { background: #6f8f68; border-color: #6f8f68; }
-.switch[aria-checked="true"] .knob { transform: translateX(16px); }
-.switch:disabled { opacity: 0.4; cursor: default; }
 
 .stats {
   margin: 0;
@@ -209,4 +163,3 @@ html, body {
   opacity: 0.5;
 }
 .hint.warn { color: #b8564d; opacity: 0.9; }
-.hint:empty { display: none; }
