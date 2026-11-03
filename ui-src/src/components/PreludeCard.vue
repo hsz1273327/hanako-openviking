@@ -1,7 +1,7 @@
 <script setup>
-// 前置：探针开关 + 打分服务表。
+// 前置：探针开关 + 打分服务卡片。
 //
-// 打分服务的一切（标题、几行、每行三格、按钮 id、结果行 id、列表下方那段总说明）
+// 打分服务的一切（标题、几项、每项的字段 / 按钮 id / 结果行 id、列表下方那段总说明）
 // 都来自 lib/recall-layers.js 的 scoringServiceLayout()：
 // 加第三种服务只加一行描述，这里和 HTML 都不用改（行为第 5 条）。
 //
@@ -11,11 +11,15 @@
 //   - 改过任何一格就收掉上一次的测试结果（结果行仍占位，整页不跳）；
 //   - 「测试」发的是输入框此刻的值，不是已保存的配置。
 //
-// 形态：整块一张 n-card（title="前置"），探针行 = NSpace 一行（标题 / 说明 / 开关），
-// 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 密钥 / 测试，700px 以下收成一列），
-// 四格字段 = NFormItem（label-placement="top"、size="small"、无反馈行），
-// 说明与结果行 = NText。列宽表仍在 panel.css：服务名压成内容宽、地址列吃掉剩余，
-// 因为 NGrid 把 grid-template-columns 写成行内样式，组件不给列宽属性。
+// 形态：整块一张 n-card（title="前置"），探针行 = NSpace 一行（标题 / 说明 / 开关）。
+// 打分服务每项一张 NCard（size="small"、:bordered="false"）：服务名在 #header，
+// 测试按钮在 #header-extra；卡片内用 NForm（label-placement="top"）分四行排：
+//   地址独占一行（URL 最长，给它整行）→
+//   模型:超时 = 2:1（NGrid cols="1 640:3"，模型那格 span="1 640:2"；
+//   640px 以下 NGrid 自己收成一列）→
+//   密钥独占一行 → 结果行贴底常驻。
+// 2:1 用 NGridItem 的 span 表达，列宽表（grid-template-columns）因此整块拆掉了：
+// 不再需要 !important 去盖 NGrid 写进 style 的行内样式（见 ui/assets/panel.css）。
 //
 // 密钥那一格：服务端只回掩码（前四 + 圆点 + 后四），输入框里坐的就是它。
 // 聚焦时清掉、失焦仍为空就填回来；空着不提交（清空不等于删 key，
@@ -27,7 +31,7 @@
 // 直接丢掉（node_modules/naive-ui/es/grid/src/Grid.mjs，`__GRID_ITEM__ !== true` 就 return），
 // 裸节点放进去不是「少一层壳」，是整行结果不渲染。
 // 常驻占位：空着也占一行高度，出现结果时不把整页顶一下。
-import { NButton, NCard, NFormItem, NGrid, NGridItem, NInput, NInputNumber, NSpace, NSwitch, NText } from "naive-ui";
+import { NButton, NCard, NForm, NFormItem, NGrid, NGridItem, NInput, NInputNumber, NSpace, NSwitch, NText } from "naive-ui";
 import { scoringServiceLayout } from "../lib/recall-layers.js";
 import { useConfig } from "../composables/useConfig.js";
 
@@ -140,49 +144,72 @@ function onTest(kind) {
       </NSpace>
 
       <!-- 打分服务：精排 / 决策等类型的端点先在这里声明一次，下面的精排通道只选类型。
-           这里只留容器；行由上面的描述表驱动。 -->
+           容器只留 id / class；每项一张卡片，字段顺序由上面的描述表驱动。 -->
       <div id="scoringServices" class="services" :class="{ dim: !enabled }">
         <NText class="hint-body" strong>{{ layout.title }}</NText>
-        <NSpace vertical :size="4">
-          <div
-            v-for="row in layout.rows"
-            :key="row.kind"
-            class="service"
-            :data-kind="row.kind"
+        <NCard
+          v-for="row in layout.rows"
+          :key="row.kind"
+          class="service-card"
+          :data-kind="row.kind"
+          size="small"
+          embedded
+          :bordered="false"
+          header-style="padding: 8px 16px 0"
+          content-style="padding: 4px 16px 12px"
+        >
+          <!-- 服务名在卡片标题位，测试按钮在 header-extra（不占字段行）。
+               embedded 是 naive 给「卡片嵌卡片」的现成形态：底色取
+               --n-color-embedded（比父卡深一档），没有阴影。只写 bordered=false
+               的话这两张子卡跟父卡同色，介面上看就是一片空白里浮着几个标签。 -->
+          <template #header>
+            <span class="service-name">{{ row.label }}</span>
+          </template>
+          <template #header-extra>
+            <NButton
+              :id="row.testId"
+              size="small"
+              secondary
+              :disabled="resultOf(row.kind).pending"
+              @click="onTest(row.kind)"
+            >
+              {{ resultOf(row.kind).pending ? "测试中…" : "测试" }}
+            </NButton>
+          </template>
+
+          <!-- 卡片内四行：地址独占一行 → 模型:超时 = 2:1 → 密钥独占一行 → 结果行。
+               label-placement="top" 与无反馈行交给 NForm 一次性声明，字段沿用。 -->
+          <NForm
+            class="service-form"
+            size="small"
+            label-placement="top"
+            :show-feedback="false"
           >
-            <NGrid cols="1 700:6" responsive="screen" :x-gap="6" :y-gap="0">
-              <NGridItem>
-                <div class="service-name">{{ row.label }}</div>
-              </NGridItem>
+            <!-- 地址独占一行：URL 最长，不跟任何字段挤同一格。 -->
+            <NFormItem
+              :label="row.url.label"
+              :label-props="{ for: row.url.id }"
+            >
+              <NInput
+                size="small"
+                :type="row.url.type"
+                :placeholder="row.url.placeholder"
+                :input-props="{ id: row.url.id, spellcheck: 'false' }"
+                :value="state.draft[row.url.key]"
+                @focus="setFocus(row.url.key)"
+                @blur="setFocus('')"
+                @update:value="onFieldInput(row.url.key, $event)"
+                @change="onFieldChange(row.url.key, $event)"
+                @keydown.enter="onFieldEnter"
+              />
+            </NFormItem>
 
-              <NGridItem>
+            <!-- 模型:超时 = 2:1。cols="1 640:3" 让 naive-ui 生成三份等宽列，
+                 模型那格 span="1 640:2" 占两份、超时占一份；640px 以下自动收成一列。
+                 不写列宽表、不盖行内样式：比例完全由 span 表达。 -->
+            <NGrid cols="1 640:3" responsive="screen" :x-gap="8" :y-gap="8">
+              <NGridItem span="1 640:2">
                 <NFormItem
-                  size="small"
-                  label-placement="top"
-                  :show-feedback="false"
-                  :label="row.url.label"
-                  :label-props="{ for: row.url.id }"
-                >
-                  <NInput
-                    size="small"
-                    :type="row.url.type"
-                    :placeholder="row.url.placeholder"
-                    :input-props="{ id: row.url.id, spellcheck: 'false' }"
-                    :value="state.draft[row.url.key]"
-                    @focus="setFocus(row.url.key)"
-                    @blur="setFocus('')"
-                    @update:value="onFieldInput(row.url.key, $event)"
-                    @change="onFieldChange(row.url.key, $event)"
-                    @keydown.enter="onFieldEnter"
-                  />
-                </NFormItem>
-              </NGridItem>
-
-              <NGridItem>
-                <NFormItem
-                  size="small"
-                  label-placement="top"
-                  :show-feedback="false"
                   :label="row.model.label"
                   :label-props="{ for: row.model.id }"
                 >
@@ -203,9 +230,6 @@ function onTest(kind) {
 
               <NGridItem>
                 <NFormItem
-                  size="small"
-                  label-placement="top"
-                  :show-feedback="false"
                   :label="row.timeout.label"
                   :label-props="{ for: row.timeout.id }"
                 >
@@ -225,61 +249,39 @@ function onTest(kind) {
                   />
                 </NFormItem>
               </NGridItem>
-
-              <NGridItem>
-                <NFormItem
-                  size="small"
-                  label-placement="top"
-                  :show-feedback="false"
-                  :label="row.key.label"
-                  :label-props="{ for: row.key.id }"
-                >
-                  <NInput
-                    size="small"
-                    :type="row.key.type"
-                    show-password-on="click"
-                    :placeholder="row.key.placeholder"
-                    :input-props="{ id: row.key.id, spellcheck: 'false', autocomplete: 'off' }"
-                    :value="state.draft[row.key.key]"
-                    @focus="onKeyFocus(row.key.key)"
-                    @blur="onKeyBlur(row.key.key)"
-                    @update:value="onFieldInput(row.key.key, $event)"
-                    @change="onKeyChange(row.key.key, $event)"
-                    @keydown.enter="onFieldEnter"
-                  />
-                </NFormItem>
-              </NGridItem>
-
-              <NGridItem>
-                <NFormItem size="small" label-placement="top" :show-feedback="false" class="service-test">
-                  <NButton
-                    :id="row.testId"
-                    size="small"
-                    secondary
-                    :disabled="resultOf(row.kind).pending"
-                    @click="onTest(row.kind)"
-                  >
-                    {{ resultOf(row.kind).pending ? "测试中…" : "测试" }}
-                  </NButton>
-                </NFormItem>
-              </NGridItem>
-
-              <!-- 结果行常驻：空着也占一行高度，出现结果时不把整页顶一下。
-                   span 的 1 是 700px 以下（那时 NGrid 只有一列），5 是 ≥700px 时
-                   跨五列。但 span 只给宽度，没有给起点：自动排布会把它放到下一行
-                   的第 1 列（服务名那列）。起点由 panel.css 的 .service-result-cell
-                   用 grid-column: 2 / -1 指定，左边缘才和地址列对齐。 -->
-              <NGridItem span="1 700:5" class="service-result-cell">
-                <NText
-                  :id="row.resultId"
-                  class="service-result hint"
-                  :type="toneType(resultOf(row.kind).tone)"
-                  :depth="toneDepth(resultOf(row.kind).tone)"
-                >{{ resultOf(row.kind).text }}</NText>
-              </NGridItem>
             </NGrid>
-          </div>
-        </NSpace>
+
+            <!-- 密钥独占一行：掩码比地址还长，跟任何字段并排都会被截。 -->
+            <NFormItem
+              :label="row.key.label"
+              :label-props="{ for: row.key.id }"
+            >
+              <NInput
+                size="small"
+                :type="row.key.type"
+                show-password-on="click"
+                :placeholder="row.key.placeholder"
+                :input-props="{ id: row.key.id, spellcheck: 'false', autocomplete: 'off' }"
+                :value="state.draft[row.key.key]"
+                @focus="onKeyFocus(row.key.key)"
+                @blur="onKeyBlur(row.key.key)"
+                @update:value="onFieldInput(row.key.key, $event)"
+                @change="onKeyChange(row.key.key, $event)"
+                @keydown.enter="onFieldEnter"
+              />
+            </NFormItem>
+
+            <!-- 结果行贴卡片底部常驻：空着也占一行高度，出现结果时不把卡片顶高。
+                 它在 NGrid 之后，不靠 grid-column 定位，也不用任何 grid 属性。 -->
+            <NText
+              :id="row.resultId"
+              class="service-result hint"
+              tag="div"
+              :type="toneType(resultOf(row.kind).tone)"
+              :depth="toneDepth(resultOf(row.kind).tone)"
+            >{{ resultOf(row.kind).text }}</NText>
+          </NForm>
+        </NCard>
         <NText class="services-note hint" depth="3">{{ layout.note }}</NText>
       </div>
     </NSpace>

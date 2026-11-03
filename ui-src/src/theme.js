@@ -34,8 +34,14 @@ export const lightThemeOverrides = {
     errorColorSuppl: "#b8564d",
   },
   // 卡片不再画 1px 边框，靠底色分层；圆角 3px 偏硬，统一到 6px。
+  //
+  // colorEmbedded 只服务「卡片嵌卡片」：打分服务每项是一张 embedded NCard，
+  // 坐在前置卡的白底上。naive 亮色默认的 actionColor（2% 黑）在白底上几乎
+  // 看不见，两张子卡看起来就是一片空白，所以这里给到 3.5%。
+  // 外面那层卡片的 color 不动：页面里其它卡片仍然只靠「白底 vs 页底 2% 灰」分层。
   Card: {
     borderRadius: "6px",
+    colorEmbedded: "rgba(0, 0, 0, 0.035)",
   },
   // 标签栏是页头顶层导航，字号沿用原来手写版的 12px（small 档默认 14px）。
   Tabs: {

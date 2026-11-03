@@ -1273,57 +1273,97 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     prelude.includes('v-for="row in layout.rows"') && prelude.includes("scoringServiceLayout("));
   check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
   check("打分服务有样式", /\n\.services \{/.test(css));
-  // 服务行改成一条一条的 NGrid：六格（服务名 / 地址 / 模型 / 超时 / 密钥 / 测试），
-  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。列宽不走六等分，见下面那条。
-  check("服务行是一条 NGrid（cols 1 700:6）",
-    /<NGrid cols="1 700:6" responsive="screen"/.test(prelude), prelude.slice(0, 400));
-  // 六格 + 结果行那一格（结果行也必须包一层 NGridItem：responsive 模式下 naive-ui
-  // 会把非 NGridItem 的子节点直接丢掉，裸 <p> 放进去整行不渲染）。
+  // 打分服务改成「每项一张卡片」：字段在卡片内分行排，不再是一条六格网格。
+  // 地址独占一行；模型:超时 = 2:1 由 NGrid cols="1 640:3" + 模型那格 span="1 640:2"
+  // 表达（不写列宽表，640px 以下 NGrid 自己收成一列）。
+  const cardStart = prelude.indexOf('v-for="row in layout.rows"');
+  const cardOpenEnd = prelude.indexOf(">", prelude.indexOf("content-style", cardStart)) + 1;
+  const cardOpen = prelude.slice(cardStart, cardOpenEnd);
+  const cardBody = prelude.slice(cardStart, prelude.indexOf("</NCard>", cardStart));
+  check("每项服务一张 NCard（size=small、:bordered=false，与页面其它卡片一致）",
+    cardStart > 0 && /size="small"/.test(cardOpen) && /:bordered="false"/.test(cardOpen),
+    cardOpen.slice(0, 260));
+  check("卡片带 service-card / data-kind（按描述表的 kind 出卡）",
+    /class="service-card"/.test(cardOpen) && /:data-kind="row\.kind"/.test(cardOpen) &&
+      prelude.includes('id="scoringServices"') && prelude.includes(':class="{ dim: !enabled }"'),
+    cardOpen.slice(0, 260));
+  // 卡片嵌卡片只能靠底色分层：embedded 是 naive 给内嵌卡的现成形态，
+  // 底色取 --n-color-embedded（主题里改成 3.5%），不画边框。
+  check("子卡是 embedded（嵌在父卡里靠嵌套底色分层，不画边框）",
+    /\sembedded[\s>]/.test(cardOpen), cardOpen.slice(0, 260));
+  check("卡片标题（#header）是服务名",
+    /<template #header>[\s\S]{0,120}\{\{ row\.label \}\}/.test(cardBody), cardBody.slice(0, 200));
+  check("测试按钮在 #header-extra（id 仍是 row.testId，pending 文案不变）",
+    /<template #header-extra>[\s\S]{0,260}?:id="row\.testId"[\s\S]{0,260}?测试中…[\s\S]{0,80}?"测试"/.test(cardBody),
+    cardBody.slice(0, 400));
+  check("卡片内容是一个 NForm（label-placement=top、无反馈行）",
+    /<NForm[\s\S]{0,160}?label-placement="top"[\s\S]{0,120}?:show-feedback="false"/.test(cardBody), cardBody.slice(0, 300));
+  // 模型:超时 = 2:1：cols 让 naive-ui 自己生成三份等宽列，模型 span 两份。
+  check("模型与超时同一网格（cols 1 640:3，间距 8 / 8）",
+    /<NGrid cols="1 640:3" responsive="screen" :x-gap="8" :y-gap="8"/.test(cardBody), cardBody.slice(0, 400));
   const serviceGridBody = prelude.slice(
-    prelude.indexOf('cols="1 700:6"'),
-    prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:6"')),
+    prelude.indexOf('cols="1 640:3"'),
+    prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 640:3"')),
   );
-  eq("服务行是六格 + 结果行一格，七格都是 NGridItem",
-    (serviceGridBody.match(/<NGridItem/g) || []).length, 7);
-  check("服务行 y-gap 压到 0（结果行紧贴字段行，少一层缝）", /:x-gap="6" :y-gap="0"/.test(prelude));
-  // 列宽表：服务名列压成内容宽 + 左对齐，地址列吃剩余宽度。“精排 / 决策”
-  // 两个汉字等宽，不存在右对齐原本要防的“换类型时左边跟着抖”。
-  check("服务名左对齐并贴底",
-    /\.service-name \{[\s\S]{0,200}justify-content:\s*flex-start/.test(css) &&
-      prelude.includes('class="service-name"'));
-  const serviceCols = ruleBody(css, ".service > .n-grid") || "";
-  check("服务行六列列宽表（auto / 1fr / .8fr / 92px / 110px / auto）",
-    /grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(0, 0\.8fr\) 92px 110px auto/.test(
-      serviceCols.replace(/\s+/g, " "),
-    ),
-    serviceCols);
-  // NGrid 把 grid-template-columns 写成行内样式，只有 !important 能盖过它。
-  // 允许三处：列宽表 + 结果行起点（两处都盖 NGridItem 的行内 grid-column）
-  // + .page [hidden] 的 display 兜底。
-  // panelCss() 会把注释剥掉，所以“注释里写了原因”这一半要看原文件。
-  check("列宽表用 !important 盖过 NGrid 的行内样式（注释写了原因）",
-    /grid-template-columns:[^;]*!important/.test(serviceCols) &&
-      /NGrid 把 grid-template-columns 写成\*\*行内样式\*\*[\s\S]{0,200}!important/.test(
-        panelCss({ keepComments: true }),
-      ));
-  eq("panel.css 里 !important 只有三处（hidden 兜底 + NGrid 列宽 + 结果行起点）",
-    (css.match(/!important/g) || []).length, 3);
-  // 断点跟 NGrid 的 `700:` 前缀同一个数；700px 以下不覆盖（那时 NGrid 自己
-  // 就是 repeat(1, …)，单列不该被列宽表碰到）。
-  check("列宽表只在 @media (min-width: 700px) 里",
-    /@media \(min-width: 700px\) \{\s*\.service > \.n-grid \{/.test(css) &&
-      (css.match(/grid-template-columns/g) || []).length === 1);
-  // 结果行在这张 NGrid 里；span 只给宽度，起点由 CSS 盖成第 2 列。
-  check("结果行在服务行 NGrid 内，span 1 700:5",
-    /<NGridItem span="1 700:5" class="service-result-cell">[\s\S]{0,160}:id="row\.resultId"/.test(serviceGridBody) &&
-      prelude.indexOf(':id="row.resultId"') < prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:6"')));
-  check("结果行起点盖成第 2 列（与地址列左边缘对齐）",
-    /\.service > \.n-grid > \.service-result-cell \{\s*grid-column:\s*2 \/ -1 !important/.test(css),
-    ruleBody(css, ".service > .n-grid > .service-result-cell") || "(规则不存在)");
+  eq("卡片内网格两格（模型 + 超时）",
+    (serviceGridBody.match(/<NGridItem/g) || []).length, 2);
+  check("模型那格 span=\"1 640:2\"，超时那格不跨列",
+    /<NGridItem span="1 640:2">[\s\S]{0,200}?:label="row\.model\.label"/.test(serviceGridBody) &&
+      /<NGridItem>[\s\S]{0,120}?<NFormItem[\s\S]{0,160}?:label="row\.timeout\.label"/.test(serviceGridBody),
+    serviceGridBody.slice(0, 300));
+  // 地址与密钥各自独占一行：它们的 NFormItem 不包在 NGrid 里。
+  const formStart = prelude.indexOf('class="service-form"');
+  const formBody = prelude.slice(formStart, prelude.indexOf("</NForm>", formStart));
+  const urlLabelAt = formBody.indexOf(':label="row.url.label"');
+  const urlItem = formBody.slice(
+    formBody.lastIndexOf("<NFormItem", urlLabelAt),
+    formBody.indexOf("</NFormItem>", urlLabelAt),
+  );
+  check("地址 NFormItem 独占一行（不在 NGrid 里）",
+    urlLabelAt > 0 && urlItem.includes('<NFormItem') && urlItem.includes("NGrid") === false &&
+      urlItem.includes('id: row.url.id'),
+    urlItem.slice(0, 200));
+  const keyLabelAt = formBody.indexOf(':label="row.key.label"');
+  const keyItem = formBody.slice(
+    formBody.lastIndexOf("<NFormItem", keyLabelAt),
+    formBody.indexOf("</NFormItem>", keyLabelAt),
+  );
+  check("密钥 NFormItem 独占一行（不在 NGrid 里）",
+    keyLabelAt > 0 && keyItem.includes("NGrid") === false && keyItem.includes('id: row.key.id'),
+    keyItem.slice(0, 200));
+  // 列宽表整块拆掉：2:1 已由 span 表达，不需要 !important 盖行内样式。
+  check("panel.css 里没有 .service > .n-grid 的列宽表",
+    ruleBody(css, ".service > .n-grid") === null && css.includes("grid-template-columns") === false,
+    ruleBody(css, ".service > .n-grid") || "(规则不存在)");
+  check("不再需要盖 NGrid 行内样式（结果行不靠 grid-column 定位）",
+    css.includes("grid-column") === false && prelude.includes("service-result-cell") === false);
+  eq("panel.css 里 !important 只剩 1 处（.page [hidden] 的兜底）",
+    (css.match(/!important/g) || []).length, 1);
+  check("640 断点写在 NGrid 属性上，panel.css 里不再有列宽断点",
+    prelude.includes('cols="1 640:3"') && /@media \(min-width:/.test(css) === false);
+  // 超时框要吃掉整个三分之一列：naive 的 NInputNumber 默认宽 174px，
+  // 放进格子里会右侧空一大段，看上去跟模型不在同一个网格里。
+  check("超时框撑满自己那一格（.service-card .n-input-number 宽 100%）",
+    /width:\s*100%/.test(ruleBody(css, ".service-card .n-input-number") || ""),
+    ruleBody(css, ".service-card .n-input-number") || "(规则不存在)");
+  check("结果行在卡片内、在 NGrid 与密钥之后（贴底常驻）",
+    cardBody.indexOf(':id="row.resultId"') > cardBody.indexOf("</NGrid>") &&
+      cardBody.indexOf(':id="row.resultId"') > cardBody.indexOf(':label="row.key.label"'),
+    cardBody.slice(cardBody.indexOf("</NGrid>"), cardBody.indexOf("</NGrid>") + 300));
+  check("卡片内没有 overflow / 固定高度（不出现体内滚动）",
+    /overflow|height/.test(ruleBody(css, ".service-card") || "") === false &&
+      /\.service-card \.n-card-content/.test(css) === false &&
+      prelude.includes("overflow") === false,
+    ruleBody(css, ".service-card") || "(规则不存在)");
+  check(".services 的卡片间距是 12px", /\.services \{[\s\S]{0,120}gap:\s*12px/.test(css), ruleBody(css, ".services") || "");
+  check("卡片头部字号钉回 12px（不许比面板正文大）",
+    /\.service-card \.n-card-header__main \{[\s\S]{0,120}font-size:\s*12px/.test(css));
   check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
   check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
   check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);
-  check("测试按钮靠底对齐", /\.field\.service-test \{[\s\S]{0,120}align-items:\s*flex-end/.test(css));
+  check("旧的六格字段样式（.service .field / .service-name 排版）已拆掉",
+    css.includes(".service .field") === false &&
+      /\.service-name \{[\s\S]{0,120}align-items/.test(css) === false);
   for (const tone of ["ok", "bad", "muted"]) {
     check(`结果行的 ${tone} 档有样式`, new RegExp(`\\.service-result\\.${tone} \\{`).test(css));
   }
@@ -2711,10 +2751,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     prelude.slice(prelude.indexOf("function toneType"), prelude.indexOf("function toneDepth") + 80));
   // 结果行常驻：取那一格 NGridItem 的整段源码，里面既不能有 v-if / v-show / hidden，
   // 又要真的渲染一个 .service-result。空着也占位，页不会因为出结果而跳一下。
-  const resultCellStart = prelude.indexOf('<NGridItem span="1 700:5" class="service-result-cell">');
+  const resultCellStart = prelude.indexOf(':id="row.resultId"');
+  const resultCellOpen = resultCellStart < 0 ? -1 : prelude.lastIndexOf("<NText", resultCellStart);
+  const resultCellEnd = resultCellStart < 0 ? -1 : prelude.indexOf("</NText>", resultCellStart);
   const resultCell = resultCellStart < 0
     ? ""
-    : prelude.slice(resultCellStart, prelude.indexOf("</NGridItem>", resultCellStart) + "</NGridItem>".length);
+    : prelude.slice(resultCellOpen, resultCellEnd + "</NText>".length);
   check(
     "结果行常驻（空着也占位，不设 hidden / v-if）",
     resultCell.includes('class="service-result') &&
@@ -2904,6 +2946,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     Object.keys(lightThemeOverrides).join(","),
   );
   eq("卡片圆角统一到 6px", lightThemeOverrides.Card?.borderRadius, "6px");
+  // 卡片嵌卡片（打分服务每项一张 embedded NCard）只靠底色分层，不给子卡画边框：
+  // 这个键就是那一层底色。naive 默认 actionColor（2% 黑）在白底上几乎看不见。
+  eq("子卡底色只覆盖 colorEmbedded（外面那层卡片的 color 不动）",
+    lightThemeOverrides.Card?.colorEmbedded, "rgba(0, 0, 0, 0.035)");
+  eq("Card 覆盖只有两项（圆角 + 子卡底色）",
+    Object.keys(lightThemeOverrides.Card).sort().join(","), "borderRadius,colorEmbedded");
   eq("标签字号仍是 12px（不放大）", lightThemeOverrides.Tabs?.tabFontSizeSmall, "12px");
   check("品牌色一个都没少",
     ["#6f8f68", "#7ea176", "#5f7d59", "#5d7d56", "#b8564d"].every((color) =>
@@ -4522,7 +4570,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "systemone",
   ]);
   eq("两行的服务名", layout.rows.map((row) => row.label), ["精排", "决策"]);
-  eq("每行五个控件：地址 / 模型 / 超时 / 密钥 / 测试", [
+  eq("每项四个输入框 + 一个测试按钮（测试按钮在 #header-extra）", [
     layout.rows[0].url.label,
     layout.rows[0].model.label,
     layout.rows[0].timeout.label,
@@ -6033,6 +6081,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("applied 列出密钥字段",
     keySet.body.applied.includes("rerankServiceKey") &&
       keySet.body.applied.includes("systemoneServiceKey"));
+  // 上面的 eq 只看「值是 undefined」；这里再钉一遍「连这个键都没有」——
+  // 将来谁把 current() 改成展开整份配置，值可能是 undefined 而键还在。
+  check(
+    "GET 回包里没有明文密钥字段（不是空值，是不存在）",
+    !("rerankServiceKey" in keySet.body) && !("systemoneServiceKey" in keySet.body),
+    JSON.stringify(Object.keys(keySet.body)),
+  );
 
   // 1) 字段缺省：一个都不动。
   writes.length = 0;
@@ -9312,10 +9367,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     unBordered.map(([file, tag]) => `${file}: ${tag.slice(0, 80)}`).join(" | "));
   check("技能卡的 aria-label 还在",
     /<NCard\b[\s\S]{0,300}aria-label="技能路由"/.test(skillRoute), skillRoute.slice(0, 360));
-  check("需要右侧附件的地方用 #header-extra（peer 计数 / 日志计数 / 技能开关）",
+  check("需要右侧附件的地方用 #header-extra（peer 计数 / 日志计数 / 技能开关 / 服务测试）",
     [/<template #header-extra>[\s\S]{0,160}id="peerCount"/.test(recall),
       /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsPanel),
-      /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute)].every(Boolean));
+      /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute),
+      /<template #header-extra>[\s\S]{0,260}?:id="row\.testId"/.test(prelude)].every(Boolean));
   // 总闸那一行不是卡头附件：标题就是卡头「总闸」，说明与开关是正文里的一行（NSpace）。
   check("总闸那一行是 NSpace + NText + NSwitch（说明在左、开关在右）",
     /<NSpace[\s\S]{0,200}id="masterHint"/.test(master) &&
@@ -9334,7 +9390,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["召回三个主下拉", recall, 'cols="1 700:3"'],
     ["两个展开区", recall, 'cols="1 700:2"'],
     ["通道四格", channels, 'cols="1 520:2 700:4"'],
-    ["服务六格", prelude, 'cols="1 700:6"'],
+    ["服务卡片：模型 + 超时三格", prelude, 'cols="1 640:3"'],
   ];
   for (const [label, source, cols] of grids) {
     check(`${label}用 ${cols}`,
@@ -9343,23 +9399,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // responsive="screen" 是按**断点名**取值的（vooks 的 useBreakpoints 返回名字数组），
   // 断点表里没有 "700" 这个键，cols 里的 `700:` 就永远落到默认值 1 —— 整页栅格
   // 会退成单列。所以断点表必须把键写成数字，且只在 lib 里定义一次。
-  check("断点表把键写成数字（0 / 520 / 700），组件里的 cols 才匹配得到",
-    /export const BREAKPOINTS = Object\.freeze\(\{[\s\S]{0,120}0: 0,[\s\S]{0,80}520: 520,[\s\S]{0,80}700: 700/.test(
+  check("断点表把键写成数字（0 / 520 / 640 / 700），组件里的 cols 才匹配得到",
+    /export const BREAKPOINTS = Object\.freeze\(\{[\s\S]{0,120}0: 0,[\s\S]{0,80}520: 520,[\s\S]{0,80}640: 640,[\s\S]{0,80}700: 700/.test(
       uiSrcRaw("lib/grid-breakpoints.js"),
     ),
     uiSrcRaw("lib/grid-breakpoints.js").slice(0, 200));
   check("断点表接到 NConfigProvider 上（一份，两页共用）",
     /:breakpoints="BREAKPOINTS"/.test(app) && app.includes('from "./lib/grid-breakpoints.js"'));
   check("cols 里用到的断点都在断点表里",
-    [520, 700].every((width) =>
-      /(^|[^\d])520: 520/.test(uiSrcRaw("lib/grid-breakpoints.js")) &&
-      /(^|[^\d])700: 700/.test(uiSrcRaw("lib/grid-breakpoints.js")),
+    [520, 640, 700].every((width) =>
+      new RegExp(`(^|[^\\d])${width}: ${width}`).test(uiSrcRaw("lib/grid-breakpoints.js")),
     ) && [hub, recall, channels, prelude].every((source) => /responsive="screen"/.test(source)));
 
   check("NGrid 的每个直接子节点都是 NGridItem（否则 naive-ui 直接不渲染）",
     [hub, recall, channels, prelude].every((source) => {
       const cells = (source.match(/<NGrid\b/g) || []).length;
-      const items = (source.match(/<NGridItem>/g) || []).length;
+      const items = (source.match(/<NGridItem\b/g) || []).length;
       return cells > 0 && items >= cells;
     }));
   check("没有自定义列宽的 v-bind:cols（统一走响应式字符串）",
