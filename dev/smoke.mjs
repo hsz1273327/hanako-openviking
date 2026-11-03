@@ -204,6 +204,16 @@ import {
 } from "../ui/assets/recall-layers.js";
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
+// 设置页「GET /conn 响应 → 字段」的映射是纯函数，直接 import 断言，
+// 不去 .vue 里正则捞字符串。
+import {
+  HINT_DEFAULT,
+  HINT_SET,
+  buildMask,
+  connFields,
+} from "../ui-src/src/conn-fields.js";
+// 主题也是一份纯数据：直接检查对象，比正则靠谱。
+import { lightThemeOverrides } from "../ui-src/src/theme.js";
 
 let passed = 0;
 const failures = [];
@@ -2094,6 +2104,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const settingsAppVue = readUiSrc("src/SettingsApp.vue");
   const settingsEntry = readUiSrc("src/entries/settings.js");
   const themeJs = readUiSrc("src/theme.js");
+  const connFieldsJs = readUiSrc("src/conn-fields.js");
   const builtPanelJs = fs.readFileSync(
     path.join(import.meta.dirname, "../ui/assets/panel-vue.js"),
     "utf8",
@@ -2134,10 +2145,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("Vue 组件用 n-switch 画那个开关", /<NSwitch\b/.test(skillRouteVue), skillRouteVue.slice(0, 160));
   check(
-    "根组件把主题对齐到面板色板（n-config-provider + darkTheme + theme.js）",
+    "根组件把主题对齐到面板色板（n-config-provider + lightThemeOverrides + theme.js）",
     /<NConfigProvider\b/.test(appVue) &&
-      appVue.includes("darkTheme") &&
-      appVue.includes("darkThemeOverrides") &&
+      appVue.includes("lightThemeOverrides") &&
       appVue.includes('from "./theme.js"'),
     appVue.slice(0, 160),
   );
@@ -2166,8 +2176,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     settingsEntry.slice(0, 160),
   );
   check(
-    "theme.js 导出共用的 darkThemeOverrides",
-    /export const darkThemeOverrides\s*=/.test(themeJs),
+    "theme.js 导出共用的 lightThemeOverrides",
+    /export const lightThemeOverrides\s*=/.test(themeJs) &&
+      themeJs.includes("darkThemeOverrides") === false,
   );
   check(
     "面板与设置页共同 import theme.js（不各写一份）",
@@ -2181,6 +2192,60 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["#6f8f68", "#7ea176", "#5f7d59", "#5d7d56", "#b8564d"].every((color) =>
       themeJs.includes(color),
     ),
+  );
+
+  // ---- 亮色主题：浅色字打在浅色底上，会让「有值」的输入框看着像空的 ----
+  // 断言只看代码，不看注释：解释「为什么不用深色主题」的注释里会提到 darkTheme。
+  const codeOnly = (source) =>
+    source
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/[^\n]*/gm, "");
+  const appCode = codeOnly(appVue);
+  const settingsCode = codeOnly(settingsAppVue);
+  const themeCode = codeOnly(themeJs);
+  check(
+    "theme.js 不 import darkTheme（不回 naive-ui 借深色底）",
+    /^\s*import\b/m.test(themeCode) === false &&
+      themeCode.includes("darkTheme") === false,
+    themeCode.slice(0, 160),
+  );
+  check(
+    "亮色主题不再覆盖文字/标签颜色",
+    themeCode.includes("labelTextColor") === false &&
+      themeCode.includes("textColor") === false &&
+      themeCode.includes("236, 236, 236") === false,
+  );
+  eq("Form 不再覆盖 labelTextColor", lightThemeOverrides.Form, undefined);
+  eq("Input 不再覆盖 textColor", lightThemeOverrides.Input?.textColor, undefined);
+  eq("Button 不再覆盖文案颜色", lightThemeOverrides.Button?.textColor, undefined);
+  eq(
+    "Switch 交给 naive-ui 亮色默认（白钮自带阴影，不再写死 #f6f6f6）",
+    lightThemeOverrides.Switch,
+    undefined,
+  );
+  eq("输入框底色是中性灰", lightThemeOverrides.Input?.color, "rgba(128, 128, 128, 0.06)");
+  eq(
+    "输入框 focus 底色带一点品牌绿",
+    lightThemeOverrides.Input?.colorFocus,
+    "rgba(111, 143, 104, 0.08)",
+  );
+  eq("圆角仍是 9px", lightThemeOverrides.common?.borderRadius, "9px");
+  check(
+    "两个组件都不传 :theme，只用 theme-overrides",
+    [appCode, settingsCode].every(
+      (source) =>
+        /<NConfigProvider\b/.test(source) &&
+        source.includes(':theme-overrides="lightThemeOverrides"') &&
+        source.includes(":theme=") === false &&
+        source.includes("darkTheme") === false,
+    ),
+    `${appCode.slice(0, 80)} | ${settingsCode.slice(0, 80)}`,
+  );
+  check(
+    "构建产物里也没有浅色文字值（亮色主题真的进了 bundle）",
+    builtSettingsJs.includes("rgba(236, 236, 236") === false &&
+      builtPanelJs.includes("rgba(236, 236, 236") === false,
   );
   check(
     "SettingsApp 用 n-form / n-form-item / n-input / n-button / n-alert",
@@ -2208,8 +2273,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check(
     "API Key 掩码行为保持不变（聚焦清空 / 失焦恢复 / 等于掩码视为没改）",
-    settingsAppVue.includes("buildMask") &&
-      settingsAppVue.includes('"•".repeat(8)') &&
+    settingsAppVue.includes("buildMask") === false &&
+      connFieldsJs.includes("buildMask") &&
+      connFieldsJs.includes('"•".repeat(8)') &&
       settingsAppVue.includes("apiKey.value === mask") &&
       settingsAppVue.includes('apiKey.value.trim() === "" && mask') &&
       settingsAppVue.includes("typed !== mask") &&
@@ -7659,6 +7725,72 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const block = memoryBlock("啊".repeat(400), 20);
   check("记忆块带开关标记", block.startsWith("<openviking-memory>") && block.endsWith("</openviking-memory>"));
   check("超预算时截断且标记完整", block.includes("…") && block.endsWith("</openviking-memory>"));
+}
+
+// ================= 设置页：GET /conn 响应 → 字段（纯逻辑） =================
+{
+  // 「输入框是空的」曾被当成数据没填进去。真实原因是深色主题把文字洗成了
+  // 近白色（见上面的 theme 断言）；这里把「拿到响应 → 填字段」钉住，
+  // 将来真的丢了值会立刻红。
+  const real = {
+    serverUrl: "http://192.168.50.142:8000",
+    peerPrefix: "desktop",
+    peerPrefixValid: true,
+    apiKeySet: true,
+    apiKeyHead: "ov-1",
+    apiKeyTail: "9f3c",
+  };
+  const fields = connFields(real);
+  eq("服务地址被填进去", fields.serverUrl, "http://192.168.50.142:8000");
+  eq("门牌前缀被填进去", fields.peerPrefix, "desktop");
+  eq("API Key 填的是掩码，不是明文", fields.apiKey, "ov-1••••••••9f3c");
+  eq("掩码与「没改过」的判据一致", fields.mask, fields.apiKey);
+  eq("有 key 时用「已保存」那档说明", fields.keyHint, HINT_SET);
+
+  // GET /conn 没有 ok 字段：不能因为缺 ok 就把响应当失败（那才会真的不填）。
+  eq(
+    "没有 ok 字段的响应照样能填字段",
+    connFields({ serverUrl: "http://h:1", peerPrefix: "mbp" }).serverUrl,
+    "http://h:1",
+  );
+  eq(
+    "没有 ok 字段时门牌前缀也照填",
+    connFields({ serverUrl: "http://h:1", peerPrefix: "mbp" }).peerPrefix,
+    "mbp",
+  );
+
+  const empty = connFields({
+    serverUrl: "",
+    peerPrefix: "",
+    peerPrefixValid: true,
+    apiKeySet: false,
+    apiKeyHead: "",
+    apiKeyTail: "",
+  });
+  eq("没填时服务地址是空串", empty.serverUrl, "");
+  eq("没填时门牌前缀是空串", empty.peerPrefix, "");
+  eq("没 key 时掩码是空串", empty.apiKey, "");
+  eq("没 key 时用默认说明", empty.keyHint, HINT_DEFAULT);
+
+  // 形状脏了也不能把 undefined 显示进输入框。
+  eq("空气响应不吐 undefined", connFields(undefined).serverUrl, "");
+  eq("null 响应不吐 undefined", connFields(null).peerPrefix, "");
+  eq("非字符串的 serverUrl 当空", connFields({ serverUrl: 42 }).serverUrl, "");
+
+  eq("掩码：头四位 + 圆点 × 8 + 后四位", buildMask("abcd", "wxyz"), "abcd••••••••wxyz");
+  eq("短 key 只有后四位（后端不给 head）", buildMask("", "wxyz"), "••••••••wxyz");
+  eq("没填时掩码为空串", buildMask("abcd", ""), "");
+  eq("tail 缺失时掩码为空串", buildMask("abcd", undefined), "");
+  eq("掩码里的圆点正好八个", (buildMask("abcd", "wxyz").match(/•/g) || []).length, 8);
+
+  // 亮色主题：文字色交回 naive-ui 默认，只留品牌色与中性底。
+  eq(
+    "品牌绿仍是主色",
+    lightThemeOverrides.common?.primaryColor,
+    "#6f8f68",
+  );
+  eq("成功色不变", lightThemeOverrides.common?.successColor, "#5d7d56");
+  eq("错误色不变", lightThemeOverrides.common?.errorColor, "#b8564d");
 }
 
 // ================= 结果 =================

@@ -12,24 +12,15 @@
 // 样式：SFC 里不写 <style>，这只管字段结构；字号/间距/脚注仍在
 // ui/settings.html 的内联样式里，补几条给 Vue 生成的 DOM 用。
 import { onMounted, ref } from "vue";
-import {
-  NAlert,
-  NButton,
-  NConfigProvider,
-  NForm,
-  NFormItem,
-  NInput,
-  darkTheme,
-} from "naive-ui";
+import { NAlert, NButton, NConfigProvider, NForm, NFormItem, NInput } from "naive-ui";
 import { hana } from "./sdk.js";
-import { darkThemeOverrides } from "./theme.js";
-
-const HINT_DEFAULT = "保存在本机 App 设置里，不会回显、不进日志。";
-const HINT_SET = "已保存在本机。要换 key 就在框里输入新的；留空保存不会清掉旧的。";
+import { HINT_DEFAULT, connFields } from "./conn-fields.js";
+import { lightThemeOverrides } from "./theme.js";
 
 const serverUrl = ref("");
 const apiKey = ref("");
 const peerPrefix = ref("");
+// 首屏到 load() 落地之间的占位说明：和「没填」那一档一致。
 const keyHint = ref(HINT_DEFAULT);
 const statusText = ref("");
 const statusTone = ref(""); // "" | "ok" | "bad"
@@ -42,19 +33,16 @@ function setStatus(text, kind) {
   statusTone.value = kind || "";
 }
 
-function buildMask(head, tail) {
-  if (!tail) return "";
-  return `${head || ""}${"•".repeat(8)}${tail}`;
-}
-
 function paint(data) {
-  serverUrl.value = data.serverUrl || "";
-  peerPrefix.value = data.peerPrefix || "";
-
-  mask = data.apiKeySet ? buildMask(data.apiKeyHead, data.apiKeyTail) : "";
-  apiKey.value = mask;
-
-  keyHint.value = data.apiKeySet ? HINT_SET : HINT_DEFAULT;
+  // 响应 → 字段的映射是纯函数（./conn-fields.js），这里只负责写进响应式。
+  // 注意：GET /conn 没有 ok 字段，别拿 data.ok 判断成功与否。
+  const fields = connFields(data);
+  serverUrl.value = fields.serverUrl;
+  peerPrefix.value = fields.peerPrefix;
+  // 掩码也是「没改过」的判据：保存时 typed === mask 视为没改。
+  mask = fields.mask;
+  apiKey.value = fields.apiKey;
+  keyHint.value = fields.keyHint;
 }
 
 async function readJson(res) {
@@ -114,7 +102,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <NConfigProvider abstract :theme="darkTheme" :theme-overrides="darkThemeOverrides">
+  <NConfigProvider abstract :theme-overrides="lightThemeOverrides">
     <NForm
       class="settings-form"
       label-placement="top"
