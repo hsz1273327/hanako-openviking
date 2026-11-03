@@ -39,6 +39,7 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  normalizeServiceKey,
   normalizeServiceModel,
   normalizeServiceTimeout,
   normalizeServiceUrl,
@@ -55,9 +56,11 @@ import {
   RERANK_MODES,
   RERANK_PROMPT_MAX,
   SERVICE_MODEL_MAX,
+  SERVICE_KEY_MAX,
   SERVICE_TIMEOUT_LIMITS,
   DEFAULTS,
 } from "../src/ov/settings.js";
+import { maskOf, maskString } from "../src/ov/mask.js";
 import { createProbe } from "../src/probe.js";
 import {
   stripInjected,
@@ -186,9 +189,13 @@ import {
   SERVICE_TEST_TEXT as UI_SERVICE_TEST_TEXT,
   SERVICE_TIMEOUT_LIMITS as UI_SERVICE_TIMEOUT_LIMITS,
   SERVICE_MODEL_MAX as UI_SERVICE_MODEL_MAX,
+  SERVICE_KEY_MAX as UI_SERVICE_KEY_MAX,
   SERVICE_URL_MAX as UI_SERVICE_URL_MAX,
+  SERVICE_KEY_MASK_DOTS as UI_SERVICE_KEY_MASK_DOTS,
   channelPairNote as uiChannelPairNote,
+  normalizeServiceKey as uiNormalizeServiceKey,
   normalizeServiceTimeout as uiNormalizeServiceTimeout,
+  serviceKeyMask as uiServiceKeyMask,
   serviceTestBody as uiServiceTestBody,
   serviceTestReady as uiServiceTestReady,
   serviceTestView as uiServiceTestView,
@@ -1266,18 +1273,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     prelude.includes('v-for="row in layout.rows"') && prelude.includes("scoringServiceLayout("));
   check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
   check("打分服务有样式", /\n\.services \{/.test(css));
-  // 服务行改成一条一条的 NGrid：五格（服务名 / 地址 / 模型 / 超时 / 测试），
-  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。列宽不走五等分，见下面那条。
-  check("服务行是一条 NGrid（cols 1 700:5）",
-    /<NGrid cols="1 700:5" responsive="screen"/.test(prelude), prelude.slice(0, 400));
-  // 五格 + 结果行那一格（结果行也必须包一层 NGridItem：responsive 模式下 naive-ui
+  // 服务行改成一条一条的 NGrid：六格（服务名 / 地址 / 模型 / 超时 / 密钥 / 测试），
+  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。列宽不走六等分，见下面那条。
+  check("服务行是一条 NGrid（cols 1 700:6）",
+    /<NGrid cols="1 700:6" responsive="screen"/.test(prelude), prelude.slice(0, 400));
+  // 六格 + 结果行那一格（结果行也必须包一层 NGridItem：responsive 模式下 naive-ui
   // 会把非 NGridItem 的子节点直接丢掉，裸 <p> 放进去整行不渲染）。
   const serviceGridBody = prelude.slice(
-    prelude.indexOf('cols="1 700:5"'),
-    prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:5"')),
+    prelude.indexOf('cols="1 700:6"'),
+    prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:6"')),
   );
-  eq("服务行是五格 + 结果行一格，六格都是 NGridItem",
-    (serviceGridBody.match(/<NGridItem/g) || []).length, 6);
+  eq("服务行是六格 + 结果行一格，七格都是 NGridItem",
+    (serviceGridBody.match(/<NGridItem/g) || []).length, 7);
   check("服务行 y-gap 压到 0（结果行紧贴字段行，少一层缝）", /:x-gap="6" :y-gap="0"/.test(prelude));
   // 列宽表：服务名列压成内容宽 + 左对齐，地址列吃剩余宽度。“精排 / 决策”
   // 两个汉字等宽，不存在右对齐原本要防的“换类型时左边跟着抖”。
@@ -1285,8 +1292,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /\.service-name \{[\s\S]{0,200}justify-content:\s*flex-start/.test(css) &&
       prelude.includes('class="service-name"'));
   const serviceCols = ruleBody(css, ".service > .n-grid") || "";
-  check("服务行五列列宽表（auto / 1fr / .8fr / 92px / auto）",
-    /grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(0, 0\.8fr\) 92px auto/.test(serviceCols),
+  check("服务行六列列宽表（auto / 1fr / .8fr / 92px / 110px / auto）",
+    /grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(0, 0\.8fr\) 92px 110px auto/.test(
+      serviceCols.replace(/\s+/g, " "),
+    ),
     serviceCols);
   // NGrid 把 grid-template-columns 写成行内样式，只有 !important 能盖过它。
   // 允许三处：列宽表 + 结果行起点（两处都盖 NGridItem 的行内 grid-column）
@@ -1305,9 +1314,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /@media \(min-width: 700px\) \{\s*\.service > \.n-grid \{/.test(css) &&
       (css.match(/grid-template-columns/g) || []).length === 1);
   // 结果行在这张 NGrid 里；span 只给宽度，起点由 CSS 盖成第 2 列。
-  check("结果行在服务行 NGrid 内，span 1 700:4",
-    /<NGridItem span="1 700:4" class="service-result-cell">[\s\S]{0,160}:id="row\.resultId"/.test(serviceGridBody) &&
-      prelude.indexOf(':id="row.resultId"') < prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:5"')));
+  check("结果行在服务行 NGrid 内，span 1 700:5",
+    /<NGridItem span="1 700:5" class="service-result-cell">[\s\S]{0,160}:id="row\.resultId"/.test(serviceGridBody) &&
+      prelude.indexOf(':id="row.resultId"') < prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:6"')));
   check("结果行起点盖成第 2 列（与地址列左边缘对齐）",
     /\.service > \.n-grid > \.service-result-cell \{\s*grid-column:\s*2 \/ -1 !important/.test(css),
     ruleBody(css, ".service > .n-grid > .service-result-cell") || "(规则不存在)");
@@ -2190,6 +2199,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 打分服务：四个新配置项的归一化 ----
   eq("精排服务地址默认空", DEFAULTS.rerankServiceUrl, "");
   eq("决策服务模型默认空", DEFAULTS.systemoneServiceModel, "");
+  eq("两组服务密钥默认空", [DEFAULTS.rerankServiceKey, DEFAULTS.systemoneServiceKey], ["", ""]);
   eq(
     "未配置时四个服务字段都是空",
     await readSwitches(sdkWith({})).then((sw) => [
@@ -2236,6 +2246,51 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       services.systemoneServiceModel,
     ],
     ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "kev-4b"],
+  );
+
+  // ---- 打分服务密钥：可选、去空白、换行当没配、超长截断 ----
+  eq("未配置时两个密钥都是空串", [
+    (await readSwitches(sdkWith({}))).rerankServiceKey,
+    (await readSwitches(sdkWith({}))).systemoneServiceKey,
+  ], ["", ""]);
+  eq("密钥去首尾空白", normalizeServiceKey("  sk-test-1234  "), "sk-test-1234");
+  eq("密钥留空合法", normalizeServiceKey("   "), "");
+  eq("非字符串密钥当没配", normalizeServiceKey(1234), "");
+  eq("带 \\n 的密钥整条丢弃", normalizeServiceKey("sk-abc\ndef"), "");
+  eq("带 \\r 的密钥整条丢弃", normalizeServiceKey("sk-abc\rdef"), "");
+  eq(
+    "密钥超过 512 字符截断到 512",
+    Array.from(normalizeServiceKey("k".repeat(SERVICE_KEY_MAX + 40))).length,
+    SERVICE_KEY_MAX,
+  );
+  eq("密钥上限是 512", SERVICE_KEY_MAX, 512);
+  eq(
+    "readSwitches 读密钥：换行的那份收敛成空",
+    await readSwitches(
+      sdkWith({ rerankServiceKey: "  sk-abc  ", systemoneServiceKey: "sk-abc\ndef" }),
+    ).then((sw) => [sw.rerankServiceKey, sw.systemoneServiceKey]),
+    ["sk-abc", ""],
+  );
+
+  // ---- 掩码：长 key / 短 key / 空，一份实现（conn 与 recall-mode 共用） ----
+  eq("长 key 拆成前 4 + 后 4", maskOf("sk-abcdef1234567890"), {
+    head: "sk-a",
+    tail: "7890",
+  });
+  eq("短 key（<12）不给前 4", maskOf("sk-abc123"), { head: "", tail: "c123" });
+  eq("刚好 12 位算长 key", maskOf("abcdefghijkl"), { head: "abcd", tail: "ijkl" });
+  eq("空 key 两半都空", maskOf(""), { head: "", tail: "" });
+  eq("null 也当没填", maskOf(null), { head: "", tail: "" });
+  eq("长 key 的掩码串 = 前 4 + 8 个圆点 + 后 4", maskString("sk-abcdef1234567890"), "sk-a••••••••7890");
+  eq("短 key 的掩码串只给后 4（前面还是 8 个圆点）", maskString("sk-abc123"), "••••••••c123");
+  eq("空 key 的掩码串是空串（不是一串圆点）", maskString(""), "");
+  eq("掩码里的圆点个数与面板同值", "••••••••".length, UI_SERVICE_KEY_MASK_DOTS);
+  eq("密钥上限前后端同值", UI_SERVICE_KEY_MAX, SERVICE_KEY_MAX);
+  eq(
+    "掩码串里不包含明文",
+    maskString("sk-abcdef1234567890").includes("abcdef") ||
+      maskString("sk-abcdef1234567890").includes("123456"),
+    false,
   );
 
   // ---- 打分服务超时：空 / 非数字 / 越界一律回默认值，不留非法值 ----
@@ -2656,7 +2711,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     prelude.slice(prelude.indexOf("function toneType"), prelude.indexOf("function toneDepth") + 80));
   // 结果行常驻：取那一格 NGridItem 的整段源码，里面既不能有 v-if / v-show / hidden，
   // 又要真的渲染一个 .service-result。空着也占位，页不会因为出结果而跳一下。
-  const resultCellStart = prelude.indexOf('<NGridItem span="1 700:4" class="service-result-cell">');
+  const resultCellStart = prelude.indexOf('<NGridItem span="1 700:5" class="service-result-cell">');
   const resultCell = resultCellStart < 0
     ? ""
     : prelude.slice(resultCellStart, prelude.indexOf("</NGridItem>", resultCellStart) + "</NGridItem>".length);
@@ -2673,6 +2728,44 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /state\.serviceResults\[kind\] = \{ tone: "", text: "", pending: false \}/.test(storeJs));
   check("服务字段按描述表渲染", prelude.includes("scoringServiceLayout()") &&
     prelude.includes("state.draft[row.url.key]"));
+  // 密钥那一格：受控（直绑 state.draft）、password、可点开看、聚焦清空 / 失焦补回。
+  check(
+    "密钥格直绑 state.draft（受控，不存本地副本）",
+    prelude.includes(':value="state.draft[row.key.key]"') &&
+      /function onFieldInput\(key, value\) \{\s*state\.draft\[key\] = value;/.test(prelude),
+    prelude.slice(prelude.indexOf('row.key.key'), prelude.indexOf('row.key.key') + 160),
+  );
+  check(
+    "密钥格是 password 且可点开查看",
+    prelude.includes(':type="row.key.type"') &&
+      prelude.includes('show-password-on="click"') &&
+      SCORING_SERVICES.every((service) => scoringServiceRow(service).key.type === "password"),
+  );
+  check(
+    "密钥格聚焦 / 失焦 / 散手各走自己的处理函数",
+    prelude.includes("@focus=\"onKeyFocus(row.key.key)\"") &&
+      prelude.includes("@blur=\"onKeyBlur(row.key.key)\"") &&
+      prelude.includes("@change=\"onKeyChange(row.key.key, $event)\"") &&
+      prelude.includes("@keydown.enter=\"onFieldEnter\""),
+  );
+  check(
+    "聚焦清掉掩码、失焦仍为空就填回",
+    /function onKeyFocus\(key\) \{[\s\S]{0,200}?state\.draft\[key\] = ""/.test(prelude) &&
+      /function onKeyBlur\(key\) \{[\s\S]{0,200}?state\.draft\[key\] = keyMaskOf\(key\)/.test(prelude),
+    prelude.slice(prelude.indexOf("function onKeyFocus"), prelude.indexOf("function onKeyBlur") + 220),
+  );
+  check(
+    "密钥框的空串不提交（清空不等于删 key）",
+    /function setServiceKey\(key, value\) \{[\s\S]{0,200}?!String\(value \?\? ""\)\.trim\(\)[\s\S]{0,200}?return undefined/.test(
+      storeJs,
+    ) && prelude.includes("setServiceKey(key, value ?? \"\")"),
+  );
+  check(
+    "空着的密钥框提交时带掩码，不带空串（服务端空串 = 清空）",
+    /scoring\[service\.keyKey\] = draftOf\(service\.keyKey\)\.trim\(\) \|\| state\.layers\[service\.keyKey\] \|\| ""/.test(
+      storeJs,
+    ),
+  );
   check("服务地址与模型成对（半对不发）", storeJs.includes("readServicePair(service)") &&
     /if \(Boolean\(url\) !== Boolean\(model\)\) return \{\}/.test(storeJs));
   check("清空一半时另一半也清掉", storeJs.includes("servicePartnerOf(key)") &&
@@ -3009,6 +3102,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("manifest 里 systemoneServiceModel 默认空", props.systemoneServiceModel?.default, "");
   eq("manifest 里 rerankServiceTimeoutMs 默认空", props.rerankServiceTimeoutMs?.default, "");
   eq("manifest 里 systemoneServiceTimeoutMs 默认空", props.systemoneServiceTimeoutMs?.default, "");
+  eq("manifest 里两个服务密钥默认空", [
+    props.rerankServiceKey?.default,
+    props.systemoneServiceKey?.default,
+  ], ["", ""]);
+  eq("manifest 里两个服务密钥标了 sensitive（不当普通字符串存）", [
+    props.rerankServiceKey?.sensitive,
+    props.systemoneServiceKey?.sensitive,
+  ], [true, true]);
+  check(
+    "manifest 的密钥说明写了「可选 / 留空不发头 / 512」",
+    [props.rerankServiceKey, props.systemoneServiceKey].every(
+      (item) =>
+        String(item?.description).includes("可选") &&
+        String(item?.description).includes("留空") &&
+        String(item?.description).includes("512"),
+    ),
+  );
   check(
     "manifest 的超时说明写了默认值与可填区间",
     String(props.rerankServiceTimeoutMs?.description).includes("800") &&
@@ -3665,9 +3775,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       rerankServiceUrl: "http://127.0.0.1:8098",
       rerankServiceModel: "bge-reranker-v2-m3",
       rerankServiceTimeoutMs: null,
+      // 密钥：GET 只回掩码。
+      rerankServiceKeySet: true,
+      rerankServiceKeyMasked: "sk-a••••••••7890",
       systemoneServiceUrl: "",
       systemoneServiceModel: "",
       systemoneServiceTimeoutMs: null,
+      systemoneServiceKeySet: false,
+      systemoneServiceKeyMasked: "",
     },
     "/models": { ok: true, models: [{ provider: "p", id: "m" }] },
   };
@@ -3699,9 +3814,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     }
     if (path === "/peers") return { ok: true, excluded: body.excluded };
     if (path === "/recall-mode") {
-      Object.assign(backend["/recall-mode"], body, {
-        rerankChannels: JSON.parse(body.rerankChannels),
-      });
+      const target = backend["/recall-mode"];
+      Object.assign(target, body, { rerankChannels: JSON.parse(body.rerankChannels) });
+      // 模拟服务端：只回掩码。带明文就换掩码，带的等于当前掩码就不动。
+      for (const keyKey of ["rerankServiceKey", "systemoneServiceKey"]) {
+        const typed = target[keyKey];
+        if (typeof typed !== "string") continue;
+        delete target[keyKey];
+        if (!typed || typed === target[`${keyKey}Masked`]) continue;
+        target[`${keyKey}Set`] = true;
+        target[`${keyKey}Masked`] = `${typed.slice(0, 4)}••••••••${typed.slice(-4)}`;
+      }
       return { ok: true, ...clone(backend["/recall-mode"]) };
     }
     if (path === "/recall-mode/service-test") {
@@ -3758,6 +3881,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("打分服务地址读回", state.draft.rerankServiceUrl, "http://127.0.0.1:8098");
   eq("打分服务模型读回", state.draft.rerankServiceModel, "bge-reranker-v2-m3");
   eq("超时留空仍是空（placeholder 显示默认值）", state.draft.rerankServiceTimeoutMs, "");
+  eq("密钥框里坐的是掩码（GET 不回明文）", state.draft.rerankServiceKey, "sk-a••••••••7890");
+  eq("没配密钥的服务那格是空", [state.draft.systemoneServiceKey], [""]);
   eq("通道草稿按服务端投影", state.channels.map((channel) => channel.name), ["孤儿通道"]);
   eq("模型目录进来了", ui.store.modelChoices(state.form.gateModel).map((option) => option.value), ["", "p/m"]);
   check("目录可用时不显示原因", ui.store.modelHint() === "");
@@ -3894,6 +4019,67 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await ui.setServiceField("rerankServiceUrl", "");
     eq("清空一半时另一半也清掉", [state.draft.rerankServiceUrl, state.draft.rerankServiceModel], ["", ""]);
     eq("清空后上一次的测试结果也收掉", state.serviceResults.rerank, { tone: "", text: "", pending: false });
+  }
+
+  // ---- 打分服务密钥：掩码回显、清空不提交、新值整单带走 ----
+  {
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    const before = saves().length;
+
+    // 清空不提交：聚焦后框里会变成空串，失焦仍为空就把掩码填回去。
+    await ui.setServiceKey("rerankServiceKey", "");
+    eq("清空密钥不发请求", saves().length - before, 0);
+    eq("清空后掩码填回框里", state.draft.rerankServiceKey, "sk-a••••••••7890");
+
+    // 空着的时候改别的格：带回去的是掩码，不是空串（不会顺手把 key 删了）。
+    state.draft.rerankServiceKey = "";
+    await ui.setForm("queryMode", "last");
+    eq("空着时提交带的是掩码（不当成清空）", saves().at(-1).body.rerankServiceKey, "sk-a••••••••7890");
+    // 回包不硬填：用户手上还清着那一格（飞行期间的状态），掩码由失焦补回。
+    eq("空着时回包不抢着填回掩码", state.draft.rerankServiceKey, "");
+    state.draft.rerankServiceKey = state.layers.rerankServiceKey;
+
+    // 新值：整单带走，回包里换成新掩码。
+    await ui.setServiceKey("rerankServiceKey", "  sk-typed-9999  ");
+    const body = saves().at(-1).body;
+    eq("新密钥去空白后整单带走", body.rerankServiceKey, "sk-typed-9999");
+    eq("回包后框里换成新掩码", state.draft.rerankServiceKey, "sk-t••••••••9999");
+    check(
+      "整单仍然把其它字段一起带走",
+      ["rerankServiceUrl", "rerankServiceModel", "rerankServiceTimeoutMs", "rerankChannels"].every(
+        (key) => key in body,
+      ),
+      JSON.stringify(Object.keys(body)),
+    );
+
+    // 「等于掩码」不发空请求：服务端也把它当没改。
+    const settled = saves().length;
+    await ui.setServiceKey("rerankServiceKey", "sk-t••••••••9999");
+    eq("提交当前掩码不再发请求", saves().length, settled);
+
+    // 测试按钮发的是框里此刻的值（包括密钥）。
+    await ui.setServiceField("rerankServiceUrl", "http://127.0.0.1:8098");
+    await ui.setServiceField("rerankServiceModel", "bge-reranker-v2-m3");
+    await ui.testService("rerank");
+    const testBody = calls.filter((call) => call.path === "/recall-mode/service-test").at(-1).body;
+    eq("测试请求带着框里的密钥", testBody.key, "sk-t••••••••9999");
+    state.draft.rerankServiceKey = "sk-fresh-1234";
+    await ui.testService("rerank");
+    eq("输入框里换了新密钥，测试也发新的",
+      calls.filter((call) => call.path === "/recall-mode/service-test").at(-1).body.key,
+      "sk-fresh-1234");
+    state.draft.rerankServiceKey = "sk-t••••••••9999";
+
+    // systemone 那组同理，且互不影响。
+    await ui.setServiceKey("systemoneServiceKey", "sk-sys-4321");
+    eq("两组密钥各管各的", [
+      saves().at(-1).body.systemoneServiceKey,
+      saves().at(-1).body.rerankServiceKey,
+    ], ["sk-sys-4321", "sk-t••••••••9999"]);
+
+    // 把地址 / 模型退回半对状态，不干扰后面「没填全不发请求」那条。
+    state.draft.rerankServiceUrl = "http://127.0.0.1:8098";
+    state.draft.rerankServiceModel = "";
   }
   {
     // 没填全不许发请求：结果行直接说「先填地址和模型」。
@@ -4158,9 +4344,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankServiceUrl: "",
     rerankServiceModel: "",
     rerankServiceTimeoutMs: null,
+    rerankServiceKey: "",
     systemoneServiceUrl: "",
     systemoneServiceModel: "",
     systemoneServiceTimeoutMs: null,
+    systemoneServiceKey: "",
   });
 
   // ---- 重排配置的归一化与草稿 ----
@@ -4260,17 +4448,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       rerankServiceUrl: "  http://127.0.0.1:8098///  ",
       rerankServiceModel: "  bge-reranker-v2-m3  ",
       rerankServiceTimeoutMs: "  1200  ",
+      // 面板侧只认掩码字段，明文键一律不读（GET 也不回）。
+      rerankServiceKey: "should-not-show-up",
+      rerankServiceKeyMasked: "abcd••••••••wxyz",
       systemoneServiceUrl: "ftp://nope",
       systemoneServiceModel: "kev-4b",
       systemoneServiceTimeoutMs: "99999",
+      systemoneServiceKeyMasked: 42,
     }),
     {
       rerankServiceUrl: "http://127.0.0.1:8098",
       rerankServiceModel: "bge-reranker-v2-m3",
       rerankServiceTimeoutMs: 1200,
+      rerankServiceKey: "abcd••••••••wxyz",
       systemoneServiceUrl: "",
       systemoneServiceModel: "kev-4b",
       systemoneServiceTimeoutMs: null,
+      systemoneServiceKey: "",
     },
   );
   // ---- 打分服务的超时：前后端同口径 ----
@@ -4294,6 +4488,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "rerank",
     "systemone",
   ]);
+  eq(
+    "两项各带一个可选密钥键（跟在超时之后）",
+    SCORING_SERVICES.map((service) => service.keyKey),
+    ["rerankServiceKey", "systemoneServiceKey"],
+  );
   for (const service of SCORING_SERVICES) {
     const required = [
       "kind",
@@ -4301,11 +4500,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "urlKey",
       "modelKey",
       "timeoutKey",
+      "keyKey",
       "defaultTimeoutMs",
       "hint",
     ];
     check(
-      `${service.kind} 描述字段完整（kind / label / 三键 / 默认超时 / 说明）`,
+      `${service.kind} 描述字段完整（kind / label / 四键 / 默认超时 / 说明）`,
       required.every((key) => service[key] !== undefined && service[key] !== ""),
       JSON.stringify(service),
     );
@@ -4322,21 +4522,33 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "systemone",
   ]);
   eq("两行的服务名", layout.rows.map((row) => row.label), ["精排", "决策"]);
-  eq("每行四个控件：地址 / 模型 / 超时 / 测试", [
+  eq("每行五个控件：地址 / 模型 / 超时 / 密钥 / 测试", [
     layout.rows[0].url.label,
     layout.rows[0].model.label,
     layout.rows[0].timeout.label,
+    layout.rows[0].key.label,
     layout.rows[0].testId,
-  ], ["地址", "模型", "超时", "rerankServiceTest"]);
+  ], ["地址", "模型", "超时", "密钥", "rerankServiceTest"]);
   eq("行内 id 就是配置键（旧 id 不跑）", [
     layout.rows.map((row) => row.url.id),
     layout.rows.map((row) => row.model.id),
     layout.rows.map((row) => row.timeout.id),
+    layout.rows.map((row) => row.key.id),
   ], [
     ["rerankServiceUrl", "systemoneServiceUrl"],
     ["rerankServiceModel", "systemoneServiceModel"],
     ["rerankServiceTimeoutMs", "systemoneServiceTimeoutMs"],
+    ["rerankServiceKey", "systemoneServiceKey"],
   ]);
+  // 密钥那一格：password + 可点开看 + placeholder 写「可选」。
+  eq(
+    "密钥格是 password，可点开查看，placeholder 写可选",
+    layout.rows.map((row) => [row.key.type, row.key.showPasswordOn, row.key.placeholder]),
+    [
+      ["password", "click", "可选"],
+      ["password", "click", "可选"],
+    ],
+  );
   eq(
     "超时的 placeholder 与上下限跟着类型",
     layout.rows.map((row) => [row.timeout.placeholder, row.timeout.min, row.timeout.max]),
@@ -4348,7 +4560,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "列表下方只有一段总说明",
     layout.note,
-    "交叉编码器走 /v1/rerank，决策模型走 /v1/systemone。地址与模型成对；超时留空用默认（精排 800ms、决策 3500ms）。留空的类型不会出现在精排通道里。",
+    "交叉编码器走 /v1/rerank，决策模型走 /v1/systemone。地址与模型成对；超时留空用默认（精排 800ms、决策 3500ms）；密钥可选，留空表示该服务没开鉴权。留空的类型不会出现在精排通道里。",
   );
   eq("说明在渲染计划里只出现一次（不重复到每行）",
     JSON.stringify(layout).split(layout.note).length - 1, 1);
@@ -4387,9 +4599,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("总说明也可以单独生成", scoringServicesNote(SCORING_SERVICES), layout.note);
   eq("单行渲染与整表渲染同源", scoringServiceRow(SCORING_SERVICES[0]).kind, "rerank");
   eq(
-    "每行固定四个控件（地址 / 模型 / 超时 / 测试）",
-    layout.rows.map((row) => [row.url, row.model, row.timeout].filter(Boolean).length + 1),
-    [4, 4],
+    "每行固定五个控件（地址 / 模型 / 超时 / 密钥 / 测试）",
+    layout.rows.map((row) => [row.url, row.model, row.timeout, row.key].filter(Boolean).length + 1),
+    [5, 5],
   );
   eq(
     "每行的测试位与结果位互不重复",
@@ -4397,9 +4609,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     4,
   );
   eq(
-    "每行都带了地址 / 模型 / 超时的 placeholder",
+    "每行都带了地址 / 模型 / 超时 / 密钥的 placeholder",
     layout.rows.every(
-      (row) => row.url.placeholder && row.model.placeholder && row.timeout.placeholder,
+      (row) =>
+        row.url.placeholder && row.model.placeholder && row.timeout.placeholder && row.key.placeholder,
     ),
     true,
   );
@@ -4432,6 +4645,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "timeoutMs" in uiServiceTestBody("systemone", { url: "http://h:1", model: "kev-4b" }),
     false,
   );
+  eq(
+    "测试请求带上框里的密钥（去空白）",
+    uiServiceTestBody("rerank", { url: "http://h:1", model: "bge", key: "  sk-test-1234  " }).key,
+    "sk-test-1234",
+  );
+  eq(
+    "密钥空着就不带这个键（不发空的 Bearer）",
+    [
+      "key" in uiServiceTestBody("rerank", { url: "http://h:1", model: "bge" }),
+      "key" in uiServiceTestBody("rerank", { url: "http://h:1", model: "bge", key: "   " }),
+    ],
+    [false, false],
+  );
+  eq(
+    "界面侧密钥归一与后端同口径（去空白 / 换行丢弃 / 截断 512）",
+    [
+      uiNormalizeServiceKey("  sk-abc  "),
+      uiNormalizeServiceKey("sk-abc\ndef"),
+      Array.from(uiNormalizeServiceKey("k".repeat(UI_SERVICE_KEY_MAX + 9))).length,
+      uiNormalizeServiceKey(1),
+    ],
+    ["sk-abc", "", UI_SERVICE_KEY_MAX, ""],
+  );
+  eq("界面侧掩码只认字符串", [uiServiceKeyMask("abc"), uiServiceKeyMask(1), uiServiceKeyMask(null)], [
+    "abc",
+    "",
+    "",
+  ]);
   eq(
     "地址与模型都填了才算可测",
     [
@@ -4595,6 +4836,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ),
     ),
     ["", "p/m"],
+  );
+
+  // 服务级密钥：跟着 type 走，调用点不用再拿 switches。
+  eq(
+    "精排通道取 rerankServiceKey",
+    resolveRerankChannel(
+      { type: "rerank" },
+      { rerankServiceUrl: "http://r:1", rerankServiceKey: " sk-rerank " },
+    ).serviceKey,
+    "sk-rerank",
+  );
+  eq(
+    "决策通道取 systemoneServiceKey（不拿错那一把）",
+    resolveRerankChannel(
+      { type: "systemone" },
+      { rerankServiceKey: "sk-r", systemoneServiceKey: "sk-s" },
+    ).serviceKey,
+    "sk-s",
+  );
+  eq(
+    "宿主模型通道不带密钥",
+    "serviceKey" in resolveRerankChannel({ type: "model", model: "p/m" }, { rerankServiceKey: "sk-r" }),
+    false,
+  );
+  eq(
+    "没配密钥时是空串（调用点据此不发头）",
+    resolveRerankChannel({ type: "rerank" }, { rerankServiceUrl: "http://r:1" }).serviceKey,
+    "",
   );
 
   // ---- 整对回退：地址与模型要么都有、要么都不用 ----
@@ -5730,6 +5999,118 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("null = 清空这一格", timeoutCleared.status, 200);
   eq("清空后落库为空串", store.rerankServiceTimeoutMs, "");
   eq("清空后 GET 回 null", timeoutCleared.body.rerankServiceTimeoutMs, null);
+
+  // ---- 打分服务密钥：GET 只回掩码，POST 三条保存规则 ----
+  eq(
+    "GET 缺省时两个密钥都是未填、掩码为空",
+    await get().then((res) => [
+      res.body.rerankServiceKeySet,
+      res.body.rerankServiceKeyMasked,
+      res.body.systemoneServiceKeySet,
+      res.body.systemoneServiceKeyMasked,
+    ]),
+    [false, "", false, ""],
+  );
+
+  writes.length = 0;
+  const keySet = await post({
+    rerankServiceKey: "  sk-abcdef1234567890  ",
+    systemoneServiceKey: "sk-abc123",
+  });
+  eq("密钥可写", keySet.status, 200);
+  eq("密钥落库时去空白", store.rerankServiceKey, "sk-abcdef1234567890");
+  eq("短密钥也照存", store.systemoneServiceKey, "sk-abc123");
+  eq(
+    "GET 只回 Set + 掩码，不回明文",
+    [
+      keySet.body.rerankServiceKeySet,
+      keySet.body.rerankServiceKeyMasked,
+      keySet.body.rerankServiceKey,
+      keySet.body.systemoneServiceKeyMasked,
+    ],
+    [true, "sk-a••••••••7890", undefined, "••••••••c123"],
+  );
+  check("applied 列出密钥字段",
+    keySet.body.applied.includes("rerankServiceKey") &&
+      keySet.body.applied.includes("systemoneServiceKey"));
+
+  // 1) 字段缺省：一个都不动。
+  writes.length = 0;
+  const keyAbsent = await post({ queryMode: "context" });
+  eq("缺省密钥字段不报错", keyAbsent.status, 200);
+  check(
+    "缺省密钥字段不进 applied",
+    !keyAbsent.body.applied.includes("rerankServiceKey") &&
+      !keyAbsent.body.applied.includes("systemoneServiceKey"),
+    JSON.stringify(keyAbsent.body.applied),
+  );
+  check(
+    "缺省密钥字段一个都不写",
+    writes.every(([key]) => key !== "rerankServiceKey" && key !== "systemoneServiceKey"),
+    JSON.stringify(writes),
+  );
+  eq("缺省时旧密钥还在", [store.rerankServiceKey, store.systemoneServiceKey], [
+    "sk-abcdef1234567890",
+    "sk-abc123",
+  ]);
+
+  // 2) 等于当前掩码：视为没改（面板整单提交，没动过的格子带回来的就是掩码）。
+  writes.length = 0;
+  const keyMasked = await post({
+    rerankServiceKey: "sk-a••••••••7890",
+    systemoneServiceKey: "••••••••c123",
+  });
+  eq("提交掩码不报错", keyMasked.status, 200);
+  eq("提交掩码零写入", writes.length, 0);
+  eq("提交掩码不会把掩码存成真 key", store.rerankServiceKey, "sk-abcdef1234567890");
+
+  // 3) 空串：明确要删。
+  writes.length = 0;
+  const keyCleared = await post({ rerankServiceKey: "" });
+  eq("空串清空密钥", keyCleared.status, 200);
+  eq("清空后落库为空串", store.rerankServiceKey, "");
+  eq("清空后 GET 说没填", [keyCleared.body.rerankServiceKeySet, keyCleared.body.rerankServiceKeyMasked], [
+    false,
+    "",
+  ]);
+  eq("清空只动这一个键", store.systemoneServiceKey, "sk-abc123");
+
+  // 只有空白的串也是「删」，不是「存一串空格」。
+  writes.length = 0;
+  await post({ rerankServiceKey: "   " });
+  eq("纯空白当清空", store.rerankServiceKey, "");
+
+  // 4) 非法（带换行 / 非字符串）：丢弃、保留原值、不打断整单。
+  await post({ rerankServiceKey: "sk-keep-123456" });
+  writes.length = 0;
+  const keyNewline = await post({ rerankServiceKey: "sk-abc\ndef", queryMode: "last" });
+  eq("带换行的密钥不报错（整单不被打断）", keyNewline.status, 200);
+  eq("带换行的密钥被丢弃、保留原值", store.rerankServiceKey, "sk-keep-123456");
+  check("同一单里的其它字段照常落库", keyNewline.body.applied.includes("queryMode"));
+
+  writes.length = 0;
+  await post({ systemoneServiceKey: "sk-before" });
+  const keyCarriage = await post({ systemoneServiceKey: "sk-before\r\nX-Injected: 1" });
+  eq("带 \\r\\n 的密钥不报错", keyCarriage.status, 200);
+  eq("带 \\r\\n 的密钥保留原值", store.systemoneServiceKey, "sk-before");
+
+  writes.length = 0;
+  const keyBadType = await post({ rerankServiceKey: 12345 });
+  eq("密钥类型不对不报错", keyBadType.status, 200);
+  eq("类型不对零写入", writes.length, 0);
+  eq("类型不对保留原值", store.rerankServiceKey, "sk-keep-123456");
+
+  // 超长截断到 512，不截断也不报错。
+  writes.length = 0;
+  await post({ rerankServiceKey: "k".repeat(SERVICE_KEY_MAX + 10) });
+  eq("超长密钥截断到 512", Array.from(store.rerankServiceKey).length, SERVICE_KEY_MAX);
+
+  // 5) 新值覆盖（两条服务各管各的）。
+  writes.length = 0;
+  const keyOverwrite = await post({ rerankServiceKey: "sk-new-key-9999" });
+  eq("新值覆盖", store.rerankServiceKey, "sk-new-key-9999");
+  eq("覆盖后掩码跟着变", keyOverwrite.body.rerankServiceKeyMasked, "sk-n••••••••9999");
+  eq("覆盖不动另一组", store.systemoneServiceKey, "sk-before");
 }
 
 // ================= routes: 精排通道测试按钮 =================
@@ -5993,6 +6374,43 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   await test({ kind: "rerank", url: "http://typed:2", model: "typed-model" });
   eq("测试用请求体里的地址，不用已保存的", calls[0].url, "http://typed:2/v1/rerank");
   eq("测试用请求体里的模型名", calls[0].body.model, "typed-model");
+
+  // ---- 密钥：非空才加 Authorization，空就不发这个头 ----
+  calls.length = 0;
+  respond = async () => jsonOf({ results: [{ index: 0, relevance_score: 0.5 }] });
+  await test({ kind: "rerank", url: "http://h:1", model: "bge", key: "  sk-test-1234  " });
+  eq("带密钥时发 Authorization: Bearer", calls[0].init.headers.Authorization, "Bearer sk-test-1234");
+  eq("content-type 没被顶掉", calls[0].init.headers["content-type"], "application/json");
+
+  calls.length = 0;
+  await test({ kind: "rerank", url: "http://h:1", model: "bge" });
+  check(
+    "不带密钥时请求头里没有 Authorization",
+    !("Authorization" in calls[0].init.headers) && !("authorization" in calls[0].init.headers),
+    JSON.stringify(calls[0].init.headers),
+  );
+
+  calls.length = 0;
+  await test({ kind: "rerank", url: "http://h:1", model: "bge", key: "   " });
+  check(
+    "只有空白的密钥也不发 Authorization（不发空的 Bearer）",
+    !("Authorization" in calls[0].init.headers),
+    JSON.stringify(calls[0].init.headers),
+  );
+
+  calls.length = 0;
+  await test({ kind: "systemone", url: "http://h:2", model: "kev-4b", key: "sk-sys-1234" });
+  eq("systemone 那一路也带 Authorization", calls[0].init.headers.Authorization, "Bearer sk-sys-1234");
+
+  // 掩码不是密钥：输入框里坐的若是当前掩码，就去取已存的值试一把。
+  store.rerankServiceKey = "sk-stored-abcdef";
+  calls.length = 0;
+  await test({ kind: "rerank", url: "http://h:1", model: "bge", key: maskString(store.rerankServiceKey) });
+  eq("掩码当占位时用已存的密钥", calls[0].init.headers.Authorization, "Bearer sk-stored-abcdef");
+
+  calls.length = 0;
+  await test({ kind: "rerank", url: "http://h:1", model: "bge", key: "sk-typed-9999" });
+  eq("输入框里是真 key 时用输入的那个", calls[0].init.headers.Authorization, "Bearer sk-typed-9999");
 }
 
 // ================= routes: models =================
@@ -7582,6 +8000,126 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("只选类型的通道也能正常出分", outcome.channels[0].ok, true);
   }
 
+  // ---- 服务密钥：非空才带 Authorization，三条调用点各一条断言 ----
+  {
+    resetRuntimeTransport();
+    const calls = [];
+    const sdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify(okBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const switchesWithKey = {
+      rerankChannels: [],
+      rerankPrompt: "",
+      rerankModel: "",
+      rerankServiceUrl: "http://127.0.0.1:8098",
+      rerankServiceModel: "bge-reranker-v2-m3",
+      rerankServiceKey: "sk-svc-1234",
+    };
+    const rerankChannel = [{ type: "rerank", name: "服务", url: "", model: "", weight: 1 }];
+    await runRerankChannels({
+      sdk,
+      switches: switchesWithKey,
+      query: "用户问题",
+      items,
+      channels: rerankChannel,
+    });
+    eq("精排通道带 Authorization: Bearer", calls[0].init.headers.Authorization, "Bearer sk-svc-1234");
+    eq("带上密钥时 content-type 仍在", calls[0].init.headers["content-type"], "application/json");
+
+    calls.length = 0;
+    await runRerankChannels({
+      sdk,
+      switches: { ...switchesWithKey, rerankServiceKey: "" },
+      query: "用户问题",
+      items,
+      channels: rerankChannel,
+    });
+    check(
+      "没配密钥时精排请求头里没有 Authorization",
+      !("Authorization" in calls[0].init.headers),
+      JSON.stringify(calls[0].init.headers),
+    );
+
+    calls.length = 0;
+    await runRerankChannels({
+      sdk,
+      switches: { ...switchesWithKey, rerankServiceKey: "  " },
+      query: "用户问题",
+      items,
+      channels: rerankChannel,
+    });
+    check(
+      "密钥只有空白也不发空的 Bearer",
+      !("Authorization" in calls[0].init.headers),
+      JSON.stringify(calls[0].init.headers),
+    );
+
+    // systemone 那一路：同一个 resolve 出来的 serviceKey 也要落到头上。
+    calls.length = 0;
+    const sysSdk = recallSdk({
+      values: {},
+      dataDir: dir,
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init, body: JSON.parse(init.body) });
+        return new Response(
+          JSON.stringify({ answers: { r1: { noul: 0.9 }, r2: { noul: 0.1 }, r3: { noul: 0.4 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await runRerankChannels({
+      sdk: sysSdk,
+      switches: {
+        rerankChannels: [],
+        rerankPrompt: "",
+        rerankModel: "",
+        systemoneServiceUrl: "http://127.0.0.1:8097",
+        systemoneServiceModel: "kev-4b",
+        systemoneServiceKey: "sk-sys-5678",
+      },
+      query: "用户问题",
+      items,
+      channels: [{ type: "systemone", name: "决策", url: "", model: "", weight: 1 }],
+    });
+    eq("决策通道也带 Authorization", calls[0].init.headers.Authorization, "Bearer sk-sys-5678");
+  }
+  {
+    // 受管运行时出口信封：额外头同样要并进去，content-type 不被顶掉。
+    const calls = [];
+    setRuntimeTransport({
+      send: async (url, init) => {
+        calls.push({ url, init });
+        return { ok: true, status: 200, headers: {}, data: okBody };
+      },
+    });
+    const sdk = recallSdk({ values: {}, dataDir: dir });
+    await runRerankChannels({
+      sdk,
+      switches: {
+        rerankChannels: [],
+        rerankPrompt: "",
+        rerankModel: "",
+        rerankServiceUrl: "http://127.0.0.1:8098",
+        rerankServiceModel: "bge-reranker-v2-m3",
+        rerankServiceKey: "sk-rt-0001",
+      },
+      query: "用户问题",
+      items,
+      channels: [{ type: "rerank", name: "服务", url: "", model: "", weight: 1 }],
+    });
+    eq("运行时出口：密钥也带上", calls[0].init.headers.Authorization, "Bearer sk-rt-0001");
+    eq("运行时出口：content-type 没被顶掉", calls[0].init.headers["content-type"], "application/json");
+    resetRuntimeTransport();
+  }
+
   // ---- 服务也没配：这一路弃权，不假装 0 分 ----
   {
     resetRuntimeTransport();
@@ -8796,7 +9334,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["召回三个主下拉", recall, 'cols="1 700:3"'],
     ["两个展开区", recall, 'cols="1 700:2"'],
     ["通道四格", channels, 'cols="1 520:2 700:4"'],
-    ["服务五格", prelude, 'cols="1 700:5"'],
+    ["服务六格", prelude, 'cols="1 700:6"'],
   ];
   for (const [label, source, cols] of grids) {
     check(`${label}用 ${cols}`,
@@ -8960,8 +9498,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // NFormItem 的 label 不在源码里写 <label>，而是由组件生成。所以关联分三块算：
   //   手写 <label for=x>                     → 2 处（RecallCard 的两个提示词框）
   //   NFormItem label-props="{ for: 'x' }"   → 5 处（HubIdentity：中枢 2 + 身份 3）
-  //   NFormItem label-props="{ for: row.x.id }" → 3 处（PreludeCard 的地址/模型/超时描述表）
-  // 三块加起来必须是 10，少一块就是又漏了一个关联。
+  //   NFormItem label-props="{ for: row.x.id }" → 4 处（PreludeCard 的地址/模型/超时/密钥描述表）
+  // 三块加起来必须是 11，少一块就是又漏了一个关联。
   const hubOrAll = uiCode("components/HubIdentity.vue");
   const formItemFor = [...hubOrAll.matchAll(/:label-props="\{ for: '([\w-]+)' \}"/g)].map((m) => m[1]);
   const serviceFor = [...prelude.matchAll(/:label-props="\{ for: (row\.[\w.]+) \}"/g)].map((m) => m[1]);
@@ -8969,17 +9507,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("NFormItem 接管了 HubIdentity 的五个字段关联", formItemFor, [
     "serverUrl", "apiKey", "peerPrefix", "timeoutMs", "budgetTokens",
   ]);
-  eq("NFormItem 也接管了前置卡的三格（地址 / 模型 / 超时）", serviceFor, [
-    "row.url.id", "row.model.id", "row.timeout.id",
+  eq("NFormItem 也接管了前置卡的四格（地址 / 模型 / 超时 / 密钥）", serviceFor, [
+    "row.url.id", "row.model.id", "row.timeout.id", "row.key.id",
   ]);
   check("每个 NFormItem 的 for 都能在 HubIdentity 的 :input-props 里找到 id",
     formItemFor.every((id) => new RegExp(`id:\\s*'${reEscape(id)}'`).test(hub)),
     formItemFor.filter((id) => new RegExp(`id:\\s*'${reEscape(id)}'`).test(hub) === false).join(", "));
-  check("前置卡三格的 for 与 :input-props 的 id 同源（都是 row.*.id）",
+  check("前置卡四格的 for 与 :input-props 的 id 同源（都是 row.*.id）",
     serviceFor.every((expr) => new RegExp(`id: ${reEscape(expr)}(?=[,}\\s])`).test(prelude)),
     serviceFor.join(", "));
-  check("label for 总数仍是 10（手写 2 + NFormItem 8）",
-    forTargets.length + formItemFor.length + serviceFor.length === 10,
+  check("label for 总数仍是 11（手写 2 + NFormItem 9）",
+    forTargets.length + formItemFor.length + serviceFor.length === 11,
     `${forTargets.length} + ${formItemFor.length} + ${serviceFor.length}`);
   // 黑名单：这五个 id 的控件拿不到程序化关联，任何组件里都不许再为它们写 for=
   const NO_FOR_IDS = selectLabels.map(([id]) => id);

@@ -81,11 +81,14 @@ const MISSING = () => {
 export function serviceKindOfField(id) {
   return SCORING_SERVICES.find(
     (service) =>
-      service.urlKey === id || service.modelKey === id || service.timeoutKey === id,
+      service.urlKey === id ||
+      service.modelKey === id ||
+      service.timeoutKey === id ||
+      service.keyKey === id,
   )?.kind || "rerank";
 }
 
-/** 输入框 id 的另一半；超时框没有配对，返回空串。 */
+/** 输入框 id 的另一半；超时框与密钥框没有配对，返回空串。 */
 export function servicePartnerOf(id) {
   for (const service of SCORING_SERVICES) {
     if (id === service.urlKey) return service.modelKey;
@@ -149,7 +152,8 @@ export function createPanelStore(deps = {}) {
       gateTouched: false,
       rerankTouched: false,
     },
-    // 打分服务的三个输入框，键就是配置键（与手写面板的 DOM id 一致）。
+    // 打分服务的四个输入框（地址 / 模型 / 超时 / 密钥），键就是配置键（与手写面板的 DOM id 一致）。
+    // 密钥那一格存的是掩码串（服务端只回掩码），空串 = 没配。
     draft: {},
     serviceResults: {},
     // 精排通道草稿（含没填完、不会被提交的行）。
@@ -170,7 +174,9 @@ export function createPanelStore(deps = {}) {
 
   // 首屏给空值，等 applyLayers 落地；初始化一次保证草稿键齐全。
   for (const service of SCORING_SERVICES) {
-    for (const key of [service.urlKey, service.modelKey, service.timeoutKey]) state.draft[key] = "";
+    for (const key of [service.urlKey, service.modelKey, service.timeoutKey, service.keyKey]) {
+      state.draft[key] = "";
+    }
     state.serviceResults[service.kind] = { tone: "", text: "", pending: false };
   }
 
@@ -289,10 +295,16 @@ export function createPanelStore(deps = {}) {
 
     for (const service of SCORING_SERVICES) {
       const half = servicePairHalfFilled(service);
-      for (const key of [service.urlKey, service.modelKey, service.timeoutKey]) {
+      for (const key of [service.urlKey, service.modelKey, service.timeoutKey, service.keyKey]) {
         if (state.focus === key) continue;
-        if (key !== service.timeoutKey && half) continue;
+        // 半对只管地址与模型；密钥、超时跟它们不成对，照常回写。
+        if (key !== service.timeoutKey && key !== service.keyKey && half) continue;
         if (changedInFlight(key, draftOf(key))) continue;
+        if (key === service.keyKey) {
+          // 密钥框里坐的是掩码（服务端只回掩码）：这也正是「没改过」的判据。
+          state.draft[key] = state.layers[key] || "";
+          continue;
+        }
         state.draft[key] =
           key === service.timeoutKey
             ? serviceTimeoutInput(state.layers[key], service.kind)
@@ -327,6 +339,21 @@ export function createPanelStore(deps = {}) {
   }
 
   /**
+   * 密钥框的提交：与其它三格不同，清空不提交。
+   *
+   * 聚焦时输入框里的掩码会被清掉（跟设置页的 API Key 同一套习惯），如果空字符串
+   * 也当成一次提交，那么「点进去看一眼」就等于把已存的 key 删了。所以：空 → 把掩码
+   * 填回去、什么也不发；非空 → 照常整单提交（等于掩码时服务端也不动）。
+   */
+  function setServiceKey(key, value) {
+    if (!String(value ?? "").trim()) {
+      state.draft[key] = String(state.layers[key] || "");
+      return undefined;
+    }
+    return setServiceField(key, String(value).trim());
+  }
+
+  /**
    * 整单提交 /recall-mode。
    *
    * 一次只发一单：请求还在飞的时候又改了一格，就记一笔、等上一单收笔后再发，
@@ -346,6 +373,9 @@ export function createPanelStore(deps = {}) {
         draftOf(service.timeoutKey),
         service.kind,
       );
+      // 密钥：空着就发已确认的掩码（= 没改），绝不发空串——空串在服务端是「清空」。
+      // 只有这样，"聚焦清空掩码 → 去改别的格" 才不会顺手把密钥删掉。
+      scoring[service.keyKey] = draftOf(service.keyKey).trim() || state.layers[service.keyKey] || "";
     }
     return {
       recallGate: state.form.recallGate,
@@ -418,6 +448,7 @@ export function createPanelStore(deps = {}) {
       service.urlKey,
       service.modelKey,
       service.timeoutKey,
+      service.keyKey,
     ]),
   ];
 
@@ -584,6 +615,7 @@ export function createPanelStore(deps = {}) {
       url: draftOf(service.urlKey),
       model: draftOf(service.modelKey),
       timeoutMs: draftOf(service.timeoutKey),
+      key: draftOf(service.keyKey),
     };
     const body = serviceTestBody(kind, draft);
 
@@ -855,6 +887,7 @@ export function createPanelStore(deps = {}) {
     saveConnection,
     saveLayers,
     setServiceField,
+    setServiceKey,
     testService,
     testChannels,
     addChannel,

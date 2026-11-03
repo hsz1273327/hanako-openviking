@@ -29,9 +29,11 @@ export const DEFAULTS = {
   rerankServiceUrl: "",
   rerankServiceModel: "",
   rerankServiceTimeoutMs: "",
+  rerankServiceKey: "",
   systemoneServiceUrl: "",
   systemoneServiceModel: "",
   systemoneServiceTimeoutMs: "",
+  systemoneServiceKey: "",
 };
 
 /** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令，llm 让宿主模型判断。 */
@@ -59,6 +61,14 @@ export const RERANK_CHANNEL_URL_MAX = 512;
 
 /** 打分服务的模型名上限。服务名与通道模型名同一口径。 */
 export const SERVICE_MODEL_MAX = 128;
+
+/**
+ * 打分服务密钥的长度上限。留空合法（服务端没开鉴权）。
+ *
+ * 上限只防「把一整段配置粘进来」：Authorization 头的实际长度各家服务都远低于这个数，
+ * 512 足够放下任何真实 key，又不至于让一单配置把日志 / 请求头撑爆。
+ */
+export const SERVICE_KEY_MAX = 512;
 
 /**
  * 打分服务超时的边界。单位是毫秒，给的是「一次打分请求」的上限，不是整轮召回。
@@ -170,6 +180,19 @@ export function normalizeServiceUrl(raw) {
 export function normalizeServiceModel(raw) {
   if (typeof raw !== "string") return "";
   return Array.from(raw.trim()).slice(0, SERVICE_MODEL_MAX).join("");
+}
+
+/**
+ * 打分服务密钥：留空合法（= 该服务没开鉴权），非法值当没配。
+ *
+ * 换行（\n / \r）一律丢：拼进 Authorization 头会让底层 fetch 直接抛，
+ * 而那个异常发生在「召回时」，用户看到的是一轮静默弃权而不是「密钥填错了」。
+ * 这是读取侧的收敛，写入侧另有规则（非法值丢弃、保留原值，不打断整单）。
+ */
+export function normalizeServiceKey(raw) {
+  if (typeof raw !== "string") return "";
+  if (/[\r\n]/.test(raw)) return "";
+  return Array.from(raw.trim()).slice(0, SERVICE_KEY_MAX).join("");
 }
 
 /**
@@ -414,12 +437,14 @@ export async function readSwitches(sdk) {
       await read(sdk, "rerankServiceTimeoutMs"),
       "rerank",
     ),
+    rerankServiceKey: normalizeServiceKey(await read(sdk, "rerankServiceKey")),
     systemoneServiceUrl: normalizeServiceUrl(await read(sdk, "systemoneServiceUrl")),
     systemoneServiceModel: normalizeServiceModel(await read(sdk, "systemoneServiceModel")),
     systemoneServiceTimeoutMs: normalizeServiceTimeout(
       await read(sdk, "systemoneServiceTimeoutMs"),
       "systemone",
     ),
+    systemoneServiceKey: normalizeServiceKey(await read(sdk, "systemoneServiceKey")),
   };
 }
 

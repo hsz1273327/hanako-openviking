@@ -6,6 +6,7 @@
 // 铁律：GET 永不回显 apiKey，只回“填没填”。
 
 import { normalizePrefix } from "../src/ov/identity.js";
+import { maskOf } from "../src/ov/mask.js";
 
 const FIELDS = new Set(["serverUrl", "apiKey", "peerPrefix"]);
 
@@ -18,13 +19,6 @@ const PREFIX_NON_ASCII_RE = /[^\x20-\x7E]/;
 
 function normalizeServerUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
-}
-
-function maskOf(raw) {
-  const key = String(raw || "");
-  if (!key) return { head: "", tail: "" };
-  if (key.length < 12) return { head: "", tail: key.slice(-4) };
-  return { head: key.slice(0, 4), tail: key.slice(-4) };
 }
 
 function shape(serverUrl, peerPrefix, apiKey) {

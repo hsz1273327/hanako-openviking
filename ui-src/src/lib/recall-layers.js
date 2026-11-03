@@ -18,6 +18,10 @@ export const RERANK_CHANNEL_LABELS = Object.freeze({
 export const SERVICE_MODEL_MAX = 128;
 // 打分服务地址上限，与 src/ov/settings.js 的 RERANK_CHANNEL_URL_MAX 同值。
 export const SERVICE_URL_MAX = 512;
+// 打分服务密钥上限，与 src/ov/settings.js 的 SERVICE_KEY_MAX 同值。
+export const SERVICE_KEY_MAX = 512;
+// 密钥掩码中间的圆点个数，与 src/ov/mask.js 的 MASK_DOTS 同值。
+export const SERVICE_KEY_MASK_DOTS = 8;
 // 两类打分服务的超时边界，与 src/ov/settings.js 的 SERVICE_TIMEOUT_LIMITS 同值。
 // fallback 就是留空时的默认值，输入框的 placeholder 用它。
 export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
@@ -38,6 +42,7 @@ export const SCORING_SERVICES = Object.freeze([
     urlKey: "rerankServiceUrl",
     modelKey: "rerankServiceModel",
     timeoutKey: "rerankServiceTimeoutMs",
+    keyKey: "rerankServiceKey",
     defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.rerank.fallback,
     hint: "交叉编码器走 /v1/rerank",
     urlPlaceholder: "http://主机:端口",
@@ -49,6 +54,7 @@ export const SCORING_SERVICES = Object.freeze([
     urlKey: "systemoneServiceUrl",
     modelKey: "systemoneServiceModel",
     timeoutKey: "systemoneServiceTimeoutMs",
+    keyKey: "systemoneServiceKey",
     defaultTimeoutMs: SERVICE_TIMEOUT_LIMITS.systemone.fallback,
     hint: "决策模型走 /v1/systemone",
     urlPlaceholder: "http://主机:端口",
@@ -96,6 +102,14 @@ export function scoringServiceRow(service) {
         narrow: true,
       },
     ),
+    // 密钥：可选，插在超时之后、测试之前。留空合法（服务端没开鉴权）。
+    // password 类型 + show-password-on="click"：默认是圆点，用户自己点开才看得到。
+    key: scoringRowField(service?.keyKey || `${kind}ServiceKey`, service?.keyKey, "密钥", {
+      type: "password",
+      spellcheck: false,
+      placeholder: "可选",
+      showPasswordOn: "click",
+    }),
     testId: `${kind}ServiceTest`,
     resultId: `${kind}ServiceResult`,
   };
@@ -108,7 +122,7 @@ export function scoringServicesNote(services = SCORING_SERVICES) {
   const defaults = list
     .map((service) => `${service?.label || service?.kind} ${service?.defaultTimeoutMs}ms`)
     .join("、");
-  return `${routes}。地址与模型成对；超时留空用默认（${defaults}）。留空的类型不会出现在精排通道里。`;
+  return `${routes}。地址与模型成对；超时留空用默认（${defaults}）；密钥可选，留空表示该服务没开鉴权。留空的类型不会出现在精排通道里。`;
 }
 
 /**
@@ -183,6 +197,27 @@ export function normalizeServiceModel(value) {
   return Array.from(value.trim()).slice(0, SERVICE_MODEL_MAX).join("");
 }
 
+/**
+ * 与 src/ov/settings.js 的 normalizeServiceKey 同口径：去空白、带换行当没填、按字符截断。
+ *
+ * 面板只拿它做输入侧的收敛：真正落库的值由服务端重算一遍。
+ */
+export function normalizeServiceKey(value) {
+  if (typeof value !== "string") return "";
+  if (/[\r\n]/.test(value)) return "";
+  return Array.from(value.trim()).slice(0, SERVICE_KEY_MAX).join("");
+}
+
+/**
+ * GET 回来的掩码（`<keyKey>Masked`）：只认字符串，没配就是空串。
+ *
+ * 面板把这一串直接填进输入框当 value（与设置页的 API Key 同一套习惯）：
+ * 能看出「填过了」，又不可能是明文。聚焦时清空、失焦仍为空就填回来。
+ */
+export function serviceKeyMask(value) {
+  return typeof value === "string" ? value : "";
+}
+
 function serviceLimits(kind) {
   return SERVICE_TIMEOUT_LIMITS[kind] || SERVICE_TIMEOUT_LIMITS.rerank;
 }
@@ -209,25 +244,38 @@ export function serviceTimeoutInput(value, kind = "rerank") {
   return ms === null ? "" : String(ms);
 }
 
-/** 打分服务的显示值：按描述表逐项收敛，非法地址 / 超时在读取侧收敛成空（= 未配置）。 */
+/**
+ * 打分服务的显示值：按描述表逐项收敛，非法地址 / 超时在读取侧收敛成空（= 未配置）。
+ *
+ * 密钥的入参可能是两种形状：服务端回的原始投影（只有 `<keyKey>Masked`，没有明文），
+ * 或者已经画过一遍的投影（有 `<keyKey>`、没有 Masked）。必须两种都认：
+ * commitLayers 会拿 normalize 过的对象再画一次（applyLayers），只认 Masked
+ * 会让掩码在第二次过滤里变成空串，密钥框就“自己清空”了。
+ * 两个都读不到就是没配。
+ */
 export function paintScoringConfig(out) {
   const painted = {};
   for (const service of SCORING_SERVICES) {
     painted[service.urlKey] = normalizeServiceUrl(out?.[service.urlKey]);
     painted[service.modelKey] = normalizeServiceModel(out?.[service.modelKey]);
     painted[service.timeoutKey] = normalizeServiceTimeout(out?.[service.timeoutKey], service.kind);
+    painted[service.keyKey] =
+      serviceKeyMask(out?.[`${service.keyKey}Masked`]) || serviceKeyMask(out?.[service.keyKey]);
   }
   return painted;
 }
 
 /** 「测试」按钮要发的那一单：用的就是界面此刻填的值，不是已保存的配置。 */
-export function serviceTestBody(kind, { url, model, timeoutMs } = {}) {
+export function serviceTestBody(kind, { url, model, timeoutMs, key } = {}) {
   const value = normalizeServiceTimeout(timeoutMs, kind);
+  const serviceKey = normalizeServiceKey(key);
   return {
     kind,
     url: normalizeServiceUrl(url),
     model: normalizeServiceModel(model),
     ...(value === null ? {} : { timeoutMs: value }),
+    // 密钥留空就不带这个键：服务端当「没填密钥」发一发没有 Authorization 的请求。
+    ...(serviceKey ? { key: serviceKey } : {}),
   };
 }
 

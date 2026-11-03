@@ -494,21 +494,40 @@ function raceTimeout(promise, timeoutMs, label = "channel") {
 }
 
 /**
+ * 服务端鉴权头：只有 key 非空时才加 Authorization。
+ *
+ * 空 key 绝不能发一个 `Bearer `：不少服务看到这个头就认为请求要鉴权，直接 401，
+ * 于是「密钥留空 = 服务没开鉴权」这种正当配置反而跑不通。
+ * 带换行的 key 一律当没配：拼进头会让 fetch 抛 TypeError，而那个异常发生在
+ * 召回路径上，用户只会看到一轮静默弃权。写入侧与读取侧都拦过一遍，这里是最后一道。
+ */
+function serviceAuthHeaders(key) {
+  const value = typeof key === "string" ? key.trim() : "";
+  if (!value || /[\r\n]/.test(value)) return {};
+  return { Authorization: `Bearer ${value}` };
+}
+
+/**
  * 通过现有出口发一次 JSON POST。
  *
  * 优先受管运行时（runtime.fetch 的代理信封支持任意 http/https URL）；
  * 运行时没起来时退回 ctx.network.fetch（受 manifest 白名单限制）。
  * 两条路都不通时直接抛，调用方把这一路当弃权处理。
+ *
+ * headers 是可选的服务级鉴权头：content-type 先写、额外头后写，覆盖不了 content-type
+ * （也没有任何调用方需要覆盖它）。两条出口都并进各自的 headers，不复制第二个请求函数。
  */
-async function postJson(sdk, url, payload, timeoutMs) {
+async function postJson(sdk, url, payload, timeoutMs, headers = {}) {
   const transport = transportFor(sdk);
   const body = JSON.stringify(payload);
+  const extra = headers && typeof headers === "object" ? headers : {};
+  const requestHeaders = { "content-type": "application/json", ...extra };
 
   if (transport.mode === "runtime") {
     const out = await raceTimeout(
       transport.send(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders,
         body,
         timeoutMs,
       }),
@@ -525,7 +544,7 @@ async function postJson(sdk, url, payload, timeoutMs) {
   if (transport.mode === "direct") {
     const init = {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: requestHeaders,
       body,
     };
     // 有 AbortSignal.timeout 就让底层也早点收手；外层 race 仍然是硬上限。
@@ -698,6 +717,7 @@ async function scoreRerankChannel(sdk, channel, query, items) {
       documents: items.map((item) => clipChars(item.text, RERANK_DOCUMENT_CHARS)),
     },
     channelTimeout(channel, RERANK_CHANNEL_TIMEOUT_MS),
+    serviceAuthHeaders(channel.serviceKey),
   );
 
   const list = Array.isArray(data?.results)
@@ -809,6 +829,7 @@ async function scoreSystemOneChannel(sdk, channel, query, items) {
     channelEndpoint(channel.url, "/v1/systemone"),
     { model: channel.model, state, questions },
     systemoneTimeoutFor(channel, count),
+    serviceAuthHeaders(channel.serviceKey),
   );
 
   const answers = data?.answers;
@@ -828,14 +849,14 @@ async function scoreSystemOneChannel(sdk, channel, query, items) {
 /**
  * 打分服务的连通性测试。
  *
- * 用的是调用方传进来的那一对（地址 + 模型），不是已存配置：面板上填了还没保存的
- * 值也要能先试一把。只发一发最小请求，不读也不写任何会话 / 配置状态。
+ * 用的是调用方传进来的那一组（地址 + 模型 + 可选的密钥），不是已存配置：面板上填了
+ * 还没保存的值也要能先试一把。只发一发最小请求，不读也不写任何会话 / 配置状态。
  *
  * 判定「可用」比运行时严一点：HTTP 2xx 只是必要条件，结构对不上同样算不可用。
  * 一个 200 但缺 results 的服务能让整轮召回静默地一路弃权，用户在界面上却看到
  * 「可用」，那比直接报错更浪费时间。
  */
-export async function testScoringService({ sdk, kind, url, model, timeoutMs } = {}) {
+export async function testScoringService({ sdk, kind, url, model, timeoutMs, key } = {}) {
   const started = Date.now();
   const elapsed = () => Math.max(0, Date.now() - started);
   if (kind !== "rerank" && kind !== "systemone") {
@@ -859,7 +880,13 @@ export async function testScoringService({ sdk, kind, url, model, timeoutMs } = 
 
   let data;
   try {
-    data = await postJson(sdk, channelEndpoint(url, endpoint), payload, limit);
+    data = await postJson(
+      sdk,
+      channelEndpoint(url, endpoint),
+      payload,
+      limit,
+      serviceAuthHeaders(key),
+    );
   } catch (error) {
     // Node 的 fetch 只把一句「fetch failed」抛到 message 上，真正的原因在 cause 里。
     // 不把 cause 带出来，面板上就只剩个看不出所以然的「fetch failed」。
@@ -955,6 +982,9 @@ function normalizeChannelTimeoutValue(raw) {
  * 超时优先级：通道自带 > 服务配置 > 缺省。缺省时 rerank 落到
  * RERANK_CHANNEL_TIMEOUT_MS（800），systemone 落到按候选数自适应；服务配置与
  * systemoneTimeoutFor 的上限同为 8000，配置侧与运行时不再各自压一个数。
+ *
+ * serviceKey 是服务级密钥（可选）：按 type 取，model 通道没有。取的是已归一化的值，
+ * 空串 = 这个服务没开鉴权，调用点据此决定加不加 Authorization 头。
  */
 export function resolveRerankChannel(channel, switches) {
   if (!channel || typeof channel !== "object") return channel;
@@ -976,6 +1006,14 @@ export function resolveRerankChannel(channel, switches) {
       : channel.type === "systemone"
         ? switches?.systemoneServiceTimeoutMs
         : null;
+  // 服务级密钥跟着类型走：调用点是 scoreRerankChannel / scoreSystemOneChannel，
+  // 它们手里只有 channel，没有 switches。宿主模型通道不碰网络服务，也就没有密钥。
+  const serviceKey =
+    channel.type === "rerank"
+      ? switches?.rerankServiceKey
+      : channel.type === "systemone"
+        ? switches?.systemoneServiceKey
+        : "";
 
   const ownUrl = typeof channel.url === "string" ? channel.url.trim() : "";
   const ownModel = typeof channel.model === "string" ? channel.model.trim() : "";
@@ -1011,6 +1049,10 @@ export function resolveRerankChannel(channel, switches) {
     model: channel.type === "model" ? ownModel : ownPair ? ownModel : fallbackModel,
     ...(pairNote ? { pairNote } : {}),
     ...(declaredTimeout === null ? {} : { timeoutMs: declaredTimeout }),
+    // 密钥不随地址回退：通道用自己的地址、模型时，key 仍然属于「这个类型对应的服务」，
+    // 而通道自带的地址只是存量兼容写法（多数指回同一台服务），所以照常带上。
+    // 模型通道没有服务，也就没有这一项。
+    ...(channel.type === "model" ? {} : { serviceKey: String(serviceKey || "").trim() }),
   };
 }
 

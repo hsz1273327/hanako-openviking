@@ -133,6 +133,13 @@
             "description": "一次 /v1/rerank 请求的超时（ms），留空用默认 800，可填 100 到 10000。越界或非数字按默认值处理。",
             "default": ""
           },
+          "rerankServiceKey": {
+            "type": "string",
+            "title": "精排服务密钥",
+            "description": "可选。服务端要求鉴权时填，作为 Authorization: Bearer 发送；留空表示该服务没开鉴权，不发这个头。最长 512 字符，带换行的值会被忽略。",
+            "default": "",
+            "sensitive": true
+          },
           "systemoneServiceUrl": {
             "type": "string",
             "title": "决策服务地址",
@@ -150,6 +157,13 @@
             "title": "决策服务超时",
             "description": "一次 /v1/systemone 请求的超时（ms），留空用默认 3500，可填 100 到 8000。越界或非数字按默认值处理。",
             "default": ""
+          },
+          "systemoneServiceKey": {
+            "type": "string",
+            "title": "决策服务密钥",
+            "description": "可选。服务端要求鉴权时填，作为 Authorization: Bearer 发送；留空表示该服务没开鉴权，不发这个头。最长 512 字符，带换行的值会被忽略。",
+            "default": "",
+            "sensitive": true
           },
           "queryMode": {
             "type": "string",

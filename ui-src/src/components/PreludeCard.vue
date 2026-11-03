@@ -12,12 +12,16 @@
 //   - 「测试」发的是输入框此刻的值，不是已保存的配置。
 //
 // 形态：整块一张 n-card（title="前置"），探针行 = NSpace 一行（标题 / 说明 / 开关），
-// 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 测试，700px 以下收成一列），
-// 三格字段 = NFormItem（label-placement="top"、size="small"、无反馈行），
+// 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 密钥 / 测试，700px 以下收成一列），
+// 四格字段 = NFormItem（label-placement="top"、size="small"、无反馈行），
 // 说明与结果行 = NText。列宽表仍在 panel.css：服务名压成内容宽、地址列吃掉剩余，
 // 因为 NGrid 把 grid-template-columns 写成行内样式，组件不给列宽属性。
 //
-// 结果行在同一张 NGrid 里、由 NGridItem 承载（span="1 700:4"）—— ≥700px 时从
+// 密钥那一格：服务端只回掩码（前四 + 圆点 + 后四），输入框里坐的就是它。
+// 聚焦时清掉、失焦仍为空就填回来；空着不提交（清空不等于删 key，
+// 否则点进去看一眼就把已存的密钥删了）。散手 / 回车提交带的是用户新打的明文。
+//
+// 结果行在同一张 NGrid 里、由 NGridItem 承载（span="1 700:5"）—— ≥700px 时从
 // 第二列（地址列）起跨到最后一列，跟地址输入框左边缘对齐。**必须包一层 NGridItem**：
 // naive-ui 的 Grid 在 responsive 模式下的 renderContent 会把非 NGridItem 的子节点
 // 直接丢掉（node_modules/naive-ui/es/grid/src/Grid.mjs，`__GRID_ITEM__ !== true` 就 return），
@@ -27,7 +31,7 @@ import { NButton, NCard, NFormItem, NGrid, NGridItem, NInput, NInputNumber, NSpa
 import { scoringServiceLayout } from "../lib/recall-layers.js";
 import { useConfig } from "../composables/useConfig.js";
 
-const { state, flip, setServiceField, testService, setFocus, enabled } = useConfig();
+const { state, flip, setServiceField, setServiceKey, testService, setFocus, enabled } = useConfig();
 
 // 描述表只算一次：它是冻结的常量表。
 const layout = scoringServiceLayout();
@@ -53,6 +57,27 @@ function onFieldInput(key, value) {
 
 function onFieldChange(key, value) {
   setServiceField(key, value ?? "");
+}
+
+/** 已确认的掩码：服务端只回掩码，所以它同时是「没改过」的判据。 */
+function keyMaskOf(key) {
+  return String(state.layers[key] || "");
+}
+
+// 聚焦时清掉掩码（否则光标进去就得先删一串圆点），失焦仍为空就填回来。
+function onKeyFocus(key) {
+  if (state.draft[key] === keyMaskOf(key)) state.draft[key] = "";
+  setFocus(key);
+}
+
+function onKeyBlur(key) {
+  setFocus("");
+  if (!String(state.draft[key] ?? "").trim()) state.draft[key] = keyMaskOf(key);
+}
+
+// 空着不提交：clear 不等于删 key。提交时带的若仍是掩码，服务端也按「没改」处理。
+function onKeyChange(key, value) {
+  return setServiceKey(key, value ?? "");
 }
 
 function onFieldEnter(event) {
@@ -125,7 +150,7 @@ function onTest(kind) {
             class="service"
             :data-kind="row.kind"
           >
-            <NGrid cols="1 700:5" responsive="screen" :x-gap="6" :y-gap="0">
+            <NGrid cols="1 700:6" responsive="screen" :x-gap="6" :y-gap="0">
               <NGridItem>
                 <div class="service-name">{{ row.label }}</div>
               </NGridItem>
@@ -202,6 +227,30 @@ function onTest(kind) {
               </NGridItem>
 
               <NGridItem>
+                <NFormItem
+                  size="small"
+                  label-placement="top"
+                  :show-feedback="false"
+                  :label="row.key.label"
+                  :label-props="{ for: row.key.id }"
+                >
+                  <NInput
+                    size="small"
+                    :type="row.key.type"
+                    show-password-on="click"
+                    :placeholder="row.key.placeholder"
+                    :input-props="{ id: row.key.id, spellcheck: 'false', autocomplete: 'off' }"
+                    :value="state.draft[row.key.key]"
+                    @focus="onKeyFocus(row.key.key)"
+                    @blur="onKeyBlur(row.key.key)"
+                    @update:value="onFieldInput(row.key.key, $event)"
+                    @change="onKeyChange(row.key.key, $event)"
+                    @keydown.enter="onFieldEnter"
+                  />
+                </NFormItem>
+              </NGridItem>
+
+              <NGridItem>
                 <NFormItem size="small" label-placement="top" :show-feedback="false" class="service-test">
                   <NButton
                     :id="row.testId"
@@ -216,11 +265,11 @@ function onTest(kind) {
               </NGridItem>
 
               <!-- 结果行常驻：空着也占一行高度，出现结果时不把整页顶一下。
-                   span 的 1 是 700px 以下（那时 NGrid 只有一列），4 是 ≥700px 时
-                   跨四列。但 span 只给宽度，没有给起点：自动排布会把它放到下一行
+                   span 的 1 是 700px 以下（那时 NGrid 只有一列），5 是 ≥700px 时
+                   跨五列。但 span 只给宽度，没有给起点：自动排布会把它放到下一行
                    的第 1 列（服务名那列）。起点由 panel.css 的 .service-result-cell
                    用 grid-column: 2 / -1 指定，左边缘才和地址列对齐。 -->
-              <NGridItem span="1 700:4" class="service-result-cell">
+              <NGridItem span="1 700:5" class="service-result-cell">
                 <NText
                   :id="row.resultId"
                   class="service-result hint"

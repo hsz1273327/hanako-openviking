@@ -64,6 +64,7 @@ export function useConfig() {
     saveConnection: (...args) => store.saveConnection(...args),
     saveLayers: (...args) => store.saveLayers(...args),
     setServiceField: (...args) => store.setServiceField(...args),
+    setServiceKey: (...args) => store.setServiceKey(...args),
     testService: (...args) => store.testService(...args),
     testChannels: (...args) => store.testChannels(...args),
     addChannel: (...args) => store.addChannel(...args),

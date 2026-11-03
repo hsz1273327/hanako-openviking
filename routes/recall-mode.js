@@ -24,6 +24,7 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  normalizeServiceKey,
   normalizeServiceModel,
   normalizeServiceTimeout,
   normalizeServiceUrl,
@@ -34,6 +35,7 @@ import {
   servicePairError,
   serviceTimeoutOrDefault,
 } from "../src/ov/settings.js";
+import { maskString } from "../src/ov/mask.js";
 import {
   readRerankSample,
   runRerankChannels,
@@ -64,6 +66,18 @@ const SERVICE_TIMEOUT_FIELDS = Object.freeze([
   ["rerankServiceTimeoutMs", "rerank"],
   ["systemoneServiceTimeoutMs", "systemone"],
 ]);
+
+/**
+ * 可选的服务密钥。留空合法（= 服务端没开鉴权），与地址 / 模型不同：它不成对，
+ * 单独有没有都行。
+ */
+const SERVICE_KEY_FIELDS = Object.freeze(["rerankServiceKey", "systemoneServiceKey"]);
+
+/** 密钥的 GET 形状：只回「填没填」与一枚掩码，永不回明文。 */
+function keyShape(stored) {
+  const key = normalizeServiceKey(stored);
+  return { set: Boolean(key), masked: maskString(key) };
+}
 
 /** provider/model 的边界与 APPS.md 的可调用模型标识一致：非空、无控制字符、≤128。 */
 const MODEL_FIELD_MAX = 128;
@@ -123,6 +137,8 @@ function serviceModelError(raw, field) {
 }
 
 async function current(ctx) {
+  const rerankKey = keyShape(await ctx.config.get("rerankServiceKey"));
+  const systemoneKey = keyShape(await ctx.config.get("systemoneServiceKey"));
   return {
     recallGate: normalizeRecallGate(await ctx.config.get("recallGate")),
     queryMode: normalizeQueryMode(await ctx.config.get("queryMode")),
@@ -151,6 +167,12 @@ async function current(ctx) {
       await ctx.config.get("systemoneServiceTimeoutMs"),
       "systemone",
     ),
+    // 密钥永不回明文：只给「填没填」+ 掩码。掩码同时是「没改过」的判据——面板整单提交，
+    // 没动过的那一格带回来的就是这串。
+    rerankServiceKeySet: rerankKey.set,
+    rerankServiceKeyMasked: rerankKey.masked,
+    systemoneServiceKeySet: systemoneKey.set,
+    systemoneServiceKeyMasked: systemoneKey.masked,
   };
 }
 
@@ -254,6 +276,27 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push([key, serializeServiceTimeout(raw, kind)]);
     }
 
+    // 密钥：不是一项校验而是一项取舍：非法值丢弃、保留原值，不报错、不打断整单。
+    //
+    //   缺省（没这个键） → 不动
+    //   带换行           → 丢（拼进 Authorization 头会让 fetch 抛）
+    //   空串 / 只有空白   → 清空（明确要删）
+    //   等于当前掩码     → 不动（面板整单提交，没改过的格子带回来的就是掩码）
+    //   其它             → 覆盖（去空白、截断到 SERVICE_KEY_MAX）
+    //
+    // 「等于掩码不动」与 conn.js 的 API Key 不同：那边由面板本地判「没改」，
+    // 这边因为整单提交，判据必须落在服务端，否则面板一刷新就会把掩码存成真 key。
+    for (const key of SERVICE_KEY_FIELDS) {
+      if (!has(body, key)) continue;
+      const raw = body[key];
+      if (typeof raw !== "string") continue;
+      if (/[\r\n]/.test(raw)) continue;
+      const typed = raw.trim();
+      const stored = normalizeServiceKey(await ctx.config.get(key));
+      if (typed && typed === maskString(stored)) continue;
+      changes.push([key, normalizeServiceKey(raw)]);
+    }
+
     // 地址与模型成对：两边要么都有、要么都空，缺一边整单拒，一个字段不写。
     // 只校验这一单动到的那一对：存量里已经有半对的老配置时，改别的键不该被连坐——
     // 那一对的回退另由 resolveRerankChannel 整对处理。
@@ -339,7 +382,16 @@ export default function registerRecallModeRoutes(app, ctx) {
 
     // 超时按类型归一化：非数字 / 越界一律回该类型的默认值（800 / 3500）。
     const timeoutMs = serviceTimeoutOrDefault(body.timeoutMs, kind);
-    const outcome = await testScoringService({ sdk: ctx, kind, url, model, timeoutMs });
+    // 密钥跟着这一单走：测试按钮发的是输入框此刻的值（包括尚未保存的 key）。
+    // 带换行的非法值归一成空串——当「没填密钥」试一把，不回 400 打断。
+    //
+    // 输入框里坐的可能是掩码（没动过就是那串）。掩码不是密钥，发出去只会 401，
+    // 所以碰上掩码就去取已存的值——这仍然只读，不改任何状态。
+    const keyField = kind === "rerank" ? "rerankServiceKey" : "systemoneServiceKey";
+    const typedKey = normalizeServiceKey(body.key);
+    const storedKey = normalizeServiceKey(await ctx.config.get(keyField));
+    const key = typedKey && typedKey === maskString(storedKey) ? storedKey : typedKey;
+    const outcome = await testScoringService({ sdk: ctx, kind, url, model, timeoutMs, key });
     // 打不通不是请求错，是结果：一律 200 + ok:false，面板照原文显示错误。
     return c.json(outcome, 200);
   });
