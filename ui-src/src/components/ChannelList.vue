@@ -11,7 +11,12 @@
 //
 // 可提交性（isCompleteRerankChannel）与上限（RERANK_CHANNELS_MAX）都在
 // lib/recall-layers.js；排序 / 增删 / 回滚在 store。
+//
+// 形态：一个通道一张 n-card（size="small"，title 是通道名）；
+// 卡头右侧是「启用 / 服务未配置 / 删除」，正文是 NGrid 四格（类型 / 名称 / 权重 / 超时，
+// 520px 两列、700px 四列）。列表外面套 NScrollbar，条目多时区内滚，不顶高整列。
 import { computed } from "vue";
+import { NButton, NCard, NCheckbox, NGrid, NGridItem, NInput, NInputNumber, NScrollbar, NSelect } from "naive-ui";
 import {
   RERANK_CHANNELS_MAX,
   SYSTEMONE_MAX_CANDIDATES,
@@ -49,34 +54,29 @@ function onType(index, value) {
   updateChannel(index, { type: value, url: "", model: "" });
 }
 
-function onWeight(index, event) {
-  const row = rows.value[index];
-  const parsed = Number(event.target.value);
-  if (!row || !Number.isFinite(parsed)) {
-    event.target.value = row ? String(row.channel.weight) : "";
-    return;
-  }
-  const clamped = Math.min(10, Math.max(0.1, parsed));
-  event.target.value = String(clamped);
-  setChannelWeight(index, clamped);
+// 名称只在失焦 / 回车时提交：中途逐字提交会被飞行中的回包整行盖回去（通道行没有
+// inline 保护）。:value 仍直接绑 store，写回草稿也写 store，失败回滚界面会跟着退。
+function onNameInput(index, value) {
+  const current = state.channels[index];
+  if (!current) return;
+  state.channels[index] = { ...current, name: value };
 }
 
-function onTimeout(index, event) {
-  const row = rows.value[index];
-  if (!row) return;
-  const text = String(event.target.value ?? "").trim();
-  if (!text) {
-    setChannelTimeout(index, "");
-    return;
-  }
-  const parsed = Number(text);
-  if (!Number.isFinite(parsed)) {
-    event.target.value = row.channel.timeoutMs ? String(row.channel.timeoutMs) : "";
-    return;
-  }
-  const clamped = Math.min(row.timeoutCeiling, Math.max(200, Math.floor(parsed)));
-  event.target.value = String(clamped);
-  setChannelTimeout(index, clamped);
+function onNameCommit(index) {
+  const current = state.channels[index];
+  if (!current) return;
+  updateChannel(index, { name: current.name });
+}
+
+function onWeight(index, value) {
+  // n-input-number 清空给 null：不提交，也不让它变成 0 再被夹到 0.1。
+  if (value === null || value === undefined) return;
+  setChannelWeight(index, value);
+}
+
+function onTimeout(index, value) {
+  // 清空仍是「用该类型默认值」：null 收成空串交给 store 删掉这一格。
+  setChannelTimeout(index, value === null || value === undefined ? "" : value);
 }
 
 function timeoutTitle(row) {
@@ -87,19 +87,19 @@ function timeoutTitle(row) {
 </script>
 
 <template>
-  <div class="field channel-field">
+  <div class="channel-field">
     <div class="prompt-head">
       <label>精排通道</label>
       <span id="rerankChannelsCount" class="prompt-status">{{ countText }}</span>
-      <button
+      <NButton
         id="rerankTestBtn"
-        class="btn ghost sm"
-        type="button"
+        size="small"
+        quaternary
         :disabled="state.channelTest.pending"
         @click="testChannels()"
       >
         {{ state.channelTest.pending ? "测试中…" : "测试" }}
-      </button>
+      </NButton>
     </div>
 
     <p id="rerankChannelsEmpty" class="field-hint" :hidden="state.channels.length > 0">
@@ -107,95 +107,116 @@ function timeoutTitle(row) {
     </p>
 
     <div id="rerankChannelList" class="channel-list">
-      <div
-        v-for="row in rows"
-        :key="row.index"
-        class="channel-row"
-        :class="{ warn: row.unavailable }"
-        :data-index="row.index"
-      >
-        <div class="channel-row-head">
-          <b>{{ row.title }}</b>
-          <label class="channel-enabled">
-            <input
-              type="checkbox"
-              :checked="row.channel.enabled"
-              @change="updateChannel(row.index, { enabled: $event.target.checked })"
-            />
-            启用
-          </label>
-          <span v-if="row.unavailable" class="channel-unavailable">服务未配置，不会生效</span>
-          <button
-            class="btn ghost sm"
-            type="button"
-            @click="removeChannel(row.index)"
-          >删除</button>
-        </div>
+      <NScrollbar class="channel-scroll">
+        <div class="channel-stack">
+          <NCard
+            v-for="row in rows"
+            :key="row.index"
+            class="channel-card"
+            :class="{ warn: row.unavailable }"
+            size="small"
+            :title="row.title"
+            :data-index="row.index"
+            header-style="padding: 4px 10px"
+            content-style="padding: 6px 10px 8px"
+          >
+            <template #header-extra>
+              <div class="channel-head-extra">
+                <NCheckbox
+                  class="channel-enabled"
+                  size="small"
+                  :checked="row.channel.enabled"
+                  @update:checked="(next) => updateChannel(row.index, { enabled: next })"
+                >
+                  启用
+                </NCheckbox>
+                <span v-if="row.unavailable" class="channel-unavailable">服务未配置，不会生效</span>
+                <NButton
+                  size="small"
+                  quaternary
+                  @click="removeChannel(row.index)"
+                >删除</NButton>
+              </div>
+            </template>
 
-        <div class="channel-cells">
-          <label class="channel-cell">
-            <span>类型</span>
-            <select :value="row.channel.type" @change="onType(row.index, $event.target.value)">
-              <option
-                v-for="option in row.options"
-                :key="option.value"
-                :value="option.value"
-              >{{ option.label }}</option>
-            </select>
-          </label>
-          <label class="channel-cell">
-            <span>名称</span>
-            <input
-              type="text"
-              spellcheck="false"
-              placeholder="显示名，可空"
-              :value="row.channel.name"
-              @change="updateChannel(row.index, { name: $event.target.value })"
-            />
-          </label>
-          <label class="channel-cell">
-            <span>权重</span>
-            <input
-              type="number"
-              min="0.1"
-              max="10"
-              step="0.1"
-              :value="row.channel.weight"
-              @change="onWeight(row.index, $event)"
-            />
-          </label>
-          <!-- 超时那一格：留空 = 用该类型的默认值（placeholder 就显示这个数）。 -->
-          <label class="channel-cell">
-            <span>超时（ms）</span>
-            <input
-              type="number"
-              min="200"
-              :max="row.timeoutCeiling"
-              step="100"
-              :placeholder="row.timeoutPlaceholder"
-              :title="timeoutTitle(row)"
-              :value="row.channel.timeoutMs ?? ''"
-              @change="onTimeout(row.index, $event)"
-            />
-          </label>
-        </div>
+            <NGrid cols="1 520:2 700:4" responsive="screen" :x-gap="8" :y-gap="6">
+              <NGridItem>
+                <label class="channel-cell">
+                  <span>类型</span>
+                  <NSelect
+                    size="small"
+                    :options="row.options"
+                    :value="row.channel.type"
+                    @update:value="(value) => onType(row.index, value)"
+                  />
+                </label>
+              </NGridItem>
+              <NGridItem>
+                <label class="channel-cell">
+                  <span>名称</span>
+                  <NInput
+                    size="small"
+                    :input-props="{ spellcheck: 'false' }"
+                    placeholder="显示名，可空"
+                    :value="row.channel.name"
+                    @update:value="(value) => onNameInput(row.index, value)"
+                    @change="onNameCommit(row.index)"
+                  />
+                </label>
+              </NGridItem>
+              <NGridItem>
+                <label class="channel-cell">
+                  <span>权重</span>
+                  <NInputNumber
+                    size="small"
+                    :show-button="false"
+                    :update-value-on-input="false"
+                    :min="0.1"
+                    :max="10"
+                    :step="0.1"
+                    :value="row.channel.weight"
+                    @update:value="(value) => onWeight(row.index, value)"
+                  />
+                </label>
+              </NGridItem>
+              <!-- 超时那一格：留空 = 用该类型的默认值（placeholder 就显示这个数）。 -->
+              <NGridItem>
+                <label class="channel-cell">
+                  <span>超时（ms）</span>
+                  <NInputNumber
+                    size="small"
+                    :show-button="false"
+                    :update-value-on-input="false"
+                    :min="200"
+                    :max="row.timeoutCeiling"
+                    :step="100"
+                    :placeholder="row.timeoutPlaceholder"
+                    :title="timeoutTitle(row)"
+                    :value="row.channel.timeoutMs ?? null"
+                    @update:value="(value) => onTimeout(row.index, value)"
+                  />
+                </label>
+              </NGridItem>
+            </NGrid>
 
-        <!-- 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 -->
-        <p v-if="row.pairNote" class="channel-pair-note">{{ row.pairNote }}</p>
-      </div>
+            <!-- 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 -->
+            <p v-if="row.pairNote" class="channel-pair-note">{{ row.pairNote }}</p>
+          </NCard>
+        </div>
+      </NScrollbar>
     </div>
 
     <div class="channel-actions">
       <span id="rerankChannelHint" class="field-hint" :hidden="!noService">
         先在上面配好打分服务
       </span>
-      <button
+      <NButton
         id="rerankAddChannel"
-        class="btn ghost sm"
-        type="button"
+        size="small"
+        quaternary
         :disabled="addDisabled"
         @click="addChannel()"
-      >添加通道</button>
+      >添加通道</NButton>
     </div>
 
     <pre id="rerankTestResult" class="channel-result" :hidden="state.channelTest.hidden">{{ state.channelTest.text }}</pre>

@@ -8,7 +8,14 @@
 //     不会出现「一半生效」的显示；
 //   - 提示词框里放的是 value（配置为空时坐默认全文），不是 placeholder；
 //     「恢复默认」只填框、走正常提交；旁边小字三态：默认 / 已修改 / 空。
+//
+// 形态交给 naive-ui：整块一张 n-card（title="召回管理"，peer 计数在 #header-extra）；
+// 三个主下拉 NGrid :cols="3"（700px 以下收成一列）；两个展开区各自 NGrid / NSpace。
+//
+// NSelect 的 id 必须走 :input-props —— naive-ui 的 n-select 不关 attrs 继承，
+// 裸 id 会落到外层 <div class="n-select">，<label for> 就指空了。
 import { computed } from "vue";
+import { NButton, NCard, NGrid, NGridItem, NInput, NSelect } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import { usePeers } from "../composables/usePeers.js";
@@ -39,124 +46,173 @@ const rerankStatus = computed(() => rerankPromptStatus());
 const gateModelOptions = computed(() => options(state.form.gateModel));
 const rerankModelOptions = computed(() => options(state.form.rerankModel));
 
-function onSelect(key, event) {
-  setForm(key, event.target.value);
+// 三个固定下拉的选项表：n-select 只认 { label, value }，文案与手写版逐字一致。
+const GATE_OPTIONS = Object.freeze([
+  { label: "不判断（每轮都召回）", value: "off" },
+  { label: "规则跳过（极短的纯操作指令）", value: "rules" },
+  { label: "模型判断（用宿主模型）", value: "llm" },
+]);
+const QUERY_MODE_OPTIONS = Object.freeze([
+  { label: "最后一句", value: "last" },
+  { label: "带上文（最近三条）", value: "context" },
+]);
+const RERANK_OPTIONS = Object.freeze([
+  { label: "关", value: "off" },
+  { label: "开启", value: "llm" },
+]);
+
+// 下拉改了就整单提交（setForm → saveLayers）。
+function onSelect(key, value) {
+  setForm(key, value);
 }
 
-function onPromptInput(which, event) {
-  touchPrompt(which, event.target.value);
+// 提示词是 value：每敲一个字先写进草稿（标记 touched），失焦 / 回车才提交。
+function onPromptInput(which, value) {
+  touchPrompt(which, value);
 }
 
-function onPromptChange(which, event) {
-  setPrompt(which, event.target.value);
+function onPromptChange(which, value) {
+  setPrompt(which, value);
 }
 </script>
 
 <template>
-  <section class="card recall" aria-label="召回管理">
-    <header class="recall-head">
-      <h2 class="card-title">召回管理</h2>
+  <NCard class="recall" size="small" title="召回管理" content-style="padding: 8px 12px">
+    <template #header-extra>
       <span id="peerCount" class="peer-count">{{ peerCountText }}</span>
-    </header>
+    </template>
 
-    <div class="recall-grid" :class="{ dim: !enabled }">
-      <div class="field">
-        <label for="recallGate">召回判断</label>
-        <select id="recallGate" :value="state.form.recallGate" @change="onSelect('recallGate', $event)">
-          <option value="off">不判断（每轮都召回）</option>
-          <option value="rules">规则跳过（极短的纯操作指令）</option>
-          <option value="llm">模型判断（用宿主模型）</option>
-        </select>
-        <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令；模型判断失败或超时会照常召回。</span>
-      </div>
-      <div class="field">
-        <label for="queryMode">召回查询</label>
-        <select id="queryMode" :value="state.form.queryMode" @change="onSelect('queryMode', $event)">
-          <option value="last">最后一句</option>
-          <option value="context">带上文（最近三条）</option>
-        </select>
-        <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
-      </div>
-      <div class="field">
-        <label for="rerank">结果重排</label>
-        <select id="rerank" :value="state.form.rerank" @change="onSelect('rerank', $event)">
-          <option value="off">关</option>
-          <option value="llm">开启</option>
-        </select>
-        <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
-      </div>
-    </div>
-
-    <!-- 只有 recallGate=llm 时才展开。提示词框里放的就是当前生效的提示词。 -->
-    <div id="gateAdvanced" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!gateOpen">
-      <div class="field">
-        <div class="prompt-head">
-          <label for="gatePrompt">判断提示词</label>
-          <span id="gatePromptStatus" class="prompt-status">{{ gateStatus }}</span>
-          <button id="gateResetPrompt" class="btn ghost sm" type="button" @click="resetPrompt('gate')">
-            恢复默认
-          </button>
+    <NGrid class="recall-grid" cols="1 700:3" responsive="screen" :x-gap="10" :class="{ dim: !enabled }">
+      <NGridItem>
+        <div class="field">
+          <label for="recallGate">召回判断</label>
+          <NSelect
+            size="small"
+            :options="GATE_OPTIONS"
+            :input-props="{ id: 'recallGate' }"
+            :value="state.form.recallGate"
+            @update:value="(value) => onSelect('recallGate', value)"
+          />
+          <span class="field-hint">规则跳过只认 ≤8 字、无问号、无疑问词、无指代词的指令；模型判断失败或超时会照常召回。</span>
         </div>
-        <textarea
-          id="gatePrompt"
-          rows="4"
-          maxlength="2000"
-          spellcheck="false"
-          :value="state.prompts.gate"
-          @focus="setFocus('gatePrompt')"
-          @blur="setFocus('')"
-          @input="onPromptInput('gate', $event)"
-          @change="onPromptChange('gate', $event)"
-        ></textarea>
-        <!-- 提示词是模板：占位符处填当前这条用户消息，渲染后整段作为单条用户消息发给模型。 -->
-        <span class="field-hint" v-pre>用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
-      </div>
+      </NGridItem>
+      <NGridItem>
+        <div class="field">
+          <label for="queryMode">召回查询</label>
+          <NSelect
+            size="small"
+            :options="QUERY_MODE_OPTIONS"
+            :input-props="{ id: 'queryMode' }"
+            :value="state.form.queryMode"
+            @update:value="(value) => onSelect('queryMode', value)"
+          />
+          <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
+        </div>
+      </NGridItem>
+      <NGridItem>
+        <div class="field">
+          <label for="rerank">结果重排</label>
+          <NSelect
+            size="small"
+            :options="RERANK_OPTIONS"
+            :input-props="{ id: 'rerank' }"
+            :value="state.form.rerank"
+            @update:value="(value) => onSelect('rerank', value)"
+          />
+          <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
+        </div>
+      </NGridItem>
+    </NGrid>
 
-      <div class="field">
-        <label for="gateModel">判断模型</label>
-        <!-- 一个下拉选到底：首项是默认（走宿主辅助模型），其余就是目录里的每个模型。 -->
-        <select id="gateModel" :value="state.form.gateModel" @change="onSelect('gateModel', $event)">
-          <option v-for="option in gateModelOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-        <span id="gateModelsHint" class="field-hint" :hidden="!modelsHint">{{ modelsHint }}</span>
-      </div>
+    <!-- 只有 recallGate=llm 时才展开。提示词框里放的就是当前生效的提示词。
+         提示词与模型两格用 NGrid :cols="2"（700px 以下收成一列）。 -->
+    <div id="gateAdvanced" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!gateOpen">
+      <NGrid cols="1 700:2" responsive="screen" :x-gap="10" :y-gap="8">
+        <NGridItem>
+          <div class="field">
+            <div class="prompt-head">
+              <label for="gatePrompt">判断提示词</label>
+              <span id="gatePromptStatus" class="prompt-status">{{ gateStatus }}</span>
+              <NButton id="gateResetPrompt" size="small" quaternary @click="resetPrompt('gate')">
+                恢复默认
+              </NButton>
+            </div>
+            <NInput
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 4, maxRows: 8 }"
+              :maxlength="2000"
+              :input-props="{ id: 'gatePrompt', spellcheck: 'false' }"
+              :value="state.prompts.gate"
+              @focus="setFocus('gatePrompt')"
+              @blur="setFocus('')"
+              @update:value="onPromptInput('gate', $event)"
+              @change="onPromptChange('gate', $event)"
+            />
+            <!-- 提示词是模板：占位符处填当前这条用户消息，渲染后整段作为单条用户消息发给模型。 -->
+            <span class="field-hint" v-pre>用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
+          </div>
+        </NGridItem>
+
+        <NGridItem>
+          <div class="field">
+            <label for="gateModel">判断模型</label>
+            <!-- 一个下拉选到底：首项是默认（走宿主辅助模型），其余就是目录里的每个模型。 -->
+            <NSelect
+              size="small"
+              :options="gateModelOptions"
+              :input-props="{ id: 'gateModel' }"
+              :value="state.form.gateModel"
+              @update:value="(value) => onSelect('gateModel', value)"
+            />
+            <span id="gateModelsHint" class="field-hint" :hidden="!modelsHint">{{ modelsHint }}</span>
+          </div>
+        </NGridItem>
+      </NGrid>
     </div>
 
     <!-- 只有 rerank=llm 时才展开。 -->
     <div id="rerankAdvanced" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!rerankOpen">
-      <div class="field">
-        <div class="prompt-head">
-          <label for="rerankPrompt">重排提示词</label>
-          <span id="rerankPromptStatus" class="prompt-status">{{ rerankStatus }}</span>
-          <button id="rerankResetPrompt" class="btn ghost sm" type="button" @click="resetPrompt('rerank')">
-            恢复默认
-          </button>
-        </div>
-        <textarea
-          id="rerankPrompt"
-          rows="4"
-          maxlength="2000"
-          spellcheck="false"
-          :value="state.prompts.rerank"
-          @focus="setFocus('rerankPrompt')"
-          @blur="setFocus('')"
-          @input="onPromptInput('rerank', $event)"
-          @change="onPromptChange('rerank', $event)"
-        ></textarea>
-        <span class="field-hint" v-pre>用 {{message}} 表示当前这条用户消息，用 {{candidates}} 表示候选清单；没写 {{candidates}} 的话，清单会自动接在末尾。</span>
-      </div>
+      <NGrid cols="1 700:2" responsive="screen" :x-gap="10" :y-gap="8">
+        <NGridItem>
+          <div class="field">
+            <div class="prompt-head">
+              <label for="rerankPrompt">重排提示词</label>
+              <span id="rerankPromptStatus" class="prompt-status">{{ rerankStatus }}</span>
+              <NButton id="rerankResetPrompt" size="small" quaternary @click="resetPrompt('rerank')">
+                恢复默认
+              </NButton>
+            </div>
+            <NInput
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 4, maxRows: 8 }"
+              :maxlength="2000"
+              :input-props="{ id: 'rerankPrompt', spellcheck: 'false' }"
+              :value="state.prompts.rerank"
+              @focus="setFocus('rerankPrompt')"
+              @blur="setFocus('')"
+              @update:value="onPromptInput('rerank', $event)"
+              @change="onPromptChange('rerank', $event)"
+            />
+            <span class="field-hint" v-pre>用 {{message}} 表示当前这条用户消息，用 {{candidates}} 表示候选清单；没写 {{candidates}} 的话，清单会自动接在末尾。</span>
+          </div>
+        </NGridItem>
 
-      <div class="field">
-        <label for="rerankModel">兜底模型（无启用通道时）</label>
-        <select id="rerankModel" :value="state.form.rerankModel" @change="onSelect('rerankModel', $event)">
-          <option v-for="option in rerankModelOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-        <span id="rerankModelsHint" class="field-hint" :hidden="!modelsHint">{{ modelsHint }}</span>
-      </div>
+        <NGridItem>
+          <div class="field">
+            <label for="rerankModel">兜底模型（无启用通道时）</label>
+            <NSelect
+              size="small"
+              :options="rerankModelOptions"
+              :input-props="{ id: 'rerankModel' }"
+              :value="state.form.rerankModel"
+              @update:value="(value) => onSelect('rerankModel', value)"
+            />
+            <span id="rerankModelsHint" class="field-hint" :hidden="!modelsHint">{{ modelsHint }}</span>
+          </div>
+        </NGridItem>
+      </NGrid>
 
       <ChannelList />
     </div>
@@ -168,5 +224,5 @@ function onPromptChange(which, event) {
     <!-- 提示位在记忆页也有一份：这一页上的写入（peer 排除 / 召回策略）如果只
          在全局页报错，用户在这一页根本看不见。文案与全局页同源（store.note）。 -->
     <p class="save-hint" :class="{ ok: !state.note.bad, bad: state.note.bad }">{{ state.note.text }}</p>
-  </section>
+  </NCard>
 </template>

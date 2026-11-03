@@ -10,10 +10,10 @@
 //     而是跟着 store.controls.enabled 走 —— 总闸一关，三页的能力块同时变淡；
 //   - 提示位仍是这一块自己的小字（面板别处的提示在各自页面里）。
 //
-// 样式全部留在 ui/assets/panel.css（.skill-route / .skill-route-head / .skill-route-hint），
-// SFC 里不写 <style>。
+// 形态交给 naive-ui：一张 n-card（title="技能路由"），开关在 #header-extra。
+// 样式只留 .skill-route-hint 那几行（ui/assets/panel.css），SFC 里不写 <style>。
 import { computed, ref } from "vue";
-import { NSwitch } from "naive-ui";
+import { NCard, NSwitch } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 
 const HINT = "把共享技能交给助手按需调用";
@@ -53,14 +53,16 @@ async function onToggle(next) {
 
 <template>
   <!-- 单根节点，class 只写静态值 + 一个 dim：总闸关着时整块半透。 -->
-  <section
+  <NCard
     id="skillRoute"
-    class="card skill-route"
-    :class="{ dim: !enabled }"
+    class="skill-route"
+    size="small"
+    title="技能路由"
     aria-label="技能路由"
+    content-style="padding: 6px 12px 8px"
+    :class="{ dim: !enabled }"
   >
-    <header class="skill-route-head">
-      <h2 class="card-title">技能路由</h2>
+    <template #header-extra>
       <NSwitch
         size="small"
         :value="routing"
@@ -68,7 +70,7 @@ async function onToggle(next) {
         aria-label="技能路由"
         @update:value="onToggle"
       />
-    </header>
+    </template>
     <p class="skill-route-hint" :class="{ bad: hintBad }">{{ hint }}</p>
-  </section>
+  </NCard>
 </template>

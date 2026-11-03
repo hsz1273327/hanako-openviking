@@ -7,14 +7,17 @@
 // 这也意味着隐藏页里的节点照旧存在（peer 名单 / 通道行都在内存里）。
 //
 // 主题：宿主是亮色，用 theme.js 的 lightThemeOverrides，不引 darkTheme（见该文件注释）。
+// 断点：n-grid 的 responsive="screen" 按断点表取名，表在 lib/grid-breakpoints.js
+// （键就是像素阈值 0 / 520 / 700），所以组件里能直接写 cols="1 700:2"。
 // 布局 / 配色一律留在 ui/assets/panel.css，SFC 里不写 <style>。
 import { computed, onMounted, ref } from "vue";
-import { NConfigProvider } from "naive-ui";
+import { NButton, NConfigProvider } from "naive-ui";
 import GlobalPanel from "./components/GlobalPanel.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
 import SkillPanel from "./components/SkillPanel.vue";
 import TabBar from "./components/TabBar.vue";
 import { lightThemeOverrides } from "./theme.js";
+import { BREAKPOINTS } from "./lib/grid-breakpoints.js";
 import { DEFAULT_TAB, normalizeTab, readTab, writeTab } from "./lib/tabs.js";
 import { appReady } from "./api.js";
 import { useConfig } from "./composables/useConfig.js";
@@ -77,7 +80,7 @@ onMounted(() => {
 
 <template>
   <!-- abstract：不额外包一层 div，挂载点里直接就是 .page。 -->
-  <NConfigProvider abstract :theme-overrides="lightThemeOverrides">
+  <NConfigProvider abstract :theme-overrides="lightThemeOverrides" :breakpoints="BREAKPOINTS">
     <main class="page" data-hana-app-ui>
       <header class="top">
         <div class="ident">
@@ -91,18 +94,18 @@ onMounted(() => {
           </div>
         </div>
         <div class="top-actions">
-          <button id="testBtn" class="btn" type="button" :disabled="testing" @click="onTest">
+          <NButton id="testBtn" size="small" :disabled="testing" @click="onTest">
             {{ testing ? "测试中…" : "测试连接" }}
-          </button>
-          <button
+          </NButton>
+          <NButton
             id="refreshBtn"
-            class="btn ghost"
-            type="button"
+            size="small"
+            quaternary
             :disabled="refreshing"
             @click="onRefresh"
           >
             刷新
-          </button>
+          </NButton>
         </div>
       </header>
 

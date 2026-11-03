@@ -4,15 +4,15 @@
 // 文字颜色：标签、输入值、按钮文案、caret 之外的一切文字都交给 naive-ui
 // 亮色默认值（深色字）。
 //
-// 上一版把 Form.labelTextColor / Input.textColor / Button.textColor 写成
-// rgba(236, 236, 236, …)，浅色字打在浅色底上：值其实一直在 DOM 里，
-// 只是看不见（输入框看着是空的、按钮看着没字）。颜色覆盖只做两件事：
+// 这一版只留品牌色 —— 三组颜色取自手写样式：
+//   --accent  #6f8f68 / hover #7ea176 / pressed #5f7d59   ui/assets/panel.css .switch
+//   --ok      #5d7d56                                     ui/assets/panel.css .pill.ok
+//   --bad     #b8564d                                     ui/assets/panel.css .pill.down
 //
-//   1. 品牌色，取自手写样式：
-//        --accent  #6f8f68 / hover #7ea176 / pressed #5f7d59   ui/assets/panel.css .switch
-//        --ok      #5d7d56                                     ui/assets/panel.css .pill.ok
-//        --bad     #b8564d                                     ui/assets/panel.css .pill.down
-//   2. 中性底色：输入框/按钮用 rgba(128,128,128,…)，亮底暗底都成立。
+// 组件级覆盖（Input / Button / Alert）和 common.borderRadius 全部删掉了：
+// 那些「中性灰底 + 自绘边框 + 9px 圆角」的写法等于把 naive-ui 当画板重画一遍，
+// 每次升级都要跟着调。现在输入框、按钮、卡片、圆角、阴影一律用 naive-ui 自己的
+// 亮色默认值，只把品牌色钉住。
 //
 // 不引用宿主主题变量：App 的 iframe 里没有 --text / --accent 这类变量，
 // 引用了整条声明会静默作废，且不报错。
@@ -33,45 +33,5 @@ export const lightThemeOverrides = {
     errorColorHover: "#c2554b",
     errorColorPressed: "#a84a42",
     errorColorSuppl: "#b8564d",
-    borderRadius: "9px",
-  },
-  // 开关交给 naive-ui 亮色默认：关 = 深灰半透轨道 + 带阴影的白钮，
-  // 开 = primaryColor 轨道。之前那版把钮写成 #f6f6f6 又不带阴影，
-  // 亮底上就是一个看不见的白点，所以这里不再覆盖 Switch。
-  Input: {
-    color: "rgba(128, 128, 128, 0.06)",
-    colorFocus: "rgba(111, 143, 104, 0.08)",
-    colorDisabled: "rgba(128, 128, 128, 0.04)",
-    // 品牌绿是光标，不是文字色：值本身仍是 naive-ui 默认的深色字。
-    caretColor: "#6f8f68",
-    placeholderColor: "rgba(128, 128, 128, 0.55)",
-    placeholderColorDisabled: "rgba(128, 128, 128, 0.4)",
-    border: "1px solid rgba(128, 128, 128, 0.34)",
-    borderHover: "1px solid rgba(111, 143, 104, 0.5)",
-    borderFocus: "1px solid rgba(111, 143, 104, 0.75)",
-    boxShadowFocus: "0 0 0 2px rgba(111, 143, 104, 0.16)",
-    borderRadius: "9px",
-  },
-  Button: {
-    borderRadiusMedium: "9px",
-    color: "rgba(128, 128, 128, 0.07)",
-    colorHover: "rgba(128, 128, 128, 0.15)",
-    colorPressed: "rgba(128, 128, 128, 0.15)",
-    colorFocus: "rgba(128, 128, 128, 0.15)",
-    border: "1px solid rgba(128, 128, 128, 0.3)",
-    borderHover: "1px solid rgba(128, 128, 128, 0.3)",
-    borderPressed: "1px solid rgba(128, 128, 128, 0.3)",
-    borderFocus: "1px solid rgba(111, 143, 104, 0.75)",
-  },
-  Alert: {
-    borderRadius: "9px",
-    borderError: "1px solid rgba(184, 86, 77, 0.4)",
-    colorError: "rgba(184, 86, 77, 0.12)",
-    iconColorError: "#b8564d",
-    contentTextColorError: "#b8564d",
-    borderSuccess: "1px solid rgba(111, 143, 104, 0.4)",
-    colorSuccess: "rgba(111, 143, 104, 0.12)",
-    iconColorSuccess: "#5d7d56",
-    contentTextColorSuccess: "#5d7d56",
   },
 };

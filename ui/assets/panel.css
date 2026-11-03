@@ -1,18 +1,24 @@
 /* 整页控制台。
    硬规矩：只用中性 rgba 和 currentColor，不依赖宿主的主题变量。
    依赖变量的代价是——变量没注入时整条声明作废，页面变成一张白纸，
-   而失败是静默的，看起来像"没写 CSS"。 */
+   而失败是静默的，看起来像"没写 CSS"。
+
+   这一版大幅瘦身：卡片、栅格、列表、折叠、滚动条、按钮、输入框全部交给
+   naive-ui（见 ui-src/src/components/*.vue），这里只留
+     1. 一屏布局的四条硬规矩（高度基准 / 根容器 / 内容区 / 矮屏降级）；
+     2. naive-ui 没有的东西：顶部身份条、标签栏、字段标签、检查项明细、
+        几处状态色（ok / bad / muted）与 .dim 置灰。 */
 
 /* 高度基准（查的是宿主 1.5.48-beta 的 renderer 包，不是猜的）：
    宿主把整页 iframe 挂在一个定高链上：
-   pageSurface（height:100%，padding: calc(--panel-edge-gap / 2)，默认 --space-8 即 4px）
+   pageSurface（height:100%，padding: calc(--panel-edge-gap / 2)）
    → pageStage（height:100%）→ pagePane（position:absolute; inset:0）
    → iframe（display:block; width/height:100%）
    所以 iframe 文档的视口高度就是宿主面板分给它的高度，面板里用 100% 走这条链。
-   刻意不写 100vh：它只在“iframe 定高”这一种挂载下与 100% 等价，一旦宿主换成
-   按内容撑高的挂载位（聊天流 flexible），vh 会指向另一套基准，而 100% 不会。
-   ui/assets/app-ui.css 里没有 html 选择器，没人替我们定 html / body 的高度，
-   这两条必须由面板自己写。 */
+   刻意不用视口单位做高度基准：它只在「iframe 定高」这一种挂载下与 100% 等价，
+   一旦宿主换成按内容撑高的挂载位（聊天流 flexible），视口单位会指向另一套基准，
+   而 100% 不会。ui/assets/app-ui.css 里没有 html 选择器，没人替我们定
+   html / body 的高度，这两条必须由面板自己写。 */
 html, body {
   height: 100%;
   margin: 0;
@@ -21,6 +27,10 @@ html, body {
   font: 400 13px/1.55 var(--font-ui, system-ui, -apple-system, "Microsoft YaHei", sans-serif);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Vue 的挂载层也要跟着定高，否则 .page 的 height:100% 按内容解析，
+   一屏契约整条落空（实测：page 888px / 视口 673px，文档自己滚）。 */
+#panel-app { height: 100%; }
 
 /* 根容器固定一屏：吃满宿主给的高度，自己绝不出滚动条。
    纵向结构 = 顶部条 / 标签栏 / 内容区 / 页脚，只有内容区可以伸缩。 */
@@ -38,14 +48,13 @@ html, body {
 
 /* `hidden` 的 `display: none` 是 UA 样式，优先级最低：只要元素自己有一条
    `display: grid/flex` 就能把它顶掉，于是「隐藏的」东西照样占位。
-   现在页面里确实有用 hidden 控制的块（检查项、错误行、日志正文、peer 提示），
+   页面里确实有用 hidden 控制的块（检查项、错误行、peer 提示），
    一律用这条兜底压住，别再靠「恰好没写 display」维持正确。 */
 .page [hidden] {
   display: none !important;
 }
 
 /* ---------- 顶部身份条 ---------- */
-
 .top {
   flex: none;
   display: flex;
@@ -54,14 +63,7 @@ html, body {
   flex-wrap: wrap;
   padding-bottom: 2px;
 }
-
-.ident {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
+.ident { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .dot {
   flex: none;
   width: 9px;
@@ -73,16 +75,8 @@ html, body {
 }
 .dot.ok { background: #6f8f68; box-shadow: 0 0 0 3px rgba(111, 143, 104, 0.16); }
 .dot.down { background: #c2554b; box-shadow: 0 0 0 3px rgba(194, 85, 75, 0.16); }
-
 .ident-text { min-width: 0; }
-
-.ident-line {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  flex-wrap: wrap;
-}
-
+.ident-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .title {
   margin: 0;
   font-size: 18px;
@@ -90,7 +84,6 @@ html, body {
   letter-spacing: -0.01em;
   line-height: 1.2;
 }
-
 .pill {
   font-size: 11px;
   line-height: 1;
@@ -112,7 +105,6 @@ html, body {
   color: #b8564d;
   opacity: 1;
 }
-
 .sub {
   margin: 3px 0 0;
   font-size: 11.5px;
@@ -120,16 +112,12 @@ html, body {
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
-
-.top-actions {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
-}
+.top-actions { margin-left: auto; display: flex; gap: 8px; }
 
 /* ---------- 标签页 ---------- */
 
-/* 三个中文标签窄屏也放得下一行：等分宽度、绝不换行。 */
+/* 三个中文标签窄屏也放得下一行：等分宽度、绝不换行。
+   不画渐变、不模拟卡片边框（那是 n-card 的活），只留选中态与 focus 环。 */
 .tabs {
   flex: none;
   display: flex;
@@ -138,7 +126,6 @@ html, body {
   min-width: 0;
   border-bottom: 1px solid rgba(128, 128, 128, 0.16);
 }
-
 .tab {
   flex: 1 1 0;
   min-width: 0;
@@ -146,37 +133,22 @@ html, body {
   font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
-  padding: 6px 10px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 9px 9px 0 0;
+  padding: 6px 10px 8px;
+  border: 0;
   background: transparent;
   color: inherit;
   opacity: 0.62;
   cursor: pointer;
-  transition: background 0.15s, opacity 0.15s, border-color 0.15s;
+  transition: opacity 0.15s;
 }
-
-.tab:hover {
-  background: rgba(128, 128, 128, 0.08);
-  opacity: 0.85;
-}
-
-.tab[aria-selected="true"] {
-  opacity: 1;
-  border-color: rgba(128, 128, 128, 0.24);
-  background: rgba(128, 128, 128, 0.06);
-}
-
-.tab:focus-visible {
-  outline: 2px solid rgba(128, 128, 128, 0.45);
-  outline-offset: -2px;
-}
+.tab:hover { opacity: 0.85; }
+.tab[aria-selected="true"] { opacity: 1; font-weight: 600; }
+.tab:focus-visible { outline: 2px solid rgba(128, 128, 128, 0.45); outline-offset: -2px; }
 
 /* 三页内容各自成组；隐藏仍由 .page [hidden] 兜底。
    内容区吃满剩余高度（flex:1 + min-height:0）。少了 min-height:0，子元素
    的内容高度会把 flex 项顶回去，整页跟着长——这是这类布局最主要的破版点。
-   溢出优先让日志 / 名单自己滚（见 .logs、.peer-list）；两者都压到极限仍放
+   溢出优先让日志 / 名单自己滚（见 .log、.peer-scroll）；两者都压到极限仍放
    不下时，退一步由内容区自己滚，而不是裁掉卡片底部，也不把滚动交回整页。 */
 .tab-panel {
   flex: 1 1 auto;
@@ -188,222 +160,69 @@ html, body {
   overflow-y: auto;
 }
 
-.btn {
-  font: inherit;
-  font-size: 12px;
-  padding: 6px 13px;
-  border-radius: 9px;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  background: rgba(128, 128, 128, 0.07);
-  color: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, border-color 0.15s;
-}
-.btn:hover { background: rgba(128, 128, 128, 0.15); }
-.btn:active { transform: translateY(0.5px); }
-.btn:disabled { opacity: 0.45; cursor: default; }
-.btn.ghost { border-color: transparent; background: transparent; }
-.btn.ghost:hover { background: rgba(128, 128, 128, 0.1); }
-.btn.sm { font-size: 11.5px; padding: 4px 10px; }
+/* ---------- 置灰：总闸关着时三页的能力块一起变淡 ---------- */
+.dim { opacity: 0.45; }
 
 /* ---------- 总闸 ---------- */
 
-.master {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
-  background:
-    linear-gradient(180deg, rgba(111, 143, 104, 0.08), rgba(128, 128, 128, 0.02));
-  transition: background 0.2s, border-color 0.2s;
-}
-.master[data-off="true"] {
-  background: rgba(128, 128, 128, 0.035);
-  border-color: rgba(128, 128, 128, 0.18);
-}
-
-/* 标题、说明、开关排在同一行：总闸是个是非题，不该占两行高度。
-   窄到放不下时才让说明整段落到第二行。 */
-.master-copy {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 2px 8px;
-  min-width: 0;
-}
-
-.master-title {
-  margin: 0;
-  flex: none;
-  font-size: 14.5px;
-  font-weight: 620;
-  line-height: 1.2;
-}
-
-.master-hint {
-  margin: 0;
-  min-width: 0;
-  font-size: 12px;
-  opacity: 0.62;
-  line-height: 1.4;
-}
+/* 卡片壳交给 n-card：这里只把「关着」这一档换成灰底，别的一律不动。
+   data-off 仍在根节点上（MasterCard.vue），所以这条选择器照旧成立。 */
+.master[data-off="true"] { background: rgba(128, 128, 128, 0.035); }
+.master[data-off="true"] .n-card-header__main { opacity: 0.6; }
+.master-hint { margin: 0; min-width: 0; font-size: 12px; opacity: 0.62; line-height: 1.4; }
 .master-hint.warn { color: #b8564d; opacity: 0.95; }
 
-/* ---------- 开关本体 ---------- */
+/* ---------- 字段：标签 / 控件 / 小字 ---------- */
 
-.switch {
-  flex: none;
-  margin-left: auto;
-  position: relative;
-  width: 46px;
-  height: 26px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.32);
-  background: rgba(128, 128, 128, 0.16);
-  cursor: pointer;
-  transition: background 0.18s, border-color 0.18s, opacity 0.18s;
-}
-.switch .knob {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #f6f6f6;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  transition: transform 0.18s cubic-bezier(0.3, 0.7, 0.3, 1);
-}
-.switch[aria-checked="true"] {
-  background: #6f8f68;
-  border-color: #6f8f68;
-}
-.switch[aria-checked="true"] .knob { transform: translateX(20px); }
-.switch:disabled { opacity: 0.4; cursor: default; }
+/* 控件本体交给 naive-ui（size="small"），这里只管栅格里的尺寸与标签。
+   两格并排交给 n-grid，不再需要手写的成对栅格规则。 */
+.field { display: grid; gap: 4px; margin-bottom: 8px; }
+.field:last-child { margin-bottom: 0; }
+.field label,
+.field .label { font-size: 11.5px; line-height: 1.35; opacity: 0.62; }
+.field .n-select,
+.field .n-input,
+.field .n-input-number { width: 100%; min-width: 0; }
+.field-hint { font-size: 10.5px; line-height: 1.4; opacity: 0.45; }
 
-.switch.sm { width: 40px; height: 23px; }
-.switch.sm .knob { width: 15px; height: 15px; }
-.switch.sm[aria-checked="true"] .knob { transform: translateX(17px); }
-
-/* ---------- 前置：探针与打分服务，同一张卡 ---------- */
-
-/* 从总闸到下面那些能力之间的曼哈顿地带。不再用网格容器：
-   探针一行、服务两栅，各自管自己。 */
-.prelude {
-  display: grid;
-  gap: 8px;
-}
-.prelude .card-title {
-  margin: 0;
-}
-
+/* ---------- 前置：探针一行 + 打分服务 ---------- */
 .toggle {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid rgba(128, 128, 128, 0.2);
   background: rgba(128, 128, 128, 0.025);
   min-width: 0;
-  transition: opacity 0.2s, border-color 0.2s;
 }
-.toggle.dim { opacity: 0.45; }
+.toggle > .n-switch { margin-left: auto; }
+.toggle-copy { display: grid; gap: 1px; min-width: 0; }
+.toggle-copy b { font-size: 12.5px; font-weight: 600; }
+.toggle-copy span { font-size: 11px; opacity: 0.55; line-height: 1.35; }
 
-.toggle-copy {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-.toggle-copy b {
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.toggle-copy span {
-  font-size: 11px;
-  opacity: 0.55;
-  line-height: 1.35;
-}
+.services { display: grid; gap: 6px; min-width: 0; }
+.services-title { font-size: 12px; font-weight: 600; }
+.service-list { display: grid; gap: 6px; min-width: 0; }
 
-/* ---------- 技能路由：与记忆召回平级的一块 ---------- */
-
-.skill-route {
-  display: grid;
-  gap: 6px;
-}
-.skill-route.dim { opacity: 0.45; }
-.skill-route-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.skill-route-head .card-title { margin: 0; }
-.skill-route-hint {
-  margin: 0;
-  font-size: 11px;
-  opacity: 0.55;
-  line-height: 1.35;
-}
-
-/* ---------- 打分服务（通道引用的端点） ---------- */
-
-/* 前置卡里面的一块：先声明「有哪些打分服务」，下面的精排通道只选类型。
-   一行一个服务：左侧固定宽度服务名，后面四格控件按比例分；
-   行由脚本按描述表渲染，列表太长时只让这一块内部滚，不把整页顶长。 */
-.services {
-  display: grid;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 12px;
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  background: rgba(128, 128, 128, 0.025);
-  transition: opacity 0.2s;
-  min-width: 0;
-}
-.services.dim { opacity: 0.45; }
-.services .card-title { margin: 0; }
-.services-title {
-  font-size: 12px;
-  font-weight: 600;
-}
-.service-list {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  max-height: 220px;
-  overflow-y: auto;
-}
-/* 一行服务：服务名 + 地址 + 模型 + 超时 + 测试。
-   服务名统一右对齐，宽度固定，换类型时左边不会跟着抖。 */
-.service-row {
-  display: grid;
-  grid-template-columns: 3.2em minmax(0, 1.4fr) minmax(0, 1fr) minmax(58px, 0.62fr) auto;
-  align-items: end;
-  gap: 0 6px;
-  min-width: 0;
-}
+/* 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 测试）。
+   服务名统一右对齐并贴底，换类型时左边不会跟着抖；
+   测试按钮也贴底，跟四个输入框的下沿对齐。 */
 .service-name {
-  font-size: 12px;
-  font-weight: 600;
-  text-align: right;
-  padding-bottom: 7px;
-}
-.service-row .field { margin-bottom: 0; }
-/* 超时那一格只放三四个数字，不跟地址抢宽度。 */
-.service-row .field.narrow input { min-width: 0; }
-.service-row .field.service-test {
   display: flex;
   align-items: flex-end;
+  justify-content: flex-end;
+  height: 100%;
+  padding-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
 }
-/* 测试结果行常驻第二行（grid-column 从控件第一格开始）。空着也占一行高度，
-   结果出现 / 消失时不会把行高撑起来，整页就不会抖。三档颜色只表达状态。 */
+.service .field { margin-bottom: 0; }
+.service .field.service-test { display: flex; align-items: flex-end; height: 100%; }
+
+/* 测试结果行常驻：空着也占一行高度，结果出现 / 消失时不会把行高撑起来，
+   整页就不会抖。三档颜色只表达状态。 */
 .service-result {
-  grid-column: 2 / -1;
   margin: 0;
   min-height: 15px;
   font-size: 10.5px;
@@ -413,345 +232,19 @@ html, body {
 .service-result.ok { color: #5d7d56; }
 .service-result.bad { color: #b8564d; }
 .service-result.muted { color: currentColor; opacity: 0.45; }
+
 /* 列表下方唯一一段总说明；每行不再各带一句。 */
-.services-note {
-  margin: 0;
-  font-size: 10.5px;
-  line-height: 1.4;
-  opacity: 0.55;
-}
-@media (max-width: 760px) {
-  /* 窄屏下控件拆两行：地址 + 模型一行，超时 + 测试一行。 */
-  .service-row {
-    grid-template-columns: 3.2em minmax(0, 1fr) minmax(0, 1fr);
-    row-gap: 6px;
-  }
-  .service-row .field.narrow { grid-column: 2; }
-  .service-row .field.service-test { grid-column: 3; }
-  .service-result { grid-column: 2 / -1; }
-}
+.services-note { margin: 0; font-size: 10.5px; line-height: 1.4; opacity: 0.55; }
 
-/* ---------- 通道的整对回退说明 ---------- */
-.channel-pair-note {
-  font-size: 10.5px;
-  line-height: 1.4;
-  opacity: 0.55;
-  margin: 0;
-}
-
-/* ---------- 召回管理（下拉 + peer 名单） ---------- */
-
-/* 召回的前两层跟上面两个开关一样是按整台机器算的、改了就生效，
-   所以跟 peer 名单合成一栏：上面两个下拉并排，下面名单占满整行宽度。
-   不做折叠也没有保存按钮。 */
-/* 召回管理是记忆页里唯一吃满剩余高度的一块：下拉与展开区按内容定高，
-   剩下的全部给 peer 名单，名单在栏内自己滚。 */
-.recall {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  /* 判断 / 重排都展开、通道又多时，栏内内容会远超卡片：让卡片自己滚，
-     而不是把「添加通道」和名单裁掉。名单在空间够时仍吃满并自己滚。 */
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-
-.recall-head {
-  flex: none;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.recall-head .card-title {
-  margin: 0;
-}
-.peer-count {
-  font-size: 10.5px;
-  opacity: 0.45;
-  font-variant-numeric: tabular-nums;
-}
-
-.recall-grid {
-  flex: none;
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 10px;
-  min-width: 0;
-  transition: opacity 0.2s;
-}
-.recall-grid.dim { opacity: 0.45; }
-.recall-grid .field { margin-bottom: 0; }
-@media (max-width: 760px) {
-  .recall-grid { grid-template-columns: 1fr; }
-}
-
-/* llm 判断 / 重排的展开区：提示词 + 模型。默认 hidden，由脚本切换。 */
-.gate-advanced {
-  flex: none;
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(128, 128, 128, 0.14);
-  transition: opacity 0.2s;
-}
-.gate-advanced.dim { opacity: 0.45; }
-.gate-advanced .field { margin-bottom: 0; }
-
-/* 提示词那一行：标签、状态、恢复默认按钮排在一起，状态占剩余宽度。
-   状态字不抢眼，但清空时要能看见“不会拦截”的提醒。 */
-.prompt-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.prompt-head label { margin: 0; }
-.prompt-status {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  opacity: 0.55;
-  text-align: right;
-}
-.prompt-head .btn { flex: none; }
-
-/* 多路精排通道：每行一张小卡，字段用可换行的栅格，窄屏不会横向溢出。
-   通道多时列表自己滚，不把整栏顶高。 */
-.channel-list {
-  display: grid;
-  gap: 8px;
-  max-height: 220px;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-.channel-row {
-  display: grid;
-  gap: 7px;
-  padding: 9px 10px;
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  border-radius: 10px;
-  background: rgba(128, 128, 128, 0.035);
-}
-/* 服务被清空、这条通道运行时不会生效：留着数据，只标红提醒。 */
-.channel-row.warn {
-  border-color: rgba(194, 85, 75, 0.55);
-}
-.channel-unavailable {
-  font-size: 11px;
-  color: #b8564d;
-}
-.channel-row-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.channel-row-head b {
-  font-size: 12px;
-  font-weight: 600;
-}
-.channel-row-head .btn { margin-left: auto; }
-.channel-enabled {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  opacity: 0.7;
-}
-.channel-enabled input { width: auto; }
-.channel-cells {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 6px 8px;
-}
-.channel-cell {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-.channel-cell > span {
-  font-size: 10.5px;
-  opacity: 0.5;
-}
-.channel-cell input,
-.channel-cell select {
-  font: inherit;
-  font-size: 12px;
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  padding: 5px 7px;
-  border-radius: 7px;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  background: rgba(128, 128, 128, 0.05);
-  color: inherit;
-}
-.channel-cell select { cursor: pointer; }
-.channel-cell input::placeholder { color: currentColor; opacity: 0.35; }
-.channel-cell input:focus,
-.channel-cell select:focus {
-  outline: none;
-  border-color: rgba(111, 143, 104, 0.7);
-  box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);
-}
-.channel-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  justify-content: flex-end;
-}
-.channel-actions .field-hint {
-  margin-right: auto;
-}
-.channel-result {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: 9px;
-  background: rgba(128, 128, 128, 0.07);
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow: auto;
-  max-height: 180px;
-}
-
-/* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」，
-   层次靠这条线分开，不另起一栏。 */
-.recall-sep {
-  flex: none;
-  height: 1px;
-  margin: 10px 0 8px;
-  background: rgba(128, 128, 128, 0.16);
-}
-
-.scoped-note {
-  flex: none;
-  margin: 0 2px;
-  font-size: 11.5px;
-  line-height: 1.5;
-  opacity: 0.5;
-}
-.scoped-note b {
-  font-weight: 600;
-  opacity: 0.9;
-}
-
-/* ---------- 两栏 ---------- */
-
-.cols {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-@media (max-width: 760px) {
-  .cols { grid-template-columns: 1fr; }
-}
-
-.card {
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  border-radius: 12px;
-  padding: 8px 10px 10px;
-  background: rgba(128, 128, 128, 0.025);
-  min-width: 0;
-}
-
-.card-title {
-  margin: 0 0 6px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  opacity: 0.5;
-}
-
-.field {
-  display: grid;
-  gap: 4px;
-  margin-bottom: 8px;
-}
-.field:last-child { margin-bottom: 0; }
-
-.field label,
-.field .label {
-  font-size: 11.5px;
-  line-height: 1.35;
-  opacity: 0.62;
-}
-
-.field input,
-.field select {
-  font: inherit;
-  font-size: 12.5px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 4px 9px;
-  border-radius: 9px;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  background: rgba(128, 128, 128, 0.05);
-  color: inherit;
-  min-width: 0;
-}
-.field select { cursor: pointer; }
-.field input::placeholder { color: currentColor; opacity: 0.35; }
-.field textarea {
-  font: inherit;
-  font-size: 12.5px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 10px;
-  border-radius: 9px;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  background: rgba(128, 128, 128, 0.05);
-  color: inherit;
-  min-width: 0;
-  min-height: 68px;
-  line-height: 1.5;
-  resize: vertical;
-}
-.field textarea::placeholder { color: currentColor; opacity: 0.35; }
-.field-hint {
-  font-size: 10.5px;
-  line-height: 1.4;
-  opacity: 0.45;
-}
-.field input:focus,
-.field select:focus {
-  outline: none;
-  border-color: rgba(111, 143, 104, 0.7);
-  box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);
-}
-.field textarea:focus {
-  outline: none;
-  border-color: rgba(111, 143, 104, 0.7);
-  box-shadow: 0 0 0 2px rgba(111, 143, 104, 0.14);
-}
-
-.field.pair {
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 10px;
-  margin-top: 8px;
-}
-.field.pair input { grid-row: 2; }
-
+/* ---------- 中枢 / 身份：事实行 + 服务端检查项 ---------- */
+/* 列交给 NGrid（cols="1 520:3"），这里只留分隔线与上下留白。 */
 .facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
   margin: 6px 0 2px;
   padding-top: 6px;
   border-top: 1px solid rgba(128, 128, 128, 0.16);
 }
-.fact {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-.fact.wide { grid-column: 1 / -1; }
-.fact span {
-  font-size: 10.5px;
-  opacity: 0.5;
-}
+.fact { display: grid; gap: 1px; min-width: 0; }
+.fact span { font-size: 10.5px; opacity: 0.5; }
 .fact b {
   font-size: 12.5px;
   font-weight: 560;
@@ -759,69 +252,18 @@ html, body {
   overflow-wrap: anywhere;
 }
 
-.seg {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 9px;
-  border: 1px solid rgba(128, 128, 128, 0.26);
-  background: rgba(128, 128, 128, 0.05);
-  width: fit-content;
-}
-.seg button {
-  font: inherit;
-  font-size: 11.5px;
-  padding: 4px 11px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: inherit;
-  opacity: 0.6;
-  cursor: pointer;
-}
-.seg button[aria-pressed="true"] {
-  background: rgba(128, 128, 128, 0.16);
-  opacity: 1;
-}
-
-/* ---------- 服务端检查项 ---------- */
-
-.checks-block {
-  margin-top: 8px;
-}
+.checks-block { margin-top: 8px; }
 
 /* 摘要就一行。全绿时就是一句静态文字：没有箭头、不可点、没有按钮语义。
-   展开只能把「就绪」再念叨五遍，可点而无所得，索性不做。
    有问题时这一行只说比例，项名交给下面的问题列表。
    颜色只看整体档位：全绿 = 绿，只是没配 = 灰，有红项 = 红。 */
-.checks-summary {
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: inherit;
-  opacity: 0.72;
-}
-.checks-summary.ok {
-  color: #5d7d56;
-  opacity: 1;
-}
-.checks-summary.muted {
-  color: inherit;
-  opacity: 0.72;
-}
-.checks-summary.bad {
-  color: #b8564d;
-  opacity: 1;
-}
+.checks-summary { font-size: 11.5px; line-height: 1.5; color: inherit; opacity: 0.72; }
+.checks-summary.ok { color: #5d7d56; opacity: 1; }
+.checks-summary.muted { color: inherit; opacity: 0.72; }
+.checks-summary.bad { color: #b8564d; opacity: 1; }
 
-/* 明细只有问题项，竖向一行一项，读作「名字 · 状态词」。
-   正常的项永远不进来，所以不需要 ok 档的样式。
-   档位仍由 check-tone.js 的 statusTone 决定。 */
-.checks {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: grid;
-  gap: 1px;
-}
+/* 明细只有问题项，竖向一行一项，读作「名字 · 状态词」。 */
+.checks { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 1px; }
 .checks li {
   display: flex;
   align-items: baseline;
@@ -839,68 +281,140 @@ html, body {
   white-space: nowrap;
 }
 /* 分隔点紧跟名字，状态词不再甩到行尾：一行最后只剩一两个词，
-   左右分栏会让人以为在读数表。
-   这里刻意不设 opacity：父项 li 已经有半透了，再叠一层会把词压到看不见。 */
-.checks li .check-status {
-  flex: none;
-  white-space: nowrap;
+   左右分栏会让人以为在读数表。这里刻意不设 opacity（父项 li 已经半透了）。 */
+.checks li .check-status { flex: none; white-space: nowrap; }
+.checks li .check-status::before { content: "· "; }
+.checks li.bad { color: #b8564d; }
+.checks li.muted { color: inherit; opacity: 0.6; }
+
+.err { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; color: #b8564d; overflow-wrap: anywhere; }
+.save-hint { margin: 6px 0 0; font-size: 11px; opacity: 0.5; min-height: 14px; }
+.save-hint.ok { color: #5d7d56; opacity: 0.9; }
+.save-hint.bad { color: #b8564d; opacity: 0.9; }
+
+/* ---------- 召回管理（记忆页） ---------- */
+
+/* 召回管理是记忆页里唯一吃满剩余高度的一块：下拉与展开区按内容定高，
+   剩下的全部给 peer 名单，名单在自己的 NScrollbar 里滚。
+   n-card 的正文要跟着做 flex 列，否则名单拿不到「剩下的高度」这个确定值。 */
+.recall {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
-.checks li .check-status::before {
-  content: "· ";
+.recall > .n-card-header { flex: none; }
+.recall > .n-card-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.recall > .n-card-content > * { flex: none; }
+
+.peer-count { font-size: 10.5px; opacity: 0.45; font-variant-numeric: tabular-nums; }
+
+/* llm 判断 / 重排的展开区：默认 hidden，由 state.form 的值切换。
+   上边一条细线把它和主下拉分开。 */
+.gate-advanced {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(128, 128, 128, 0.14);
+  min-width: 0;
 }
-.checks li.bad {
-  color: #b8564d;
+.gate-advanced .field { margin-bottom: 0; }
+
+/* 提示词那一行：标签、状态、恢复默认按钮排在一起，状态占剩余宽度。 */
+.prompt-head { display: flex; align-items: center; gap: 10px; }
+.prompt-head label { margin: 0; }
+.prompt-status { flex: 1; min-width: 0; font-size: 11px; opacity: 0.55; text-align: right; }
+.prompt-head .n-button { flex: none; }
+
+/* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」。 */
+.recall-sep { flex: none; height: 1px; margin: 10px 0 8px; background: rgba(128, 128, 128, 0.16); }
+
+/* ---------- 精排通道 ---------- */
+.channel-field { min-width: 0; }
+
+/* 通道列表条目多时区内滚（NScrollbar），不把「添加通道」和名单顶出屏幕。
+   naive-ui 的滚动容器 height:100%，父级高度是 auto，所以上限要落在
+   .n-scrollbar-container 上：父级 auto + max-height 一定得到可滚动的定高盒。 */
+.channel-scroll .n-scrollbar-container { max-height: 220px; }
+.channel-stack { display: grid; gap: 8px; padding-right: 2px; }
+
+/* 服务被清空、这条通道运行时不会生效：留着数据，只标红提醒。 */
+.channel-card.warn { border-color: rgba(194, 85, 75, 0.55); }
+.channel-head-extra { display: flex; align-items: center; gap: 8px; }
+.channel-enabled.n-checkbox,
+.channel-enabled.n-checkbox .n-checkbox__label { font-size: 11px; }
+.channel-unavailable { font-size: 11px; color: #b8564d; }
+
+.channel-cell { display: grid; gap: 3px; min-width: 0; }
+.channel-cell > span { font-size: 10.5px; opacity: 0.5; }
+.channel-cell .n-select,
+.channel-cell .n-input,
+.channel-cell .n-input-number { width: 100%; min-width: 0; }
+
+.channel-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+.channel-actions .field-hint { margin-right: auto; }
+
+.channel-result {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.07);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 180px;
 }
-/* not_configured / not_supported / disabled：没配有 / 不支持 / 关着，中性灰，不刺眼。
-   档位由 assets/check-tone.js 的 statusTone 决定。 */
-.checks li.muted {
-  color: inherit;
-  opacity: 0.6;
-}
+
+/* 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 */
+.channel-pair-note { font-size: 10.5px; line-height: 1.4; opacity: 0.55; margin: 4px 0 0; }
 
 /* ---------- peer 名单（召回管理栏内） ---------- */
 
-/* 名单吃满召回管理剩余的高度：条目少时不拉伸，条目多了在栏内自己滚。
-   不再用固定 max-height——高度由上面几个下拉和展开区剩多少决定。 */
+/* 名单吃满召回管理剩余的高度：条目少时不拉伸，条目多了在 NScrollbar 里自己滚。
+   n-list 自带白底（亮色主题），这里必须让它透明，否则会在卡片里贴一块白。 */
 .peer-list {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
-  display: grid;
-  gap: 6px;
-  overflow-y: auto;
+  min-height: 17px;
   font-size: 10.5px;
   line-height: 1.5;
-  min-height: 17px;
-  padding-right: 2px;
 }
-.peer-list.empty {
-  opacity: 0.45;
-}
+.recall > .n-card-content > .peer-list { flex: 1 1 auto; }
+.peer-list.empty { opacity: 0.45; }
+.peer-empty { margin: 0; }
+.peer-scroll .n-list { background: transparent; }
 
-/* 行框颜色 = 是否参与召回：绿框参与，灰框排除。 */
-.peer-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: 9px;
-  border: 1px solid rgba(111, 143, 104, 0.5);
-  background: rgba(128, 128, 128, 0.03);
-  min-width: 0;
+/* 一行 peer：点与名字在正文里，meta 在 suffix 里。
+   naive-ui 的 list-item 默认 padding 12px 0，这里压回一行小字的高度。 */
+.peer-list .peer-item {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
   transition: background 0.15s, border-color 0.15s;
 }
-.peer-row.excluded {
-  border-color: rgba(128, 128, 128, 0.28);
-}
-.peer-row.tappable {
-  cursor: pointer;
-}
-.peer-row.tappable:hover,
-.peer-row.tappable:focus-visible {
-  background: rgba(128, 128, 128, 0.1);
-  outline: none;
-}
+.peer-item.tappable { cursor: pointer; }
+/* 本机不可点：别给一个看着能点的光标。 */
+.peer-item:not(.tappable) { cursor: default; }
+.peer-item.tappable:hover,
+.peer-item.tappable:focus-visible { background: rgba(128, 128, 128, 0.1); outline: none; }
+.peer-item .n-list-item__main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.peer-item .n-list-item__suffix { margin-left: 8px; }
 
-/* 名字颜色 = 归属：本机正常前景色，非本机灰。 */
+/* 前置圆点 = 是否参与召回：实心 = 参与，空心 = 排除。 */
+.peer-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid #6f8f68;
+  background: #6f8f68;
+}
+.peer-dot.off { background: transparent; border-color: rgba(128, 128, 128, 0.55); }
+
+/* 名字用等宽字体：本机正常前景色，外机灰。 */
 .peer-name {
   font: 12px/1.4 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   color: currentColor;
@@ -909,177 +423,100 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.peer-row:not(.self) .peer-name {
-  color: rgba(128, 128, 128, 0.55);
-}
+.peer-item.other .peer-name { color: rgba(128, 128, 128, 0.55); }
+.peer-self-tag { flex: none; }
+.peer-meta { white-space: nowrap; }
 
-.peer-meta {
-  flex: none;
-  margin-left: auto;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 被排除的行整体降透明度（框本身保持灰框的色阶）。
-   这是唯一的压暗层：.peer-meta 自己不再叠 opacity，否则两层相乘 ≈ 0.36。 */
-.peer-row.excluded > * {
-  opacity: 0.6;
-}
-
-.err {
-  margin: 8px 0 0;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: #b8564d;
-  overflow-wrap: anywhere;
-}
-
-.save-hint {
-  margin: 6px 0 0;
-  font-size: 11px;
-  opacity: 0.5;
-  min-height: 14px;
-}
-.save-hint.ok { color: #5d7d56; opacity: 0.9; }
-.save-hint.bad { color: #b8564d; opacity: 0.9; }
+/* 被排除的行整体降透明度（点已经是空心，这里只再压一层名字与 meta）。 */
+.peer-item.excluded .peer-name,
+.peer-item.excluded .peer-meta { opacity: 0.6; }
 
 /* ---------- 日志 ---------- */
 
-/* 日志卡是全局页里唯一可以让步的一块：空间够时日志框 120px，不够时整张卡
-   先变矮、日志框跟着缩并自己滚，而不去顶高整页。卡的下限是标题行 + 日志框
-   最小高度 + 内边距 ≈ 124px：既不写 min-height: 0（那会缩成一条线、把日志
-   框裁掉），也不靠自动最小尺寸（日志框的 height:120px 会算进去，卡就不肯缩）。 */
-.logs {
-  flex: 0 1 auto;
-  min-height: 124px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.logs-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.logs-head .card-title { margin: 0; }
-
+/* 日志卡是全局页里唯一可以让步的一块：默认折叠，展开后日志框 120px，
+   不够时压到 64px 并在 NScrollbar 里自己滚。 */
+.logs { flex: none; }
 .chips {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
   min-width: 0;
+  justify-content: flex-end;
 }
 .chips span {
   font-size: 10.5px;
-  padding: 3px 8px;
+  padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid rgba(128, 128, 128, 0.24);
   opacity: 0.8;
   white-space: nowrap;
 }
 
-.logs-head .btn { margin-left: auto; }
-
+/* 日志区用 n-scrollbar 在框内滚。根节点给确定高度，文字样式落在内层 pre 上，
+   以免 padding 被算到滚动容器里。 */
 .log {
-  flex: 0 1 auto;
-  margin: 0;
   box-sizing: border-box;
   height: 120px;
-  /* 被挤压时保留约四行的可读高度；再不够就由内容区滚，不让日志变成一条线。 */
   min-height: 64px;
-  overflow: auto;
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 8px;
+}
+/* naive-ui 的 .n-scrollbar 自己也写了 height: 100%，同权重下谁后注入谁赢。
+   这里用一条更高权重的规则把 120px 钉死，免得滚动区被内容撑开。 */
+.logs .log {
+  height: 120px;
+  min-height: 64px;
+}
+.log-body {
+  margin: 0;
+  padding: 11px 13px;
   font: 11px/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   opacity: 0.82;
-  background: rgba(128, 128, 128, 0.06);
-  border-radius: 10px;
-  padding: 11px 13px;
 }
 
-/* 全局页：总闸 / 前置 / 两栏都按内容定高，只有日志卡可以让步（见 .logs）。 */
-#panel-global > .master,
-#panel-global > .prelude,
-#panel-global > .cols {
-  flex: 0 0 auto;
-}
+/* ---------- 技能页 ---------- */
 
 /* 技能页只有一个开关：顶部对齐，不为了填满视野而拉伸。
-   卡片本体是 Vue 挂进来的，所以拉伸约束落在挂载点上，卡片自己的 flex 不再生效。 */
-#panel-skill > #skill-route-app {
-  flex: 0 0 auto;
-}
-/* 说明行在出错时短暂变红，和手写面板的 .save-hint.bad 同一档颜色。 */
-.skill-route-hint.bad {
-  color: #c2554b;
-  opacity: 0.9;
-}
+   卡片本体是 Vue 挂进来的，所以拉伸约束落在挂载点上。 */
+#panel-skill > #skill-route-app { flex: 0 0 auto; }
+.skill-route-hint { margin: 0; font-size: 11px; opacity: 0.55; line-height: 1.35; }
+/* 说明行在出错时短暂变红，和 .save-hint.bad 同一档颜色。 */
+.skill-route-hint.bad { color: #c2554b; opacity: 0.9; }
 
-.foot {
-  flex: none;
-  font-size: 11px;
-  opacity: 0.45;
-  text-align: center;
-  padding-top: 0;
-}
+/* ---------- 记忆页顶部按会话说明 ---------- */
+.scoped-note { flex: none; margin: 0 2px; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
+.scoped-note b { font-weight: 600; opacity: 0.9; }
+
+/* ---------- 全局页：只有日志可以让步 ---------- */
+#panel-global > .master,
+#panel-global > .prelude,
+#panel-global > .cols { flex: 0 0 auto; }
+
+.foot { flex: none; font-size: 11px; opacity: 0.45; text-align: center; padding-top: 0; }
 
 /* ---------- 矮屏降级 ---------- */
 
 /* 视口高度不足 640px 时允许整页滚动。这是有意为之：在这个高度下
    继续压一屏会把标签栏、输入框和日志挤成一条线，控件反而不可用。
-   常规高度下这条不生效，根容器始终是 overflow: hidden 的一屏。 */
+   常规高度下这条不生效，根容器始终是 overflow: hidden 的一屏。
+   两个区内滚动点跟着退回「固定上限 + 自己滚」，因为此时父级已经没有确定高度。 */
 @media (max-height: 640px) {
   html,
-  body {
-    height: auto;
-    overflow: visible;
-  }
-
-  .page {
-    height: auto;
-    overflow: visible;
-  }
-
-  .tab-panel {
-    flex: 0 0 auto;
-    overflow: visible;
-  }
-
-  .logs,
-  .peer-list {
-    flex: 0 0 auto;
-  }
-
-  .logs {
-    min-height: 0;
-  }
-
-  .log {
-    height: 120px;
-    min-height: 120px;
-  }
-
-  .peer-list {
-    max-height: 296px;
-    overflow-y: auto;
-  }
-
-  .channel-list {
-    max-height: 220px;
-    overflow-y: auto;
-  }
+  body { height: auto; overflow: visible; }
+  #panel-app { height: auto; }
+  .page { height: auto; overflow: visible; }
+  .tab-panel { flex: 0 0 auto; overflow: visible; }
+  .recall,
+  .recall > .n-card-content { flex: 0 0 auto; min-height: 0; overflow: visible; }
+  .peer-list,
+  .recall > .n-card-content > .peer-list { flex: 0 0 auto; }
+  .peer-scroll .n-scrollbar-container { max-height: 296px; }
+  .channel-scroll .n-scrollbar-container { max-height: 220px; }
 }
 
-/* ---------- Vue 版补丁：naive-ui 的开关 ---------- */
-
-/* 总闸与探针用 n-switch 画（naive-ui 的亮色默认 + theme.js 的品牌色）。
-   它不认 .switch 的 width / margin-left:auto，这两条把它摆回原来的位置：
-   总闸那一行靠右，探针那一行也靠右，行高仍由 .master / .toggle 的 padding 决定。 */
-.master > .n-switch,
-.toggle > .n-switch {
-  flex: none;
-  margin-left: auto;
+/* ---------- 窄屏：chips 让一步 ---------- */
+@media (max-width: 520px) {
+  .chips { justify-content: flex-start; }
 }

@@ -1044,13 +1044,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ].every((name) => fs.existsSync(path.join(import.meta.dirname, "../ui/assets", name))),
   );
 
-  // ---- 哪一块在哪个组件里 ----
+  // ---- 哪一块在哪个组件里（卡片都是 n-card，所以认 id / title / class） ----
   for (const needle of [
     'id="masterCard"',
     'id="prelude"',
     'id="scoringServices"',
     'class="cols"',
-    'class="card logs"',
+    'class="logs"',
   ]) {
     check(
       `全局页（组件）包含 ${needle}`,
@@ -1060,10 +1060,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   }
   for (const needle of [
     'class="scoped-note"',
-    'class="card recall"',
-    'id="recallGate"',
-    'id="queryMode"',
-    'id="rerank"',
+    'class="recall"',
+    "id: 'recallGate'",
+    "id: 'queryMode'",
+    "id: 'rerank'",
     'id="peerList"',
   ]) {
     check(
@@ -1072,7 +1072,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       needle,
     );
   }
-  for (const needle of ["recallGate", "peerList", "skillRouting", 'class="card recall"']) {
+  for (const needle of ["recallGate", "peerList", "skillRouting", 'class="recall"']) {
     check(`全局页（组件）不包含 ${needle}`, globalSources.every((src) => src.includes(needle) === false), needle);
   }
   check("记忆页（组件）不包含总闸", memorySources.every((src) => src.includes('id="masterCard"') === false));
@@ -1113,32 +1113,68 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("三页都在根组件里挂载（不是切页才创建）",
     ["<GlobalPanel", "<MemoryPanel", "<SkillPanel"].every((needle) => app.includes(needle)));
 
-  // ---- 中枢 / 身份两栏 ----
-  check("HubIdentity 是两栏", hub.includes('<section class="cols">'));
-  eq("两栏里恰好两张卡", (hub.match(/<article class="card">/g) || []).length, 2);
-  check("两栏标题是「中枢」「身份」", hub.includes(">中枢<") && hub.includes(">身份<"));
+  // ---- 中枢 / 身份两栏：NGrid 两列 > 两张 NCard ----
+  check(
+    "HubIdentity 是两栏 NGrid（1 700:2，跟旧 760px 断点对齐）",
+    /<NGrid class="cols" cols="1 700:2" responsive="screen"/.test(hub),
+    hub.slice(0, 200),
+  );
+  check("两栏栅格用 screen 断点（不是 self，避免首帧单列闪烁）",
+    /<NGrid class="cols"[^>]*responsive="screen"/.test(hub));
+  eq("两栏里恰好两张卡", (hub.match(/<NCard\b/g) || []).length, 2);
+  eq("两栏各自一格 NGridItem", (hub.match(/<NGridItem>/g) || []).length >= 2, true);
+  check("两栏标题是「中枢」「身份」", hub.includes('title="中枢"') && hub.includes('title="身份"'));
   check(
     "中枢在前、身份在后",
-    hub.indexOf(">中枢<") < hub.indexOf(">身份<"),
-    hub.indexOf(">中枢<"),
+    hub.indexOf('title="中枢"') < hub.indexOf('title="身份"'),
+    hub.indexOf('title="中枢"'),
   );
   check(
     "检查项摘要留在中枢卡里（身份卡之前）",
-    hub.indexOf('id="checksSummary"') > hub.indexOf(">中枢<") &&
-      hub.indexOf('id="checksSummary"') < hub.indexOf(">身份<"),
+    hub.indexOf('id="checksSummary"') > hub.indexOf('title="中枢"') &&
+      hub.indexOf('id="checksSummary"') < hub.indexOf('title="身份"'),
   );
   check("中枢卡里没有 peer 列表", hub.includes('id="peerList"') === false);
   check("记忆页的 peer 名单不在两栏里", hub.includes("<PeerList") === false);
   check("报错行与提示位在中枢卡里",
-    hub.indexOf('id="reachError"') > hub.indexOf(">中枢<") &&
+    hub.indexOf('id="reachError"') > hub.indexOf('title="中枢"') &&
       hub.indexOf('id="saveHint"') > hub.indexOf('id="reachError"'));
   check("中枢卡有地址 / key / 三个事实",
-    ['id="serverUrl"', 'id="apiKey"', 'id="latency"', 'id="version"', 'id="transport"'].every(
-      (needle) => hub.includes(needle),
+    ["serverUrl", "apiKey", "latency", "version", "transport"].every((needle) =>
+      hub.includes(`id: '${needle}'`) || hub.includes(`id="${needle}"`),
     ));
   check("身份卡有门牌前缀 / 超时 / 预算",
-    ['id="peerPrefix"', 'id="timeoutMs"', 'id="budgetTokens"'].every((needle) => hub.includes(needle)));
-  check("超时与预算同排一行（field pair）", /class="field pair"/.test(hub));
+    ["peerPrefix", "timeoutMs", "budgetTokens"].every((needle) =>
+      hub.includes(`id: '${needle}'`) || hub.includes(`id="${needle}"`),
+    ));
+  // 超时 / 预算两格交给 NGrid :cols="2"，手写的成对栅格规则已经删掉。
+  check("超时与预算同排一行（NGrid :cols=\"2\"）",
+    /<NGrid :cols="2" :x-gap="10" :y-gap="8">/.test(hub), hub.slice(-900));
+  const pairGridIdx = hub.indexOf('<NGrid :cols="2"');
+  check("两格都在同一个 NGrid 里",
+    ["timeoutMs", "budgetTokens"].every((needle) => hub.indexOf(`id: '${needle}'`) > pairGridIdx));
+  check("手写的成对栅格规则已从 panel.css 删掉",
+    /\.field\.pair\s*\{/.test(css) === false && /\.fact\.wide\s*\{/.test(css) === false);
+
+  // ---- 事实行也交给 n-grid（不写手写三列 / 不再单独给 .facts 做 520px 降级） ----
+  const factsGrid = /<NGrid[^>]*class="facts"[^>]*cols="1 520:3"[^>]*responsive="screen"/.exec(hub)?.[0] ?? "";
+  check("中枢事实行是 NGrid（cols=\"1 520:3\" + screen 断点）",
+    factsGrid !== "", hub.slice(hub.indexOf("facts"), hub.indexOf("facts") + 200));
+  const factsStart = hub.indexOf('class="facts"');
+  const factsBlock = factsStart < 0 ? "" : hub.slice(factsStart, hub.indexOf("</NGrid>", factsStart));
+  eq("事实行三个 NGridItem", (factsBlock.match(/<NGridItem>/g) || []).length, 3);
+  check("事实行仍是往返 / 版本 / 出口（id 与顺序不变）",
+    factsBlock.indexOf('id="latency"') >= 0 &&
+      factsBlock.indexOf('id="latency"') < factsBlock.indexOf('id="version"') &&
+      factsBlock.indexOf('id="version"') < factsBlock.indexOf('id="transport"'),
+    factsBlock);
+  check(".facts 不再写手写栅格列",
+    /grid-template-columns/.test(ruleBody(css, ".facts") || "") === false,
+    ruleBody(css, ".facts") || "");
+  const narrowIdx = css.indexOf("@media (max-width: 520px)");
+  const narrowBody = narrowIdx < 0 ? "" : css.slice(narrowIdx, css.lastIndexOf("}"));
+  check("520px 降级里不再给 .facts 改列",
+    narrowIdx >= 0 && /\.facts\b/.test(narrowBody) === false, narrowBody);
 
   // ---- 摘要行：一行静态文字，不可点 ----
   const summaryStart = hub.indexOf('id="checksSummary"');
@@ -1187,13 +1223,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     prelude.includes('v-for="row in layout.rows"') && prelude.includes("scoringServiceLayout("));
   check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
   check("打分服务有样式", /\n\.services \{/.test(css));
-  check("服务行是竖向一条一条的栅格", /\n\.service-row \{/.test(css));
-  check(
-    "服务行五列：固定宽服务名 + 四个控件列",
-    /\n\.service-row \{[\s\S]{0,260}grid-template-columns:\s*3\.2em[^\n]*1\.4fr[^\n]*1fr[^\n]*0\.62fr[^\n]*auto/.test(css),
-  );
-  check("服务名固定宽度且右对齐", /\n\.service-name \{[\s\S]{0,120}text-align:\s*right/.test(css));
-  check("结果行独占第二行", /\.service-result \{[\s\S]{0,120}grid-column:\s*2 \/ -1/.test(css));
+  // 服务行改成一条一条的 NGrid：五格（服务名 / 地址 / 模型 / 超时 / 测试），
+  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。
+  check("服务行是一条 NGrid（cols 1 700:5）",
+    /<NGrid cols="1 700:5" responsive="screen"/.test(prelude), prelude.slice(0, 400));
+  check("服务行有五行 NGridItem（服务名 + 四个控件）",
+    prelude.slice(prelude.indexOf('cols="1 700:5"'), prelude.indexOf("<p :id=\"row.resultId\"")).split("<NGridItem>").length - 1 >= 5);
+  check("服务行用小间距", /:x-gap="6" :y-gap="4"/.test(prelude));
+  check("服务名右对齐并贴底（换类型时左边不抖）",
+    /\.service-name \{[\s\S]{0,200}justify-content:\s*flex-end/.test(css) &&
+      prelude.includes('class="service-name"'));
+  // 结果行排在该行 NGrid 之后、常驻占位。
+  check("结果行排在服务行 NGrid 之后",
+    prelude.indexOf(':id="row.resultId"') > prelude.indexOf('cols="1 700:5"'),
+    `${prelude.indexOf(':id="row.resultId"')} > ${prelude.indexOf('cols="1 700:5"')}`);
   check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
   check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
   check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);
@@ -2224,25 +2267,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const settingsHtml = fs.readFileSync(path.join(import.meta.dirname, "../ui/settings.html"), "utf8");
   const settingsJs = fs.readFileSync(path.join(import.meta.dirname, "../ui/assets/settings.js"), "utf8");
 
-  const gateIdx = recall.indexOf('id="recallGate"');
-  const modeIdx = recall.indexOf('id="queryMode"');
-  const rerankIdx = recall.indexOf('id="rerank"');
+  // 五个 NSelect 的 id 都走 :input-props（裸 id 会落到外层 div，label for 就指空了）。
+  const gateIdx = recall.indexOf("id: 'recallGate'");
+  const modeIdx = recall.indexOf("id: 'queryMode'");
+  const rerankIdx = recall.indexOf("id: 'rerank'");
   check("面板上有召回判断下拉", gateIdx > 0, `idx=${gateIdx}`);
   check("面板上有召回查询下拉", modeIdx > 0, `idx=${modeIdx}`);
   check("面板上有结果重排下拉", rerankIdx > 0, `idx=${rerankIdx}`);
   check(
-    "召回判断三个选项齐全",
-    ['value="off"', 'value="rules"', 'value="llm"'].every((needle) => recall.includes(needle)) &&
-      recall.includes("规则跳过") &&
-      recall.includes("模型判断（用宿主模型）"),
+    "召回判断三个选项齐全（{label,value} 形状）",
+    /\{ label: "不判断（每轮都召回）", value: "off" \}/.test(recall) &&
+      /\{ label: "规则跳过（极短的纯操作指令）", value: "rules" \}/.test(recall) &&
+      /\{ label: "模型判断（用宿主模型）", value: "llm" \}/.test(recall),
   );
-  check("召回查询两个选项齐全",
-    recall.includes("带上文") && recall.includes('value="context"'));
+  check("召回查询两个选项齐全（{label,value} 形状）",
+    /\{ label: "最后一句", value: "last" \}/.test(recall) &&
+      /\{ label: "带上文（最近三条）", value: "context" \}/.test(recall));
   check(
     "结果重排只有关 / 开启两项",
-    /<select id="rerank"[\s\S]{0,220}<option value="off">关<\/option>[\s\S]{0,120}<option value="llm">开启<\/option>/.test(
-      recall,
-    ),
+    /\{ label: "关", value: "off" \}/.test(recall) &&
+      /\{ label: "开启", value: "llm" \}/.test(recall),
     recall.slice(rerankIdx, rerankIdx + 320),
   );
   check("召回判断在前、召回查询在后", gateIdx < modeIdx);
@@ -2250,34 +2294,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 这一栏的主栅格恰好三个下拉；两个展开区各只有一个模型下拉。
   check(
     "召回判断 / 查询 / 重排是三个主下拉",
-    (recall.slice(0, recall.indexOf('id="gateAdvanced"')).match(/<select /g) || []).length === 3,
+    (recall.slice(0, recall.indexOf('id="gateAdvanced"')).match(/<NSelect\b/g) || []).length === 3,
   );
   const advancedIdx = recall.indexOf('id="gateAdvanced"');
   const rerankAdvancedIdx = recall.indexOf('id="rerankAdvanced"');
   check(
     "llm 判断展开区只有一个模型下拉（不再分两层）",
-    (recall.slice(advancedIdx, rerankAdvancedIdx).match(/<select /g) || []).length === 1,
+    (recall.slice(advancedIdx, rerankAdvancedIdx).match(/<NSelect\b/g) || []).length === 1,
   );
   check(
     "重排展开区只有一个模型下拉",
-    (recall.slice(rerankAdvancedIdx, recall.indexOf('<div class="recall-sep"')).match(/<select /g) || [])
+    (recall.slice(rerankAdvancedIdx, recall.indexOf('<div class="recall-sep"')).match(/<NSelect\b/g) || [])
       .length === 1,
   );
   check("下拉与名单之间有分隔", /class="recall-sep"/.test(recall));
   check("召回管理一栏在记忆页里", memoryPanel.includes("<RecallCard />"));
-  // 三个下拉与 peer 名单在同一个 section 里（同一栏）。
-  const recallStart = recall.indexOf('class="card recall"');
-  const recallEnd = recall.lastIndexOf("</section>");
+  // 三个下拉与 peer 名单在同一张卡里（同一栏）。
+  const recallStart = recall.indexOf('class="recall"');
+  const recallEnd = recall.lastIndexOf("</NCard>");
   check(
-    "三个下拉与 peer 列表在同一个 section 内",
+    "三个下拉与 peer 列表在同一张卡内",
     [gateIdx, modeIdx, rerankIdx].every((idx) => idx > recallStart && idx < recallEnd) &&
       recall.indexOf("<PeerList") > recallStart &&
       recall.indexOf("<PeerList") < recallEnd,
   );
   check("计数也在这一栏里（仍算 peer 个数）", recall.includes('id="peerCount"'));
+  check("计数在卡的 #header-extra 里（折叠 / 滚动都还看得见）",
+    /<template #header-extra>[\s\S]{0,120}id="peerCount"/.test(recall));
   eq(
     "这一栏的标题是「召回管理」",
-    /<h2 class="card-title">([^<]*)<\/h2>/.exec(recall)?.[1],
+    /title="([^"]*)"/.exec(recall)?.[1],
     "召回管理",
   );
   check("面板没有为召回单设保存按钮",
@@ -2294,21 +2340,27 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       uiCode("components/PeerList.vue").includes("不再参与上面的召回"),
   );
   check("旧的独立 recall-row 区块已经不在", !recall.includes("recall-row") && !css.includes(".recall-row"));
-  const recallRule = ruleBody(css, ".recall-grid");
-  check("下拉那一行有栅格", recallRule !== null);
-  check("召回那三个下拉并排（一行三列）", /grid-template-columns\s*:\s*1fr 1fr 1fr/.test(recallRule || ""),
-    recallRule || "");
+  check("下拉那一行是 NGrid（cols 1 700:3）",
+    /<NGrid class="recall-grid" cols="1 700:3" responsive="screen"/.test(recall),
+    recall.slice(0, 400));
+  check("召回那三个下拉并排（一行三列，700px 以下收成一列）",
+    /<NGrid class="recall-grid" cols="1 700:3"/.test(recall) &&
+      recall.includes(':x-gap="10"'),
+    recall.slice(recall.indexOf('class="recall-grid"'), recall.indexOf('class="recall-grid"') + 160));
+  check("主下拉的栅格本身就是置灰层（.dim 挂在 NGrid 上）",
+    /class="recall-grid"[^>]*:class="\{ dim: !enabled \}"/.test(recall));
   check("分隔线有样式", /\n\.recall-sep \{/.test(css));
   check("peer 名单样式还在", /\n\.peer-list \{/.test(css));
-  check("下拉沿用 field 输入框样式", /\.field input,\n\.field select \{/.test(css));
+  check("下拉用 n-select（原生 select 已清零）",
+    /<NSelect\b/.test(recall) && recall.includes("<select") === false);
 
   // ---- 即时生效：改了就发，没有保存按钮 ----
   check(
-    "三个主下拉都绑 change 即时提交",
-    (recall.match(/@change="onSelect\('(recallGate|queryMode|rerank)'/g) || []).length === 3,
-    (recall.match(/@change="onSelect\(/g) || []).length,
+    "三个主下拉都绑 update:value 即时提交",
+    (recall.match(/@update:value="\(value\) => onSelect\('(recallGate|queryMode|rerank)'/g) || []).length === 3,
+    (recall.match(/@update:value="\(value\) => onSelect\(/g) || []).length,
   );
-  check("select 的 change 走 store.setForm", recall.includes("setForm(key, event.target.value)"));
+  check("select 的 update:value 走 store.setForm", recall.includes("setForm(key, value)"));
   check(
     "setForm 改完立刻 saveLayers",
     /function setForm\(key, value\)[\s\S]{0,120}saveLayers\(\)/.test(storeJs),
@@ -2335,10 +2387,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       recall.includes('state.form.recallGate === "llm"'),
     recall.slice(advancedIdx, advancedIdx + 220),
   );
-  check("提示词框 rows=4", /id="gatePrompt"[\s\S]{0,200}rows="4"/.test(recall));
-  check("提示词框有长度上限 2000", /id="gatePrompt"[\s\S]{0,240}maxlength="2000"/.test(recall));
+  const promptTag = /<NInput\b[\s\S]*?id: 'gatePrompt'[\s\S]*?\/>/.exec(recall)?.[0] ?? "";
+  check("提示词框是 n-input textarea（4~8 行自适应）",
+    /type="textarea"/.test(promptTag) && /autosize="\{ minRows: 4, maxRows: 8 \}"/.test(promptTag), promptTag);
+  check("提示词框有长度上限 2000", /:maxlength="2000"/.test(promptTag), promptTag);
   // 默认提示词靠 value 填，不靠 placeholder：placeholder 一敲键盘就消失，当不了草稿。
-  const promptTag = /<textarea[\s\S]*?id="gatePrompt"[\s\S]*?>/.exec(recall)?.[0] ?? "";
   check("提示词框没有 placeholder", promptTag.includes("placeholder") === false, promptTag);
   check("提示词框绑的是 value（草稿坐在框里）", /:value="state\.prompts\.gate"/.test(promptTag), promptTag);
   check("默认提示词不写进组件", recall.includes(DEFAULT_GATE_PROMPT) === false);
@@ -2359,18 +2412,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     recall.includes("用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。"),
   );
   check(
-    "提示词框绑 input 时标记 touched",
-    /@input="onPromptInput\('gate'/.test(recall) &&
+    "提示词框绑 update:value 时标记 touched",
+    /@update:value="onPromptInput\('gate'/.test(recall) &&
       storeJs.includes("state.prompts.gateTouched = true"),
   );
   check("空提示词不再写“留空使用默认”", recall.includes("留空使用默认提示词") === false);
   check("没有模型来源两个单选", recall.includes('name="gateModelMode"') === false);
   check("没有第二层 provider 下拉", recall.includes('id="gateProvider"') === false);
   check("没有可展开的自选区", recall.includes('id="gateCustom"') === false);
-  check("判断模型只有一个下拉", (recall.match(/<select[^>]*id="gateModel"/g) || []).length === 1);
+  check("判断模型只有一个下拉",
+    (recall.match(/<NSelect\b[\s\S]{0,240}?id: 'gateModel'/g) || []).length === 1);
   check(
     "模型下拉选项来自目录（首项是默认）",
-    /v-for="option in gateModelOptions"/.test(recall) &&
+    /:options="gateModelOptions"/.test(recall) &&
       storeJs.includes("[DEFAULT_MODEL_OPTION, ...modelOptions(state.models.models)]"),
   );
   check("目录坏了只留默认项", storeJs.includes("[DEFAULT_MODEL_OPTION]"));
@@ -2378,7 +2432,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("目录读不到时留原因位", recall.includes('id="gateModelsHint"'));
   check("面板读模型目录", storeJs.includes('get("/models")'));
   check("新控件有样式", /\n\.gate-advanced \{/.test(css));
-  check("textarea 有输入框样式", /\n\.field textarea \{/.test(css));
+  check("提示词框走 naive-ui 的 textarea 自适应（不再吃 .field textarea 样式）",
+    /autosize="\{ minRows: 4, maxRows: 8 \}"/.test(recall) && !/\n\.field textarea \{/.test(css));
 
   // ---- 结果重排：下拉、展开块、提示词与模型 ----
   check("重排展开块存在", rerankAdvancedIdx > 0);
@@ -2387,8 +2442,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /id="rerankAdvanced"[\s\S]{0,200}:hidden="!rerankOpen"/.test(recall) &&
       recall.includes('state.form.rerank === "llm"'),
   );
-  check("重排提示词框 rows=4", /id="rerankPrompt"[\s\S]{0,200}rows="4"/.test(recall));
-  const rerankPromptTag = /<textarea[\s\S]*?id="rerankPrompt"[\s\S]*?>/.exec(recall)?.[0] ?? "";
+  const rerankPromptTag = /<NInput\b[\s\S]*?id: 'rerankPrompt'[\s\S]*?\/>/.exec(recall)?.[0] ?? "";
+  check("重排提示词框是 n-input textarea（4~8 行自适应）",
+    /type="textarea"/.test(rerankPromptTag) &&
+      /autosize="\{ minRows: 4, maxRows: 8 \}"/.test(rerankPromptTag));
   check("重排提示词框没有 placeholder", rerankPromptTag.includes("placeholder") === false, rerankPromptTag);
   check("重排提示词框绑的是 value", /:value="state\.prompts\.rerank"/.test(rerankPromptTag));
   check(
@@ -2404,12 +2461,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       recall.includes("用 {{candidates}} 表示候选清单"),
   );
   check(
-    "重排提示词框绑 input 时标记 touched",
-    /@input="onPromptInput\('rerank'/.test(recall) &&
+    "重排提示词框绑 update:value 时标记 touched",
+    /@update:value="onPromptInput\('rerank'/.test(recall) &&
       storeJs.includes("state.prompts.rerankTouched = true"),
   );
-  check("重排模型只有一个下拉", (recall.match(/<select[^>]*id="rerankModel"/g) || []).length === 1);
-  check("重排模型下拉选项来自目录", /v-for="option in rerankModelOptions"/.test(recall));
+  check("重排模型只有一个下拉",
+    (recall.match(/<NSelect\b[\s\S]{0,240}?id: 'rerankModel'/g) || []).length === 1);
+  check("重排模型下拉选项来自目录", /:options="rerankModelOptions"/.test(recall));
   check("重排模型下拉不预设禁用", /id="rerankModel"[^>]*disabled/.test(recall) === false);
   check("重排目录读不到时留原因位", recall.includes('id="rerankModelsHint"'));
   check("重排展开区里放着通道列表", /<ChannelList \/>/.test(recall) &&
@@ -2434,8 +2492,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("两个服务都没配时添加按钮禁用",
     channels.includes(":disabled=\"addDisabled\"") &&
       /noService = computed\(\(\) => typeOptions\.value\.every/.test(channels));
-  check("删除按钮在通道行里", channels.includes(">删除</button>"));
-  check("权重输入有边界", channels.includes('min="0.1"') && channels.includes('max="10"'));
+  check("删除按钮在通道行里", channels.includes(">删除</NButton>"));
+  check("权重输入有边界", channels.includes(':min="0.1"') && channels.includes(':max="10"'));
   check("权重收敛在 store 里", /Math\.min\(10, Math\.max\(0\.1, parsed\)\)/.test(storeJs));
   check("添加通道用空模板", storeJs.includes("emptyRerankChannel(firstType)"));
   check(
@@ -2453,7 +2511,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("通道上限来自 lib", channels.includes("RERANK_CHANNELS_MAX") && storeJs.includes("RERANK_CHANNELS_MAX"));
   check("测试按钮打通道测试端点", storeJs.includes('post("/recall-mode/test"'));
-  check("通道行有样式", /\n\.channel-row \{/.test(css));
+  check("通道行是一张 n-card（小号）",
+    /<NCard\b[\s\S]{0,200}size="small"/.test(channels) && channels.includes('class="channel-card"'));
+  check("通道卡正文是四格 NGrid（520 两列 / 700 四列）",
+    /<NGrid cols="1 520:2 700:4" responsive="screen"/.test(channels));
+  check("通道列表外面套 NScrollbar（条目多时区内滚）",
+    /<NScrollbar class="channel-scroll">/.test(channels) &&
+      /id="rerankChannelList"[\s\S]{0,80}<NScrollbar/.test(channels));
   check("测试结果有样式", /\n\.channel-result \{/.test(css));
   eq("通道上限与后端一致", UI_RERANK_CHANNELS_MAX, RERANK_CHANNELS_MAX);
   eq("三种通道都有下拉文案", Object.keys(RERANK_CHANNEL_LABELS), ["rerank", "systemone", "model"]);
@@ -2641,13 +2705,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     lightThemeOverrides.Switch,
     undefined,
   );
-  eq("输入框底色是中性灰", lightThemeOverrides.Input?.color, "rgba(128, 128, 128, 0.06)");
-  eq(
-    "输入框 focus 底色带一点品牌绿",
-    lightThemeOverrides.Input?.colorFocus,
-    "rgba(111, 143, 104, 0.08)",
+  // 组件级覆盖与 common.borderRadius 全部删掉：naive-ui 自己的亮色默认值就是
+  // 我们要的样子，再钉一遍等于把它当画板重画。
+  eq("Input 不再有组件级覆盖（底色 / 边框 / 圆角全交给 naive-ui）",
+    lightThemeOverrides.Input, undefined);
+  eq("Button 不再有组件级覆盖", lightThemeOverrides.Button, undefined);
+  eq("Alert 不再有组件级覆盖", lightThemeOverrides.Alert, undefined);
+  eq("common 不再覆盖 borderRadius", lightThemeOverrides.common?.borderRadius, undefined);
+  check(
+    "主题只剩品牌色（common 里的 primary / success / error 三组）",
+    Object.keys(lightThemeOverrides).join(",") === "common" &&
+      Object.keys(lightThemeOverrides.common).every((key) =>
+        /^(primary|success|error)Color(Hover|Pressed|Suppl)?$/.test(key),
+      ),
+    Object.keys(lightThemeOverrides.common).join(","),
   );
-  eq("圆角仍是 9px", lightThemeOverrides.common?.borderRadius, "9px");
+  check("品牌色一个都没少",
+    ["#6f8f68", "#7ea176", "#5f7d59", "#5d7d56", "#b8564d"].every((color) =>
+      Object.values(lightThemeOverrides.common).includes(color),
+    ),
+    Object.values(lightThemeOverrides.common).join(","));
   check(
     "两个组件都不传 :theme，只用 theme-overrides",
     [appCode, settingsCode].every(
@@ -2938,7 +3015,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 日志折叠（行为第 9 条） ----
   check("日志折叠仍在全局页", logsCard.includes('id="logToggle"') && logsCard.includes('id="logBody"'));
-  check("日志正文默认折叠", /:hidden="!open"/.test(logsCard));
+  check("日志正文用 NCollapse + NCollapseItem 折叠",
+    logsCard.includes("<NCollapse") && logsCard.includes("<NCollapseItem"));
+  check("折叠是受控的（展开名单由 state.logs.open 决定）",
+    /:expanded-names="open \? \['logs'\] : \[\]"/.test(logsCard),
+    logsCard.slice(logsCard.indexOf("<NCollapse"), logsCard.indexOf("<NCollapse") + 200));
+  check("折叠头的回写只在状态真变了时落 store",
+    /function onExpanded\(names\)[\s\S]{0,200}if \(next !== open\.value\) toggle\(\)/.test(logsCard),
+    logsCard.slice(logsCard.indexOf("function onExpanded"), logsCard.indexOf("function onExpanded") + 200));
+  check("折叠头的 extra 区不重复触发（trigger-areas 只留 main / arrow）",
+    /:trigger-areas="\['main', 'arrow'\]"/.test(logsCard));
+  check("折叠头标题是「日志正文」", /title="日志正文"/.test(logsCard));
+  check("正文在 NScrollbar 里（区内滚）",
+    /<NScrollbar class="log">[\s\S]{0,120}id="logBody"/.test(logsCard));
+  check("计数条 #logChips 在卡的 #header-extra 里（始终可见）",
+    /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsCard));
   check(
     "折叠按钮只切隐藏与文案",
     logsCard.includes('open ? "收起" : "展开"') && logsCard.includes("@click=\"toggle()\""),
@@ -2953,7 +3044,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["打分服务", /class="services"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(uiCode("components/PreludeCard.vue"))],
     ["召回下拉", /class="recall-grid"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(uiCode("components/RecallCard.vue"))],
     ["两个展开区", (uiCode("components/RecallCard.vue").match(/class="gate-advanced"[\s\S]{0,80}:class="\{ dim: !enabled \}"/g) || []).length === 2],
-    ["技能路由", /class="card skill-route"[\s\S]{0,120}:class="\{ dim: !enabled \}"/.test(uiCode("components/SkillRoute.vue"))],
+    ["技能路由", /class="skill-route"[\s\S]{0,240}:class="\{ dim: !enabled \}"/.test(uiCode("components/SkillRoute.vue"))],
   ];
   for (const [label, ok] of dimBindings) check(`置灰覆盖 ${label}`, ok);
   check(
@@ -3065,6 +3156,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /height\s*:\s*100%/.test(rootRule || ""), rootRule || "");
   check("不用 100vh 当高度基准", css.includes("100vh") === false);
 
+  // Vue 的挂载层 #panel-app 也在这一条高度链上：只把 body 定高，
+  // .page 的 100% 会按内容解析，一屏契约整条落空。
+  const mountRule = ruleBody(css, "#panel-app");
+  check("挂载层 #panel-app 也定高（与 .page 同属一屏链）",
+    /height\s*:\s*100%/.test(mountRule || ""), mountRule || "");
+
   // 根容器：吃满高度、自己不出滚动条、纵向 flex。
   const pageRule = ruleBody(css, ".page");
   check("根容器规则在", pageRule !== null);
@@ -3100,10 +3197,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ),
   );
   // 这三块现在是组件的根节点：选择器仍然落在同一个位置（tab-panel 的直接子元素）。
-  check("总闸组件根节点是 .master", /<section id="masterCard" class="master"/.test(master));
-  check("前置组件根节点是 .prelude", /<section id="prelude" class="card prelude"/.test(prelude));
-  check("两栏组件根节点是 .cols", /<section class="cols">/.test(hub));
-  check("日志组件根节点是 .card.logs", /<section class="card logs">/.test(logsCard));
+  // 三块现在是组件的根节点：n-card / n-grid 的根元素都接 attrs，
+  // 所以 #panel-global > .master 这类选择器仍然落在同一个位置。
+  check("总闸组件根节点是 n-card.master（title=总闸）",
+    /<NCard\b[\s\S]{0,240}class="master"/.test(master) && master.includes('title="总闸"'));
+  check("前置组件根节点是 n-card.prelude（id=prelude）",
+    /<NCard\b[\s\S]{0,240}id="prelude"/.test(prelude) && prelude.includes('title="前置"'));
+  check("两栏组件根节点是 n-grid.cols", /<NGrid class="cols"/.test(hub));
+  check("日志组件根节点是 n-card.logs（title=日志）",
+    /<NCard\b[\s\S]{0,240}class="logs"/.test(logsCard) && logsCard.includes('title="日志"'));
 
   const recallRule = ruleBody(css, ".recall");
   check("召回管理吃满记忆页剩余高度", /flex\s*:\s*1 1 auto/.test(recallRule || ""), recallRule || "");
@@ -3120,29 +3222,42 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const logRule = ruleBody(css, ".log");
   check("日志区规则在", logRule !== null);
   check("日志区有固定高度 120px", /height\s*:\s*120px/.test(logRule || ""), logRule || "");
-  check("日志区自己滚", /overflow\s*:\s*auto/.test(logRule || ""), logRule || "");
+  check("日志区用 n-scrollbar 内滚",
+    logsCard.includes("<NScrollbar") && logsCard.includes('class="log"'),
+    logsCard.slice(0, 240));
+  check("日志正文在 n-scrollbar 里（内层 pre 保留 id）",
+    /<NScrollbar[\s\S]*id="logBody"/.test(logsCard));
   check("日志区保留可读下限 64px", /min-height\s*:\s*64px/.test(logRule || ""), logRule || "");
+  // 日志卡默认折叠（NCollapse），所以它不再靠「卡高 124px」撑出一屏；
+  // 展开后的高度下限落在 .log 上（120px，被挤时 64px），超出在 NScrollbar 里滚。
   const logsRule = ruleBody(css, ".logs");
-  check("日志卡可收缩但不会缩没",
-    /flex\s*:\s*0 1 auto/.test(logsRule || "") && /min-height\s*:\s*124px/.test(logsRule || ""),
+  check("日志卡按内容定高（不再为折叠态预留 124px）",
+    /flex\s*:\s*none/.test(logsRule || "") && /min-height\s*:\s*124px/.test(logsRule || "") === false,
     logsRule || "");
 
-  // peer 名单：区内滚，不再靠 296px 的固定上限。
+  // peer 名单：NScrollbar 接管滚动，.peer-list 只负责「吃满剩余高度 + 能收缩」。
   const peerRule = ruleBody(css, ".peer-list");
   check("peer 名单规则在", peerRule !== null);
   check("peer 名单吃满召回管理剩余高度", /flex\s*:\s*1 1 auto/.test(peerRule || ""), peerRule || "");
-  check("peer 名单自己滚", /overflow-y\s*:\s*auto/.test(peerRule || ""), peerRule || "");
+  check("peer 名单是 flex 列（NScrollbar 才拿得到确定高度）",
+    /display\s*:\s*flex/.test(peerRule || "") && /flex-direction\s*:\s*column/.test(peerRule || ""),
+    peerRule || "");
+  check("peer 名单不再自己写 overflow（滚动交给 NScrollbar）",
+    /overflow-y/.test(peerRule || "") === false, peerRule || "");
   check("peer 名单不再用固定 max-height", /max-height/.test(peerRule || "") === false, peerRule || "");
-  const channelRule = ruleBody(css, ".channel-list");
+
+  // 通道列表：上限落在 naive-ui 的滚动容器上（父级高度是 auto）。
+  const channelScrollRule = ruleBody(css, ".channel-scroll .n-scrollbar-container");
   check("通道列表条目多时区内滚",
-    /overflow-y\s*:\s*auto/.test(channelRule || "") && /max-height\s*:\s*\d+px/.test(channelRule || ""),
-    channelRule || "");
+    /max-height\s*:\s*220px/.test(channelScrollRule || ""), channelScrollRule || "");
 
   // 矮屏降级：640px 以下允许整页滚（压一屏会把控件挤成一条线）。
   const mediaIdx = css.indexOf("@media (max-height: 640px)");
   check("矮屏媒体查询存在且阈值是 640px", mediaIdx >= 0);
   check("矮屏阈值不是别的数", /@media \(max-height: (?!640px\))/.test(css) === false);
   const mediaBody = mediaIdx < 0 ? "" : css.slice(mediaIdx, css.lastIndexOf("}"));
+  check("矮屏下挂载层也放开高度",
+    /#panel-app\s*\{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody), mediaBody.slice(0, 200));
   check(
     "矮屏下 html/body 放开高度与滚动",
     /html,\s*\n?\s*body \{[\s\S]{0,120}height\s*:\s*auto/.test(mediaBody) &&
@@ -3155,6 +3270,94 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /\.peer-list \{[\s\S]{0,120}max-height/.test(mediaBody));
 }
 
+// ================= ui: naive-ui 控件替换（原生控件清零） =================
+{
+  const componentsDir = path.join(UI_SRC_DIR, "components");
+  const vueFiles = [
+    "App.vue",
+    "SettingsApp.vue",
+    ...fs
+      .readdirSync(componentsDir)
+      .filter((name) => name.endsWith(".vue"))
+      .sort()
+      .map((name) => `components/${name}`),
+  ];
+  const sources = Object.fromEntries(vueFiles.map((name) => [name, uiCode(name)]));
+
+  // 全页原生控件清零（peer 行与标签栏本来就没有控件；日志改用 n-scrollbar）。
+  for (const [name, source] of Object.entries(sources)) {
+    for (const tag of ["select", "input", "textarea"]) {
+      check(
+        `${name} 没有原生 <${tag}>`,
+        source.includes(`<${tag}`) === false,
+        (source.match(new RegExp(`<${tag}[^>]*>`, "g")) || []).join(" | "),
+      );
+    }
+  }
+
+  const recall = sources["components/RecallCard.vue"];
+  const channels = sources["components/ChannelList.vue"];
+  const prelude = sources["components/PreludeCard.vue"];
+  const logs = sources["components/LogsCard.vue"];
+  const app = sources["App.vue"];
+  const settings = sources["SettingsApp.vue"];
+  const hub = sources["components/HubIdentity.vue"];
+
+  // 下拉一律 n-select；options 显式来自 { label, value } 表或 store 的投影函数。
+  check("召回页五个下拉都是 n-select", (recall.match(/<NSelect\b/g) || []).length === 5);
+  check("通道行类型下拉是 n-select",
+    /<NSelect\b[\s\S]{0,200}:options="row\.options"/.test(channels));
+  check(
+    "三个固定下拉的 options 都是 { label, value } 形状",
+    ["GATE_OPTIONS", "QUERY_MODE_OPTIONS", "RERANK_OPTIONS"].every((name) => {
+      const body =
+        new RegExp(`${name} = Object\\.freeze\\(\\[[\\s\\S]*?\\]\\);`).exec(recall)?.[0] ?? "";
+      return /\{ label: [^}]+, value: [^}]+ \}/.test(body);
+    }),
+  );
+  check("模型下拉的 options 来自 modelChoices（store 已保证 {label,value}）",
+    /:options="gateModelOptions"/.test(recall) &&
+      /:options="rerankModelOptions"/.test(recall));
+  check("设置页仍是 n-input / n-button", /<NInput\b/.test(settings) && /<NButton\b/.test(settings));
+
+  // 每个控件都绑 update:value，提交仍走原来的 store 动作（不引确认步骤）。
+  check("召回下拉用 update:value 提交",
+    (recall.match(/@update:value="\(value\) => onSelect\(/g) || []).length === 5 &&
+      /@update:value="\(value\) => onType\(/.test(channels));
+  check("打分服务文本框用 update:value 写草稿",
+    (prelude.match(/@update:value="onFieldInput\(/g) || []).length >= 2);
+  check("通道数字框用 update:value",
+    (channels.match(/@update:value="\(value\) => on(Weight|Timeout)\(/g) || []).length === 2);
+  check("按钮一律 n-button",
+    ["<NButton", "</NButton>"].every(
+      (needle) =>
+        app.includes(needle) &&
+        recall.includes(needle) &&
+        channels.includes(needle) &&
+        prelude.includes(needle) &&
+        logs.includes(needle),
+    ));
+
+  // 数值框清空：n-input-number 给 null，不提交 0（沿用上一轮的取舍）。
+  check("预算 / 超时清空（null）收成空串交给 setControlsNumber",
+    /value === null \|\| value === undefined \? "" : value/.test(hub));
+  check("权重清空（null）不提交",
+    /if \(value === null \|\| value === undefined\) return;/.test(channels));
+  check("数字框不在输入途中逐字提交（updateValueOnInput=false）",
+    ["components/HubIdentity.vue", "components/ChannelList.vue", "components/PreludeCard.vue"].every(
+      (name) => (sources[name].match(/:update-value-on-input="false"/g) || []).length > 0,
+    ));
+
+  // 一屏布局四项：根容器 overflow:hidden / .tab-panel min-height:0 / 日志内滚 / 640px 降级。
+  const css = panelCss();
+  check("一屏：根容器仍 overflow:hidden",
+    /overflow\s*:\s*hidden/.test(ruleBody(css, ".page") || ""));
+  check("一屏：.tab-panel 仍 min-height:0",
+    /min-height\s*:\s*0/.test(ruleBody(css, ".tab-panel") || ""));
+  check("一屏：日志区改成 n-scrollbar 但仍固定 120px",
+    logs.includes("<NScrollbar") && /height\s*:\s*120px/.test(ruleBody(css, ".log") || ""));
+  check("一屏：640px 降级还在", css.includes("@media (max-height: 640px)"));
+}
 
 // ================= ui: 面板视图投影（纯函数） =================
 {
@@ -8347,6 +8550,227 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   eq("成功色不变", lightThemeOverrides.common?.successColor, "#5d7d56");
   eq("错误色不变", lightThemeOverrides.common?.errorColor, "#b8564d");
+}
+
+// ================= ui: 组件容器化（naive-ui 说了算） =================
+{
+  // 这一轮把「手绘卡片 / 栅格 / peer 行 / 日志壳」全甩给 naive-ui：
+  // 结构断言查组件（NCard / NGrid / NList / NCollapse / NScrollbar / title / clickable），
+  // 样式只查四条一屏硬规矩与行数上限。手写类名（.card / .card-title / .cols /
+  // .service-row / .peer-row / .channel-row / .logs-head / .skill-route 之类）
+  // 一律不再出现，出现的只能是它们的组件替身。
+  const css = panelCss();
+  const app = uiCode("App.vue");
+  const master = uiCode("components/MasterCard.vue");
+  const hub = uiCode("components/HubIdentity.vue");
+  const prelude = uiCode("components/PreludeCard.vue");
+  const recall = uiCode("components/RecallCard.vue");
+  const channels = uiCode("components/ChannelList.vue");
+  const logsCard = uiCode("components/LogsCard.vue");
+  const peers = uiCode("components/PeerList.vue");
+  const skillRoute = uiCode("components/SkillRoute.vue");
+  const tabBar = uiCode("components/TabBar.vue");
+
+  // ---- panel.css 行数上限：瘦身的硬指标 ----
+  const cssLines = css.replace(/\n$/, "").split("\n").length;
+  check("panel.css 行数 < 600（组件接管后样式只剩布局与状态色）",
+    cssLines < 600,
+    `${cssLines} 行`);
+  const deadSelectors = [
+    "\n.card {", ".card-title", "\n.cols {", ".service-row", ".peer-row",
+    ".channel-row", ".logs-head", ".skill-route-head", "\n.recall-grid {",
+  ];
+  check("panel.css 不再有手写卡片 / 栅格 / 行壳的选择器",
+    deadSelectors.every((needle) => css.includes(needle) === false),
+    deadSelectors.filter((needle) => css.includes(needle)).join(", "));
+  // `#panel-global > .cols` 那一条要留着：它是「不为了填满视野而拉伸」的约束，
+  // 现在落在 NGrid 根节点上，位置没变。
+  check("全局页三块仍按内容定高（选择器落到 n-card / n-grid 根节点上）",
+    /#panel-global > \.master/.test(css) &&
+      /#panel-global > \.prelude/.test(css) &&
+      /#panel-global > \.cols/.test(css));
+
+  // ---- 一屏四条：必须同时成立，任一条掉了都会破版 ----
+  const rootRule = ruleBody(css, "html, body");
+  const pageRule = ruleBody(css, ".page");
+  const panelRule = ruleBody(css, ".tab-panel");
+  const mediaIdx = css.indexOf("@media (max-height: 640px)");
+  const mediaBody = mediaIdx < 0 ? "" : css.slice(mediaIdx, css.lastIndexOf("}"));
+  check("一屏四条同时成立（高度基准 + 根容器 + 内容区 + 640px 降级）",
+    /\bheight\s*:\s*100%/.test(rootRule || "") &&
+      /#panel-app\s*\{[\s\S]{0,80}height\s*:\s*100%/.test(css) &&
+      /height\s*:\s*100%/.test(pageRule || "") &&
+      /overflow\s*:\s*hidden/.test(pageRule || "") &&
+      /display\s*:\s*flex/.test(pageRule || "") &&
+      /flex-direction\s*:\s*column/.test(pageRule || "") &&
+      /box-sizing\s*:\s*border-box/.test(pageRule || "") &&
+      /flex\s*:\s*1 1 auto/.test(panelRule || "") &&
+      /min-height\s*:\s*0/.test(panelRule || "") &&
+      mediaIdx >= 0 &&
+      /html,\s*\n?\s*body \{[\s\S]{0,120}height\s*:\s*auto/.test(mediaBody) &&
+      /#panel-app\s*\{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody) &&
+      /\.page \{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody),
+    `${rootRule} | ${pageRule} | ${panelRule} | ${mediaBody.slice(0, 120)}`);
+  check("整份 panel.css 里没有任何视口高度单位",
+    /100vh|100dvh|100svh/.test(css) === false,
+    (css.match(/.{0,20}(100vh|100dvh|100svh).{0,20}/g) || []).join(" | "));
+  check("根容器 .page 不许自己滚（滚动只发生在内容区 / 日志 / 名单）",
+    /overflow\s*:\s*hidden/.test(pageRule || "") && /overflow-y\s*:\s*auto/.test(panelRule || ""));
+  check("hidden 兜底仍在（flex / grid 不能把 hidden 顶掉）",
+    /display\s*:\s*none\s*!important/.test(ruleBody(css, ".page [hidden]") || ""));
+
+  // ---- 卡片全是 NCard，title 一个都不能少 ----
+  const titledCards = [
+    ["总闸", /<NCard\b[\s\S]{0,240}title="总闸"/, master],
+    ["中枢", /<NCard\b[\s\S]{0,240}title="中枢"/, hub],
+    ["身份", /<NCard\b[\s\S]{0,240}title="身份"/, hub],
+    ["前置", /<NCard\b[\s\S]{0,240}title="前置"/, prelude],
+    ["日志", /<NCard\b[\s\S]{0,240}title="日志"/, logsCard],
+    ["召回管理", /<NCard\b[\s\S]{0,240}title="召回管理"/, recall],
+    ["技能路由", /<NCard\b[\s\S]{0,240}title="技能路由"/, skillRoute],
+  ];
+  check("七张卡都是 NCard 且都有 title",
+    titledCards.every(([, pattern, source]) => pattern.test(source)),
+    titledCards.filter(([, pattern, source]) => pattern.test(source) === false).map(([name]) => name).join(", "));
+  check("技能卡的 aria-label 还在",
+    /<NCard\b[\s\S]{0,300}aria-label="技能路由"/.test(skillRoute), skillRoute.slice(0, 360));
+  check("需要右侧附件的地方用 #header-extra（总闸开关 / peer 计数 / 日志计数 / 技能开关）",
+    [/<template #header-extra>[\s\S]{0,160}<NSwitch/.test(master),
+      /<template #header-extra>[\s\S]{0,160}id="peerCount"/.test(recall),
+      /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsCard),
+      /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute)].every(Boolean));
+  check("NCard 不降到 tiny（压内边距，不压字号）",
+    /size="tiny"/.test([master, hub, prelude, recall, channels, logsCard, skillRoute].join("\n")) === false &&
+      [master, prelude, recall, logsCard, skillRoute].every((source) => source.includes('size="small"')));
+  check("手写 .card / .card-title 彻底不在模板里",
+    [master, hub, prelude, recall, channels, logsCard, skillRoute, peers].every(
+      (source) => /class="card\b/.test(source) === false && source.includes("card-title") === false,
+    ));
+
+  // ---- 栅格：NGrid 用 screen 断点 + 数字断点，不写自定义列宽 ----
+  const grids = [
+    ["中枢 / 身份两栏", hub, 'cols="1 700:2"'],
+    ["召回三个主下拉", recall, 'cols="1 700:3"'],
+    ["两个展开区", recall, 'cols="1 700:2"'],
+    ["通道四格", channels, 'cols="1 520:2 700:4"'],
+    ["服务五格", prelude, 'cols="1 700:5"'],
+  ];
+  for (const [label, source, cols] of grids) {
+    check(`${label}用 ${cols}`,
+      source.includes(cols) && /responsive="screen"/.test(source), cols);
+  }
+  // responsive="screen" 是按**断点名**取值的（vooks 的 useBreakpoints 返回名字数组），
+  // 断点表里没有 "700" 这个键，cols 里的 `700:` 就永远落到默认值 1 —— 整页栅格
+  // 会退成单列。所以断点表必须把键写成数字，且只在 lib 里定义一次。
+  check("断点表把键写成数字（0 / 520 / 700），组件里的 cols 才匹配得到",
+    /export const BREAKPOINTS = Object\.freeze\(\{[\s\S]{0,120}0: 0,[\s\S]{0,80}520: 520,[\s\S]{0,80}700: 700/.test(
+      uiSrcRaw("lib/grid-breakpoints.js"),
+    ),
+    uiSrcRaw("lib/grid-breakpoints.js").slice(0, 200));
+  check("断点表接到 NConfigProvider 上（一份，两页共用）",
+    /:breakpoints="BREAKPOINTS"/.test(app) && app.includes('from "./lib/grid-breakpoints.js"'));
+  check("cols 里用到的断点都在断点表里",
+    [520, 700].every((width) =>
+      /(^|[^\d])520: 520/.test(uiSrcRaw("lib/grid-breakpoints.js")) &&
+      /(^|[^\d])700: 700/.test(uiSrcRaw("lib/grid-breakpoints.js")),
+    ) && [hub, recall, channels, prelude].every((source) => /responsive="screen"/.test(source)));
+
+  check("NGrid 的每个直接子节点都是 NGridItem（否则 naive-ui 直接不渲染）",
+    [hub, recall, channels, prelude].every((source) => {
+      const cells = (source.match(/<NGrid\b/g) || []).length;
+      const items = (source.match(/<NGridItem>/g) || []).length;
+      return cells > 0 && items >= cells;
+    }));
+  check("没有自定义列宽的 v-bind:cols（统一走响应式字符串）",
+    [hub, recall, channels, prelude].every((source) => /:cols=/.test(source) === false ||
+      /:cols="2"/.test(source)));
+
+  // ---- peer 名单：NScrollbar > NList(clickable) > NListItem ----
+  check("peer 名单是 NScrollbar > NList(clickable) > NListItem",
+    /<NScrollbar[\s\S]{0,120}<NList clickable/.test(peers) &&
+      /<NListItem\b/.test(peers),
+    peers.slice(peers.indexOf("<NScrollbar"), peers.indexOf("<NScrollbar") + 120));
+  check("peer 名单的滚动 / 计数外壳仍是 NScrollbar（名单自己滚）",
+    /<NScrollbar v-else class="peer-scroll">/.test(peers));
+  check("本机行不挂 click / role / tabindex",
+    /function rowAttrs\(row\) \{[\s\S]{0,120}if \(!row\.tappable\) return \{\};/.test(peers) &&
+      /v-bind="rowAttrs\(row\)"/.test(peers) &&
+      /row\.tappable \? "button" : undefined/.test(peers) === false,
+    peers.slice(peers.indexOf("function rowAttrs"), peers.indexOf("function rowAttrs") + 200));
+  check("可点行才有 role=button / tabindex=0 / Enter·Space",
+    /role: "button"/.test(peers) && /tabindex: 0/.test(peers) &&
+      peers.includes('"Enter"') && peers.includes('" "'));
+  check("参与 / 排除用圆点表达（实心 / 空心），名字是本机正常色、外机灰",
+    /<span class="peer-dot" :class="\{ off: row\.excluded \}"/.test(peers) &&
+      /\.peer-dot \{[\s\S]{0,160}background:\s*#6f8f68/.test(css) &&
+      /\.peer-dot\.off \{[\s\S]{0,120}background:\s*transparent/.test(css) &&
+      /\.peer-item\.other \.peer-name \{[^}]*rgba\(128, 128, 128/.test(css));
+  check("本机行额外挂一枚「本机」NTag",
+    /<NTag v-if="row\.self" size="small"/.test(peers) && peers.includes(">本机</NTag>"));
+  check('meta 用 NText depth="3"', /<NText depth="3"/.test(peers));
+  check("名单外壳的契约没变（id / title / 空态 / 提示句）",
+    peers.includes('id="peerList"') &&
+      /:title="listTitle"/.test(peers) &&
+      /state\.peers\.error \|\| undefined/.test(peers) &&
+      peers.includes('class="peer-empty"') &&
+      /:title="row\.title"/.test(peers) &&
+      /id="peerHint"[\s\S]{0,80}:hidden="!hintVisible"/.test(peers));
+  check("pending 时行不可点", /if \(!row\.tappable \|\| pending\.value\) return;/.test(peers));
+
+  // ---- 日志：NCard > NCollapse > NScrollbar，受控于 state.logs.open ----
+  check("日志是 NCard > NCollapse > NCollapseItem > NScrollbar",
+    /<NCard\b[\s\S]{0,700}<NCollapse\b[\s\S]{0,400}<NCollapseItem\b[\s\S]{0,400}<NScrollbar/.test(logsCard),
+    logsCard.slice(logsCard.indexOf("<NCard"), logsCard.indexOf("<NCard") + 200));
+  check("折叠受控于 state.logs.open（不是第二套本地状态）",
+    /:expanded-names="open \? \['logs'\] : \[\]"/.test(logsCard) &&
+      /@update:expanded-names="onExpanded"/.test(logsCard) &&
+      /if \(next !== open\.value\) toggle\(\)/.test(logsCard));
+  check("日志正文只走 store 的 toggle（没有自建 open ref）",
+    logsCard.includes("useLogs()") && /ref\(false\)/.test(logsCard) === false);
+
+  // ---- 召回 5 个 NSelect：id 一律走 :input-props，不许裸 id= ----
+  const selectTags = recall.match(/<NSelect\b[\s\S]*?\/>/g) || [];
+  eq("召回卡里恰好 5 个 NSelect", selectTags.length, 5);
+  check("5 个 NSelect 都没有裸 id=（裸 id 会落到外层 div，label for 指空）",
+    selectTags.every((tag) => /\bid="/.test(tag) === false),
+    selectTags.map((tag) => (/\bid="/.exec(tag) || [""])[0]).join(" | "));
+  check("5 个 NSelect 都用 :input-props 带 id",
+    ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"].every((id) =>
+      new RegExp(`:input-props="\\{ id: '${id}' }"`).test(recall),
+    ),
+    ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"]
+      .filter((id) => new RegExp(`:input-props="\\{ id: '${id}' }"`).test(recall) === false)
+      .join(", "));
+  check("每个 NSelect 都有对应的 label for（点标签能落到输入框上）",
+    ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"].every((id) =>
+      recall.includes(`<label for="${id}">`),
+    ));
+
+  // ---- 行为六条：控件一律直绑 store，没有本地副本 ----
+  check("三个主下拉直绑 state.form（失败时跟着 store 退回）",
+    /:value="state\.form\.recallGate"/.test(recall) &&
+      /:value="state\.form\.queryMode"/.test(recall) &&
+      /:value="state\.form\.rerank"/.test(recall));
+  check("两个模型下拉也直绑 state.form",
+    /:value="state\.form\.gateModel"/.test(recall) &&
+      /:value="state\.form\.rerankModel"/.test(recall));
+  check("提示词框直绑 state.prompts（配置为空时坐的是默认全文）",
+    /:value="state\.prompts\.gate"/.test(recall) &&
+      /:value="state\.prompts\.rerank"/.test(recall));
+  check("打分服务草稿直绑 state.draft",
+    /:value="state\.draft\[row\.url\.key\]"/.test(prelude) &&
+      /:value="state\.draft\[row\.model\.key\]"/.test(prelude));
+  check("总闸 / 探针 / 技能路由直绑 controls",
+    /:value="state\.controls\.enabled"/.test(master) &&
+      /:value="state\.controls\.probe"/.test(prelude) &&
+      /:value="routing"/.test(skillRoute));
+
+  // ---- TabBar 仍是手写 tablist（n-tabs 保不住现有 aria 契约） ----
+  check("TabBar 仍是手写 role=tab 按钮，而不是 n-tabs",
+    tabBar.includes('role="tab"') && tabBar.includes('role="tablist"') &&
+      tabBar.includes("<button") && /<NTabs\b/.test(tabBar) === false);
+  check("TabBar 的注释写清了为什么不用 n-tabs",
+    /n-tabs/.test(uiSrcRaw("components/TabBar.vue")) && /aria-controls/.test(uiSrcRaw("components/TabBar.vue")));
 }
 
 // ================= 结果 =================

@@ -3,6 +3,12 @@
 //
 // 纯逻辑（键名、默认页、非法值回退、读写 storage 的容错）在 lib/tabs.js，
 // 这里只管按键与 aria。切页不触发任何读 / 写 / 重算（见行为清单第 10 条）。
+//
+// 为什么不用 n-tabs：n-tabs 的标签是它自己生成的节点，无法同时保留
+//   id="tab-<name>" / aria-controls / aria-labelledby / data-tab 与 roving tabindex
+// 这套现有契约 —— 换过去只会让 App.vue 里三个 role="tabpanel" 的标注脱钩。
+// 所以标签栏继续手写 <button role="tab">，样式只留等分 / nowrap / 选中态 / focus 环
+// （不画渐变，也不模拟卡片边框：那是 n-card 的活）。
 import { nextTick, ref } from "vue";
 import { TABS } from "../lib/tabs.js";
 
