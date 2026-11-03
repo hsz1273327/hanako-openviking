@@ -177,6 +177,7 @@ function timeoutTitle(row) {
                     :min="0.1"
                     :max="10"
                     :step="0.1"
+                    placeholder="默认 1"
                     :value="row.channel.weight"
                     @update:value="(value) => onWeight(row.index, value)"
                   />

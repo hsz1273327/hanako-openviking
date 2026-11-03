@@ -2448,7 +2448,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /type="textarea"/.test(promptTag) && /autosize="\{ minRows: 4, maxRows: 8 \}"/.test(promptTag), promptTag);
   check("提示词框有长度上限 2000", /:maxlength="2000"/.test(promptTag), promptTag);
   // 默认提示词靠 value 填，不靠 placeholder：placeholder 一敲键盘就消失，当不了草稿。
-  check("提示词框没有 placeholder", promptTag.includes("placeholder") === false, promptTag);
+  // （placeholder 里只允许放“留空会怎样”的提示，不允许放模板本身。）
+  check("提示词框的 placeholder 只是一句空态提示，不是模板",
+    /placeholder="留空则用内置默认模板"/.test(promptTag) &&
+      recall.includes(`placeholder="${DEFAULT_GATE_PROMPT}`) === false,
+    promptTag);
   check("提示词框绑的是 value（草稿坐在框里）", /:value="state\.prompts\.gate"/.test(promptTag), promptTag);
   check("默认提示词不写进组件", recall.includes(DEFAULT_GATE_PROMPT) === false);
   check(
@@ -2502,7 +2506,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("重排提示词框是 n-input textarea（4~8 行自适应）",
     /type="textarea"/.test(rerankPromptTag) &&
       /autosize="\{ minRows: 4, maxRows: 8 \}"/.test(rerankPromptTag));
-  check("重排提示词框没有 placeholder", rerankPromptTag.includes("placeholder") === false, rerankPromptTag);
+  check("重排提示词框的 placeholder 也是一句空态提示",
+    /placeholder="留空则用内置默认模板"/.test(rerankPromptTag), rerankPromptTag);
   check("重排提示词框绑的是 value", /:value="state\.prompts\.rerank"/.test(rerankPromptTag));
   check(
     "重排恢复默认按钮在",
@@ -9169,6 +9174,80 @@ check(
   SCORING_SERVICES.every((service) => service.urlPlaceholder === "http://主机:端口"),
   SCORING_SERVICES.map((service) => service.urlPlaceholder).join(" / "),
 );
+
+// ================= 界面文案：locale 与 placeholder =================
+{
+  // 这一组盯的是一类很隐蔽的回退：naive-ui 的默认 locale 是 enUS，某个输入框
+  // 没写 placeholder 时不会“空着”，而是显示 "Please Input"、下拉显示
+  // "Please Select"。中文界面里出现英文，冒烟以前一条都拦不住。
+  // 两层防护都要：locale 兜底（组件级默认文案是中文），以及每个输入框自己
+  // 写一句中文 placeholder（不把责任全推给 locale）。
+  const entryFiles = ["App.vue", "SettingsApp.vue", "CardApp.vue"];
+  for (const name of entryFiles) {
+    const src = uiCode(name);
+    check(`${name} 从 naive-ui 引 zhCN`,
+      /import\s*\{[^}]*\bzhCN\b[^}]*\}\s*from\s*["']naive-ui["']/.test(src), src.slice(0, 120));
+    check(`${name} 的 NConfigProvider 传了 :locale="zhCN"`,
+      /<NConfigProvider[\s\S]{0,300}?locale="zhCN"/.test(src));
+  }
+
+  // 递归扫一遍组件源码：所有 NInput / NInputNumber 都必须自带 placeholder。
+  const walkVue = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walkVue(full);
+      return entry.name.endsWith(".vue") || entry.name.endsWith(".js") ? [full] : [];
+    });
+  const stripComments = (text) =>
+    text.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/[^\n]*/gm, "");
+  const inputsWithoutPlaceholder = [];
+  const literalPlaceholders = new Map();
+  for (const file of walkVue(UI_SRC_DIR)) {
+    const src = stripComments(fs.readFileSync(file, "utf8"));
+    for (const tag of ["NInput", "NInputNumber"]) {
+      const re = new RegExp(`<${tag}\\b[\\s\\S]*?(?:/>|>[\\s\\S]*?</${tag}>)`, "g");
+      for (const match of src.matchAll(re)) {
+        const rel = path.relative(UI_SRC_DIR, file);
+        const line = src.slice(0, match.index).split("\n").length;
+        if (!/\bplaceholder\b/.test(match[0])) {
+          inputsWithoutPlaceholder.push(`${rel}:${line} <${tag}>`);
+          continue;
+        }
+        const idMatch = match[0].match(/id:\s*["']([\w-]+)["']/);
+        const literal = match[0].match(/\splaceholder="([^"]*)"/);
+        if (idMatch && literal) literalPlaceholders.set(idMatch[1], literal[1]);
+      }
+    }
+  }
+  check("所有 NInput / NInputNumber 都自带 placeholder（不靠组件默认文案）",
+    inputsWithoutPlaceholder.length === 0, inputsWithoutPlaceholder.join(" / "));
+
+  // placeholder 不能是空串：空串等于又退回默认文案。
+  const emptyPlaceholders = [...literalPlaceholders].filter(([, text]) => text.trim() === "");
+  check("字面 placeholder 都不是空串", emptyPlaceholders.length === 0,
+    emptyPlaceholders.map(([id]) => id).join(" / "));
+
+  // 三个原本靠默认文案的框：placeholder 要与后端默认值同一个数，
+  // 免得将来改了默认值、界面还在默念旧数字。
+  const manifestDefaults = JSON.parse(
+    fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+  ).contributes.settings.schema.properties;
+  check("超时框的 placeholder 写的是后端默认超时",
+    literalPlaceholders.get("timeoutMs") === `默认 ${manifestDefaults.requestTimeoutMs.default}`,
+    `${literalPlaceholders.get("timeoutMs")} vs ${manifestDefaults.requestTimeoutMs.default}`);
+  check("注入预算框的 placeholder 写的是后端默认预算",
+    literalPlaceholders.get("budgetTokens") === `默认 ${manifestDefaults.injectBudgetTokens.default}`,
+    `${literalPlaceholders.get("budgetTokens")} vs ${manifestDefaults.injectBudgetTokens.default}`);
+  check("通道权重框的 placeholder 是 1（与 recall.js 的等价默认一致）",
+    /placeholder="默认 1"/.test(uiCode("components/ChannelList.vue")));
+
+  // 日期控件一个都没有：所以不需要 dateZhCN，写清楚比默默不写强。
+  const datePickers = walkVue(UI_SRC_DIR)
+    .map((file) => stripComments(fs.readFileSync(file, "utf8")))
+    .filter((src) => /<N(Date|Time)Picker\b/.test(src));
+  check("没有日期 / 时间选择器（因此不需要 dateZhCN）", datePickers.length === 0,
+    `${datePickers.length} 个文件用了日期控件`);
+}
 
 // ================= 结果 =================
 if (failures.length) {

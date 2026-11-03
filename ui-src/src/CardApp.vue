@@ -18,6 +18,7 @@ import {
   NRadioButton,
   NRadioGroup,
   NSwitch,
+  zhCN,
 } from "naive-ui";
 import { appReady, currentSession, jsonGet, jsonPost, onActiveSessionChanged } from "./api.js";
 import { lightThemeOverrides } from "./theme.js";
@@ -274,7 +275,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <NConfigProvider abstract :theme-overrides="cardThemeOverrides">
+  <!-- zhCN 与面板页一致：不传就落回 enUS，空控件会显示英文默认文案。 -->
+  <NConfigProvider abstract :locale="zhCN" :theme-overrides="cardThemeOverrides">
     <div class="card" :data-session="state.sessionKey ? 'on' : 'off'">
       <header class="head">
         <span class="dot" :class="state.dotTone" aria-hidden="true"></span>

@@ -12,7 +12,7 @@
 // 样式：SFC 里不写 <style>，这只管字段结构；字号/间距/脚注仍在
 // ui/settings.html 的内联样式里，补几条给 Vue 生成的 DOM 用。
 import { onMounted, ref } from "vue";
-import { NAlert, NButton, NConfigProvider, NForm, NFormItem, NInput } from "naive-ui";
+import { NAlert, NButton, NConfigProvider, NForm, NFormItem, NInput, zhCN } from "naive-ui";
 import { hana } from "./sdk.js";
 import { HINT_DEFAULT, connFields } from "./conn-fields.js";
 import { lightThemeOverrides } from "./theme.js";
@@ -102,7 +102,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <NConfigProvider abstract :theme-overrides="lightThemeOverrides">
+  <!-- zhCN 与面板页一致：不传就落回 enUS，空输入框会显示 "Please Input"。 -->
+  <NConfigProvider abstract :locale="zhCN" :theme-overrides="lightThemeOverrides">
     <NForm
       class="settings-form"
       label-placement="top"

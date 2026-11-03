@@ -11,7 +11,7 @@
 // （键就是像素阈值 0 / 520 / 700），所以组件里能直接写 cols="1 700:2"。
 // 布局 / 配色一律留在 ui/assets/panel.css，SFC 里不写 <style>。
 import { computed, onMounted, ref } from "vue";
-import { NButton, NConfigProvider } from "naive-ui";
+import { NButton, NConfigProvider, zhCN } from "naive-ui";
 import GlobalPanel from "./components/GlobalPanel.vue";
 import LogsPanel from "./components/LogsPanel.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
@@ -81,7 +81,15 @@ onMounted(() => {
 
 <template>
   <!-- abstract：不额外包一层 div，挂载点里直接就是 .page。 -->
-  <NConfigProvider abstract :theme-overrides="lightThemeOverrides" :breakpoints="BREAKPOINTS">
+  <!-- zhCN：不传 locale 时 naive-ui 用默认的 enUS，空着的输入框会显示
+       "Please Input"、下拉显示 "Please Select"。中文占位文案是组件的底线，
+       不是某一页的装饰，所以每一条文案都自己写（见各组件），locale 只是兜底。 -->
+  <NConfigProvider
+    abstract
+    :locale="zhCN"
+    :theme-overrides="lightThemeOverrides"
+    :breakpoints="BREAKPOINTS"
+  >
     <main class="page" data-hana-app-ui>
       <header class="top">
         <div class="ident">
