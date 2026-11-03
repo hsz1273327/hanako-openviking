@@ -119,7 +119,7 @@ export const GATE_MESSAGE_PLACEHOLDER = "{{message}}";
 /**
  * llm 判断的默认提示词模板。导出给测试与面板文案对照。
  * 面板里的 textarea 以它作为草稿（配置为空时直接填进去让人改），两边必须是同一段文字，
- * 冒烟会比对 ui/assets/recall-layers.js 里的副本与这里的字面量。
+ * 冒烟会比对 ui-src/src/lib/recall-layers.js 里的副本与这里的字面量。
  */
 export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答它需不需要先查历史记忆。
 
@@ -137,7 +137,7 @@ export const RERANK_CANDIDATES_PLACEHOLDER = "{{candidates}}";
 
 /**
  * llm 重排的默认提示词模板。导出给测试与面板文案对照。
- * 面板加载不了 App 的 Node 模块，ui/assets/recall-layers.js 里存了逐字相同的一份，
+ * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
  * 冒烟会比对两边；配置里的 rerankPrompt 为空时就用这段。
  */
 export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}

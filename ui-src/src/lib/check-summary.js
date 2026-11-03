@@ -4,7 +4,7 @@
 // 没用，只在排查「连上了但召回是空的」时才有价值。所以面板里只留一行摘要，
 // 有问题时再把不对的那几项平铺出来——正常的项永远不出现，不重复「就绪」。
 //
-// 档位复用 assets/check-tone.js 的 statusTone：绿 = 全好，灰 = 只是没配/不支持，
+// 档位复用同级 ./check-tone.js 的 statusTone：绿 = 全好，灰 = 只是没配/不支持，
 // 红 = 有认不出来的状态（含 error）。
 
 import { TONE_BAD, TONE_MUTED, TONE_OK, statusTone } from "./check-tone.js";

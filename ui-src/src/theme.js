@@ -5,7 +5,7 @@
 // 亮色默认值（深色字）。
 //
 // 这一版只留品牌色 —— 三组颜色取自手写样式：
-//   --accent  #6f8f68 / hover #7ea176 / pressed #5f7d59   ui/assets/panel.css .switch
+//   --accent  #6f8f68 / hover #7ea176 / pressed #5f7d59   ui/assets/panel.css .dot.ok
 //   --ok      #5d7d56                                     ui/assets/panel.css .pill.ok
 //   --bad     #b8564d                                     ui/assets/panel.css .pill.down
 //
