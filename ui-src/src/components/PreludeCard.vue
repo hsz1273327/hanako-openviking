@@ -13,8 +13,16 @@
 //
 // 排版交给 naive-ui：整块一张 n-card（title="前置"），探针行 + 打分服务块放
 // NSpace vertical；一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 测试，
-// 700px 以下自动收成一列），结果行紧跟在那一行 NGrid 之后 —— 常驻占位，
-// 出现结果时不把整页顶一下。
+// 700px 以下自动收成一列）。列宽不交给 NGrid 的五等分：panel.css 里那条
+// `@media (min-width: 700px) .service > .n-grid { grid-template-columns: … }`
+// 把服务名列压成内容宽、地址列吃掉剩余（见那里的注释）。
+//
+// 结果行在同一张 NGrid 里、由 NGridItem 承载（span="1 700:4"）—— ≥700px 时从
+// 第二列（地址列）起跨到最后一列，跟地址输入框左边缘对齐。**必须包一层 NGridItem**：
+// naive-ui 的 Grid 在 responsive 模式下的 renderContent 会把非 NGridItem 的子节点
+// 直接丢掉（node_modules/naive-ui/es/grid/src/Grid.mjs，`__GRID_ITEM__ !== true` 就 return），
+// 裸 <p> 放进去不是「少一层壳」，是整行结果不渲染。
+// 常驻占位：空着也占一行高度，出现结果时不把整页顶一下。
 import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSpace, NSwitch } from "naive-ui";
 import { scoringServiceLayout } from "../lib/recall-layers.js";
 import { useConfig } from "../composables/useConfig.js";
@@ -166,14 +174,20 @@ function onTest(kind) {
                   </NButton>
                 </div>
               </NGridItem>
-            </NGrid>
 
-            <!-- 结果行常驻：空着也占一行高度，出现结果时不把整页顶一下。 -->
-            <p
-              :id="row.resultId"
-              class="service-result"
-              :class="resultOf(row.kind).tone"
-            >{{ resultOf(row.kind).text }}</p>
+              <!-- 结果行常驻：空着也占一行高度，出现结果时不把整页顶一下。
+                   span 的 1 是 700px 以下（那时 NGrid 只有一列），4 是 ≥700px 时
+                   跨四列。但 span 只给宽度，没有给起点：自动排布会把它放到下一行
+                   的第 1 列（服务名那列）。起点由 panel.css 的 .service-result-cell
+                   用 grid-column: 2 / -1 指定，左边缘才和地址列对齐。 -->
+              <NGridItem span="1 700:4" class="service-result-cell">
+                <p
+                  :id="row.resultId"
+                  class="service-result"
+                  :class="resultOf(row.kind).tone"
+                >{{ resultOf(row.kind).text }}</p>
+              </NGridItem>
+            </NGrid>
           </div>
         </div>
         <p class="services-note">{{ layout.note }}</p>

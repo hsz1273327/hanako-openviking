@@ -288,10 +288,10 @@ const uiProjectRaw = (name) =>
   fs.readFileSync(path.join(import.meta.dirname, "../ui-src", name), "utf8");
 const panelHtml = () =>
   fs.readFileSync(path.join(import.meta.dirname, "../ui/panel.html"), "utf8");
-const panelCss = () =>
-  fs
-    .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.css"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "");
+const panelCss = ({ keepComments = false } = {}) => {
+  const raw = fs.readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.css"), "utf8");
+  return keepComments ? raw : raw.replace(/\/\*[\s\S]*?\*\//g, "");
+};
 
 /** 取一条 CSS 规则的花括号内容（只取第一条，够用了）。 */
 function ruleBody(css, selector) {
@@ -1230,19 +1230,50 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
   check("打分服务有样式", /\n\.services \{/.test(css));
   // 服务行改成一条一条的 NGrid：五格（服务名 / 地址 / 模型 / 超时 / 测试），
-  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。
+  // 窄屏自己收成一列（700px 断点跟旧 760px 对齐）。列宽不走五等分，见下面那条。
   check("服务行是一条 NGrid（cols 1 700:5）",
     /<NGrid cols="1 700:5" responsive="screen"/.test(prelude), prelude.slice(0, 400));
-  check("服务行有五行 NGridItem（服务名 + 四个控件）",
-    prelude.slice(prelude.indexOf('cols="1 700:5"'), prelude.indexOf("<p :id=\"row.resultId\"")).split("<NGridItem>").length - 1 >= 5);
+  // 五格 + 结果行那一格（结果行也必须包一层 NGridItem：responsive 模式下 naive-ui
+  // 会把非 NGridItem 的子节点直接丢掉，裸 <p> 放进去整行不渲染）。
+  const serviceGridBody = prelude.slice(
+    prelude.indexOf('cols="1 700:5"'),
+    prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:5"')),
+  );
+  eq("服务行是五格 + 结果行一格，六格都是 NGridItem",
+    (serviceGridBody.match(/<NGridItem/g) || []).length, 6);
   check("服务行用小间距", /:x-gap="6" :y-gap="4"/.test(prelude));
-  check("服务名右对齐并贴底（换类型时左边不抖）",
-    /\.service-name \{[\s\S]{0,200}justify-content:\s*flex-end/.test(css) &&
+  // 列宽表：服务名列压成内容宽 + 左对齐，地址列吃剩余宽度。“精排 / 决策”
+  // 两个汉字等宽，不存在右对齐原本要防的“换类型时左边跟着抖”。
+  check("服务名左对齐并贴底",
+    /\.service-name \{[\s\S]{0,200}justify-content:\s*flex-start/.test(css) &&
       prelude.includes('class="service-name"'));
-  // 结果行排在该行 NGrid 之后、常驻占位。
-  check("结果行排在服务行 NGrid 之后",
-    prelude.indexOf(':id="row.resultId"') > prelude.indexOf('cols="1 700:5"'),
-    `${prelude.indexOf(':id="row.resultId"')} > ${prelude.indexOf('cols="1 700:5"')}`);
+  const serviceCols = ruleBody(css, ".service > .n-grid") || "";
+  check("服务行五列列宽表（auto / 1fr / .8fr / 92px / auto）",
+    /grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(0, 0\.8fr\) 92px auto/.test(serviceCols),
+    serviceCols);
+  // NGrid 把 grid-template-columns 写成行内样式，只有 !important 能盖过它。
+  // 允许三处：列宽表 + 结果行起点（两处都盖 NGridItem 的行内 grid-column）
+  // + .page [hidden] 的 display 兜底。
+  // panelCss() 会把注释剥掉，所以“注释里写了原因”这一半要看原文件。
+  check("列宽表用 !important 盖过 NGrid 的行内样式（注释写了原因）",
+    /grid-template-columns:[^;]*!important/.test(serviceCols) &&
+      /NGrid 把 grid-template-columns 写成\*\*行内样式\*\*[\s\S]{0,200}!important/.test(
+        panelCss({ keepComments: true }),
+      ));
+  eq("panel.css 里 !important 只有三处（hidden 兜底 + NGrid 列宽 + 结果行起点）",
+    (css.match(/!important/g) || []).length, 3);
+  // 断点跟 NGrid 的 `700:` 前缀同一个数；700px 以下不覆盖（那时 NGrid 自己
+  // 就是 repeat(1, …)，单列不该被列宽表碰到）。
+  check("列宽表只在 @media (min-width: 700px) 里",
+    /@media \(min-width: 700px\) \{\s*\.service > \.n-grid \{/.test(css) &&
+      (css.match(/grid-template-columns/g) || []).length === 1);
+  // 结果行在这张 NGrid 里；span 只给宽度，起点由 CSS 盖成第 2 列。
+  check("结果行在服务行 NGrid 内，span 1 700:4",
+    /<NGridItem span="1 700:4" class="service-result-cell">[\s\S]{0,160}:id="row\.resultId"/.test(serviceGridBody) &&
+      prelude.indexOf(':id="row.resultId"') < prelude.indexOf("</NGrid>", prelude.indexOf('cols="1 700:5"')));
+  check("结果行起点盖成第 2 列（与地址列左边缘对齐）",
+    /\.service > \.n-grid > \.service-result-cell \{\s*grid-column:\s*2 \/ -1 !important/.test(css),
+    ruleBody(css, ".service > .n-grid > .service-result-cell") || "(规则不存在)");
   check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
   check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
   check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);

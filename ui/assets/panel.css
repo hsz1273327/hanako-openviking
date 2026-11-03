@@ -207,12 +207,13 @@ html, body {
 .service-list { display: grid; gap: 6px; min-width: 0; }
 
 /* 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 测试）。
-   服务名统一右对齐并贴底，换类型时左边不会跟着抖；
-   测试按钮也贴底，跟四个输入框的下沿对齐。 */
+   服务名贴左下：列宽已经被下面的列宽表压成内容宽（两个汉字），
+   所以不再右对齐 —— 右对齐只在等分列里才有意义，那时它把名字推到
+   200px 开外，看起来像整块被缩进了两次。仍贴底，跟输入框下沿对齐。 */
 .service-name {
   display: flex;
   align-items: flex-end;
-  justify-content: flex-end;
+  justify-content: flex-start;
   height: 100%;
   padding-bottom: 6px;
   font-size: 12px;
@@ -220,6 +221,31 @@ html, body {
 }
 .service .field { margin-bottom: 0; }
 .service .field.service-test { display: flex; align-items: flex-end; height: 100%; }
+
+/* 服务行的列宽表（≥700px）：auto | minmax(0,1fr) | minmax(0,.8fr) | 92px | auto
+     服务名     地址（吃剩余）   模型                 超时     测试
+   700px 以下不覆盖：那时 NGrid 自己就是 repeat(1, …)，单列本来就不该有列宽表。
+   断点写 700px，跟组件里 NGrid 的 `700:` 前缀（lib/grid-breakpoints.js）同一个数。
+
+   为什么是 !important：NGrid 把 grid-template-columns 写成**行内样式**
+   （node_modules/naive-ui/es/grid/src/Grid.mjs 的 style 计算：
+   gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`），行内样式压过任何
+   选择器组合，不写 !important 这条规则一条声明都不会生效。整份 panel.css 里
+   为排版写的 !important 只有下面这条和紧随的结果行起点，两处都是盖行内样式；
+   另一处 .page [hidden] 的 display 兜底与此无关。不要往别处扩。 */
+@media (min-width: 700px) {
+  .service > .n-grid {
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 0.8fr) 92px auto !important;
+  }
+
+  /* 结果行的起点必须是第 2 列。span="1 700:4" 只声明了宽度，没有声明起点，
+     自动排布会把它放到下一行的第 1 列（服务名那列），左边缘就贴到卡片最左了。
+     NGridItem 的 grid-column 同样是行内样式（GridItem.mjs: `grid-column:
+     span N / span N`），所以起点也只能用 !important 盖。 */
+  .service > .n-grid > .service-result-cell {
+    grid-column: 2 / -1 !important;
+  }
+}
 
 /* 测试结果行常驻：空着也占一行高度，结果出现 / 消失时不会把行高撑起来，
    整页就不会抖。三档颜色只表达状态。 */
