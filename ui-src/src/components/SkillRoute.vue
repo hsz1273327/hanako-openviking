@@ -1,22 +1,26 @@
 <script setup>
-// 「共享技能」页：整页只有一个开关，用来验证 Vue + naive-ui 这条链能在宿主里跑通。
+// 「共享技能」页：整页只有一个开关（把共享技能交给助手按需调用）。
 //
-// 和手写面板的关系：
-// - 数据面复用同一组端点（GET /controls 读，POST /controls 写），不新增后端接口。
-// - 置灰（总闸关着时整块半透）仍由 ui/assets/panel.js 的 paintDim 负责：
-//   它在 .skill-route 上切 dim 类。这里只在首次挂载时补一次，避免启动瞬间漏掉。
-//   所以根节点保留 class="skill-route" 且不绑定动态 class——静态 class 不变，
-//   Vue 重渲染时不会把外部加的 dim 抹掉。
-// - 样式全部留在 ui/assets/panel.css（.skill-route / .skill-route-head /
-//   .skill-route-hint），SFC 里不写 <style>，否则构建会覆盖整份手写样式。
-import { onMounted, ref } from "vue";
+// 这一块上一轮就迁到 Vue 了；本轮整页只剩一个应用，所以它改成读**同一份**
+// 面板状态（composables/useConfig）：
+//
+//   - 开关值的读写仍走 GET/POST /controls 的 skillRouting（不新增后端接口），
+//     乐观更新与失败回滚统一用 store 的 flip，不再自己抄一套；
+//   - 置灰（总闸关着时半透）不再由手写面板的 paintDim 从外部切类，
+//     而是跟着 store.controls.enabled 走 —— 总闸一关，三页的能力块同时变淡；
+//   - 提示位仍是这一块自己的小字（面板别处的提示在各自页面里）。
+//
+// 样式全部留在 ui/assets/panel.css（.skill-route / .skill-route-head / .skill-route-hint），
+// SFC 里不写 <style>。
+import { computed, ref } from "vue";
 import { NSwitch } from "naive-ui";
-import { hana } from "./sdk.js";
+import { useConfig } from "../composables/useConfig.js";
 
 const HINT = "把共享技能交给助手按需调用";
 
-const rootEl = ref(null);
-const routing = ref(false);
+const { state, enabled, flip } = useConfig();
+
+const routing = computed(() => state.controls.skillRouting);
 const pending = ref(false);
 const hint = ref(HINT);
 const hintBad = ref(false);
@@ -33,51 +37,14 @@ function note(text, bad = false) {
   }, 2600);
 }
 
-async function jsonGet(path) {
-  const res = await hana.api.fetch(path);
-  return res.json();
-}
-
-async function jsonPost(path, body) {
-  const res = await hana.api.fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
-
-// 总闸关着时整块置灰。和手写面板同一套语义：只改外观，不禁用开关。
-function applyEnabled(enabled) {
-  if (typeof enabled !== "boolean") return;
-  rootEl.value?.classList.toggle("dim", !enabled);
-}
-
-// 读回当前值：写操作是整组控制的一部分，读不到就不猜，维持「关」。
-onMounted(async () => {
-  try {
-    const out = await jsonGet("/controls");
-    if (typeof out?.skillRouting === "boolean") routing.value = out.skillRouting;
-    applyEnabled(out?.enabled);
-  } catch {
-    // 读不到只影响这一块：顶部状态条已经把失败说清楚了，这里不重复喊。
-  }
-});
-
 async function onToggle(next) {
   if (pending.value) return;
-  const before = routing.value;
-  routing.value = next; // 乐观
   pending.value = true;
   try {
-    const out = await jsonPost("/controls", { skillRouting: next });
-    if (out?.ok === false) throw new Error(out.error || "写入失败");
-    if (typeof out?.skillRouting === "boolean") routing.value = out.skillRouting;
-    applyEnabled(out?.enabled);
-    note("已保存");
-  } catch (error) {
-    routing.value = before;
-    note(String(error?.message || error), true);
+    await flip("skillRouting", next);
+    // 写入成功时服务端确认值与目标值一致；不一致说明失败已回滚。
+    if (state.controls.skillRouting === next) note("已保存");
+    else note(state.note.text || "写入失败", true);
   } finally {
     pending.value = false;
   }
@@ -85,8 +52,13 @@ async function onToggle(next) {
 </script>
 
 <template>
-  <!-- 单根节点，且 class 只写静态值：paintDim 会在这上面切 dim。 -->
-  <section id="skillRoute" ref="rootEl" class="card skill-route" aria-label="技能路由">
+  <!-- 单根节点，class 只写静态值 + 一个 dim：总闸关着时整块半透。 -->
+  <section
+    id="skillRoute"
+    class="card skill-route"
+    :class="{ dim: !enabled }"
+    aria-label="技能路由"
+  >
     <header class="skill-route-head">
       <h2 class="card-title">技能路由</h2>
       <NSwitch

@@ -1072,3 +1072,14 @@ html, body {
     overflow-y: auto;
   }
 }
+
+/* ---------- Vue 版补丁：naive-ui 的开关 ---------- */
+
+/* 总闸与探针用 n-switch 画（naive-ui 的亮色默认 + theme.js 的品牌色）。
+   它不认 .switch 的 width / margin-left:auto，这两条把它摆回原来的位置：
+   总闸那一行靠右，探针那一行也靠右，行高仍由 .master / .toggle 的 padding 决定。 */
+.master > .n-switch,
+.toggle > .n-switch {
+  flex: none;
+  margin-left: auto;
+}

@@ -137,7 +137,7 @@ import {
   OVERRIDE_KEYS,
 } from "../src/state/session.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
-import { sessionKeyOf as uiSessionKeyOf } from "../ui/assets/session-key.js";
+import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
 // 面板三页标签与记忆键：纯逻辑，node 直接验。
 import {
   DEFAULT_TAB,
@@ -146,16 +146,16 @@ import {
   normalizeTab,
   readTab,
   writeTab,
-} from "../ui/assets/tabs.js";
+} from "../ui-src/src/lib/tabs.js";
 // checks 归一化的唯一实现：路由与工具共用，这里直接验同一份输入过两处。
 import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
 // check 状态 -> 颜色档位，前端与详情行共用。
-import { statusTone as uiStatusTone } from "../ui/assets/check-tone.js";
+import { statusTone as uiStatusTone } from "../ui-src/src/lib/check-tone.js";
 // 服务端检查项的摘要文案：面板那一行字由它造，必须能测。
 import {
   checkStatusLabel as uiCheckStatusLabel,
   summarizeChecks as uiSummarizeChecks,
-} from "../ui/assets/check-summary.js";
+} from "../ui-src/src/lib/check-summary.js";
 // 面板那排召回下拉的状态与提交：成功 / 失败两种收笔都由它定。
 import {
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
@@ -201,7 +201,36 @@ import {
   scoringServiceLayout,
   scoringServiceRow,
   scoringServicesNote,
-} from "../ui/assets/recall-layers.js";
+} from "../ui-src/src/lib/recall-layers.js";
+// 面板的视图投影（状态 → 文案 / 档位 / 行内容）：纯函数，节点直接验。
+import {
+  LOG_EMPTY,
+  MASTER_HINT_OFF,
+  MASTER_HINT_ON,
+  PREFIX_WARN as uiPrefixWarn,
+  apiKeyPlaceholder,
+  dotClassOf,
+  formatChannelTest,
+  logBodyText,
+  logChips,
+  peerExcluded,
+  peerMetaText,
+  peerTappable,
+  peerTitle,
+  readFootText,
+  statusView,
+  transportTextOf,
+  versionTextOf,
+  withStoredOption,
+} from "../ui-src/src/lib/panel-view.js";
+// 面板状态机（无 vue、无 DOM）：假 fetch 直接跑「改了就提交 / 失败回滚」。
+import { createPanelStore, serviceKindOfField, servicePartnerOf } from "../ui-src/src/lib/panel-store.js";
+// 响应式外壳：createConfig 注入假 fetch，useConfig 就是组件里用的那一份。
+import { createConfig, useConfig } from "../ui-src/src/composables/useConfig.js";
+// 只为验「store 写进去的状态真的能被 Vue 看见」——裸 import "vue" 从 dev/ 解析不到，
+// 走 ui-src 自己的依赖目录（离线就位，构建也需要它）。
+import { effect as vueEffect } from "../ui-src/node_modules/vue/index.mjs";
+
 // 工具的报告体：与 /status 比 ready.checks 的形状是否一致。
 import { buildStatusReport } from "../index.js";
 // 设置页「GET /conn 响应 → 字段」的映射是纯函数，直接 import 断言，
@@ -228,6 +257,34 @@ function check(label, condition, detail) {
 
 function eq(label, actual, expected) {
   check(label, JSON.stringify(actual) === JSON.stringify(expected), `got ${JSON.stringify(actual)}`);
+}
+
+// ---- ui-src 源码读取：整页迁到 Vue 之后，结构断言改读组件 ----
+const UI_SRC_DIR = path.join(import.meta.dirname, "../ui-src/src");
+const uiSrcRaw = (name) => fs.readFileSync(path.join(UI_SRC_DIR, name), "utf8");
+// 去掉注释再断言：解释性注释里会出现 darkTheme / placeholder / 服务未配置 这类词，
+// 拿注释当证据等于自己骗自己。
+const uiCode = (name) =>
+  uiSrcRaw(name)
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/[^\n]*/gm, "");
+const uiProjectRaw = (name) =>
+  fs.readFileSync(path.join(import.meta.dirname, "../ui-src", name), "utf8");
+const panelHtml = () =>
+  fs.readFileSync(path.join(import.meta.dirname, "../ui/panel.html"), "utf8");
+const panelCss = () =>
+  fs
+    .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 取一条 CSS 规则的花括号内容（只取第一条，够用了）。 */
+function ruleBody(css, selector) {
+  const index = css.indexOf(`${selector} {`);
+  if (index < 0) return null;
+  const open = css.indexOf("{", index);
+  const end = css.indexOf("}", open);
+  return css.slice(open + 1, end);
 }
 
 // ---- mock sdk.config ----
@@ -939,79 +996,225 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("空状态的状态词", uiCheckStatusLabel(undefined), "异常");
 }
 
-// ================= ui: 面板结构（静态） =================
+// ================= ui: 面板结构（组件） =================
 {
-  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
-  const html = read("panel.html");
-  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  // 这一块以前读 ui/panel.html 的 DOM。整页迁到 Vue 之后 HTML 只剩一个挂载点，
+  // 断言改成读组件源码（ui-src/src/**）：验的还是同一件事——
+  // 哪个控件在哪一块、两块谁先谁后、CSS 规则有没有在搬家时丢掉。
+  const html = panelHtml();
+  const css = panelCss();
+  const app = uiCode("App.vue");
+  const globalPanel = uiCode("components/GlobalPanel.vue");
+  const master = uiCode("components/MasterCard.vue");
+  const hub = uiCode("components/HubIdentity.vue");
+  const prelude = uiCode("components/PreludeCard.vue");
+  const logsCard = uiCode("components/LogsCard.vue");
+  const memoryPanel = uiCode("components/MemoryPanel.vue");
+  const recall = uiCode("components/RecallCard.vue");
+  const peerList = uiCode("components/PeerList.vue");
+  const skillPanel = uiCode("components/SkillPanel.vue");
+  const globalSources = [globalPanel, master, hub, prelude, logsCard];
+  const memorySources = [memoryPanel, recall, peerList, uiCode("components/ChannelList.vue")];
 
-  const colsStart = html.indexOf('<section class="cols">');
-  const colsEnd = html.indexOf("</section>", colsStart);
-  const peerIdx = html.indexOf('id="peerList"');
-  const peerCountIdx = html.indexOf('id="peerCount"');
-  const logsIdx = html.indexOf('<section class="card logs"');
-  const memoryStart = html.indexOf('id="panel-memory"');
-  const skillStart = html.indexOf('id="panel-skill"');
-  const summaryIdx = html.indexOf('id="checksSummary"');
-  check("两栏与日志区都找得到", colsStart > 0 && colsEnd > colsStart && logsIdx > colsEnd);
-  check("peer 列表不在中枢卡 / 两栏里", peerIdx > colsEnd, `peerIdx=${peerIdx} colsEnd=${colsEnd}`);
-  check("peer 计数也跟着搬出两栏", peerCountIdx > colsEnd);
-  check("peer 栏在记忆页里", peerIdx > memoryStart && peerIdx < skillStart,
-    `peer=${peerIdx} memory=${memoryStart}..${skillStart}`);
-  check("摘要行留在中枢卡里", summaryIdx > colsStart && summaryIdx < colsEnd);
-  check("中枢卡里不再有 peer 列表", html.slice(colsStart, colsEnd).indexOf('id="peerList"') === -1);
-
-  const ruleFor = (selector) => {
-    const index = css.indexOf(`${selector} {`);
-    if (index < 0) return null;
-    const open = css.indexOf("{", index);
-    const end = css.indexOf("}", open);
-    return { index, body: css.slice(open + 1, end) };
-  };
-  const checksRule = ruleFor(".checks");
-  const summaryRule = ruleFor(".checks-summary");
-  check("明细列表的规则还在", checksRule !== null);
-  check(
-    "明细改成竖向一行一项（不再是横排胶囊）",
-    /display\s*:\s*grid/.test(checksRule?.body || "") &&
-      !/flex-wrap\s*:\s*wrap/.test(checksRule?.body || ""),
-    checksRule?.body || "",
+  // ---- panel.html：只剩挂载点；手写脚本已断链，但文件留着能回退 ----
+  check("panel.html 只剩挂载点", html.includes('<div id="panel-app"></div>'), html);
+  eq(
+    "panel.html 只引一个 module script（构建产物）",
+    [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
+      (match) => match[1],
+    ),
+    ["panel-vue.js"],
   );
-  check("摘要行的规则在", summaryRule !== null);
+  check("panel.html 不再引用手写 panel.js", html.includes("assets/panel.js") === false, html);
+  check(
+    "panel.html 里不再写死面板 DOM",
+    ["masterCard", "recallGate", "peerList", "tab-global", "scoringServices", "logBody"].every(
+      (needle) => html.includes(needle) === false,
+    ),
+    html,
+  );
+  check("panel.html 仍挂静态 panel.css（不改成构建产出）",
+    html.includes('href="./assets/panel.css"'));
+  check("panel.html 没有内联样式块", html.includes("<style") === false);
+  check(
+    "手写脚本与旧副本都还在（这一轮失败可以回退）",
+    [
+      "panel.js", "settings.js", "card.js", "tabs.js", "recall-layers.js",
+      "check-summary.js", "check-tone.js", "session-key.js",
+    ].every((name) => fs.existsSync(path.join(import.meta.dirname, "../ui/assets", name))),
+  );
 
-  // 全绿时只是一行静态文字：不是按钮、不可点、没有箭头。
-  const summaryTag = html.slice(0, summaryIdx).lastIndexOf("<");
-  const summaryLine = html.slice(summaryTag, html.indexOf(">", summaryIdx) + 1);
+  // ---- 哪一块在哪个组件里 ----
+  for (const needle of [
+    'id="masterCard"',
+    'id="prelude"',
+    'id="scoringServices"',
+    'class="cols"',
+    'class="card logs"',
+  ]) {
+    check(
+      `全局页（组件）包含 ${needle}`,
+      globalSources.some((source) => source.includes(needle)),
+      needle,
+    );
+  }
+  for (const needle of [
+    'class="scoped-note"',
+    'class="card recall"',
+    'id="recallGate"',
+    'id="queryMode"',
+    'id="rerank"',
+    'id="peerList"',
+  ]) {
+    check(
+      `记忆页（组件）包含 ${needle}`,
+      memorySources.some((source) => source.includes(needle)),
+      needle,
+    );
+  }
+  for (const needle of ["recallGate", "peerList", "skillRouting", 'class="card recall"']) {
+    check(`全局页（组件）不包含 ${needle}`, globalSources.every((src) => src.includes(needle) === false), needle);
+  }
+  check("记忆页（组件）不包含总闸", memorySources.every((src) => src.includes('id="masterCard"') === false));
+  check("记忆页（组件）不包含打分服务", memorySources.every((src) => src.includes('id="scoringServices"') === false));
+  check("前置里没有技能路由", prelude.includes("skillRouting") === false);
+  check("前置里不含下拉", prelude.includes("<select") === false);
+  check("前置里只有一个开关（探针）", (prelude.match(/<NSwitch\b/g) || []).length === 1,
+    String((prelude.match(/<NSwitch\b/g) || []).length));
+  check("技能页（组件）只剩 SkillRoute 外壳",
+    skillPanel.includes("<SkillRoute") && skillPanel.includes('id="skill-route-app"'));
+  check("技能页不再写死技能路由 DOM",
+    ['data-key="skillRouting"', 'id="skillRoute"', 'class="switch"'].every(
+      (needle) => skillPanel.includes(needle) === false,
+    ));
+
+  // ---- 页面内顺序 ----
+  const globalOrder = ["<MasterCard", "<HubIdentity", "<PreludeCard", "<LogsCard"].map((needle) =>
+    globalPanel.indexOf(needle),
+  );
+  check(
+    "全局页内顺序：总闸 → 中枢 / 身份 → 前置 → 日志",
+    globalOrder.every((value, index) => value > 0 && (index === 0 || value > globalOrder[index - 1])),
+    globalOrder.join(" < "),
+  );
+  check(
+    "记忆页顺序：按会话说明 → 召回管理",
+    memoryPanel.indexOf('class="scoped-note"') > 0 &&
+      memoryPanel.indexOf('class="scoped-note"') < memoryPanel.indexOf("<RecallCard"),
+    memoryPanel,
+  );
+  check(
+    "根组件按 标签栏 → 全局 → 记忆 → 技能 排列",
+    app.indexOf("<TabBar") < app.indexOf('id="panel-global"') &&
+      app.indexOf('id="panel-global"') < app.indexOf('id="panel-memory"') &&
+      app.indexOf('id="panel-memory"') < app.indexOf('id="panel-skill"'),
+    app,
+  );
+  check("三页都在根组件里挂载（不是切页才创建）",
+    ["<GlobalPanel", "<MemoryPanel", "<SkillPanel"].every((needle) => app.includes(needle)));
+
+  // ---- 中枢 / 身份两栏 ----
+  check("HubIdentity 是两栏", hub.includes('<section class="cols">'));
+  eq("两栏里恰好两张卡", (hub.match(/<article class="card">/g) || []).length, 2);
+  check("两栏标题是「中枢」「身份」", hub.includes(">中枢<") && hub.includes(">身份<"));
+  check(
+    "中枢在前、身份在后",
+    hub.indexOf(">中枢<") < hub.indexOf(">身份<"),
+    hub.indexOf(">中枢<"),
+  );
+  check(
+    "检查项摘要留在中枢卡里（身份卡之前）",
+    hub.indexOf('id="checksSummary"') > hub.indexOf(">中枢<") &&
+      hub.indexOf('id="checksSummary"') < hub.indexOf(">身份<"),
+  );
+  check("中枢卡里没有 peer 列表", hub.includes('id="peerList"') === false);
+  check("记忆页的 peer 名单不在两栏里", hub.includes("<PeerList") === false);
+  check("报错行与提示位在中枢卡里",
+    hub.indexOf('id="reachError"') > hub.indexOf(">中枢<") &&
+      hub.indexOf('id="saveHint"') > hub.indexOf('id="reachError"'));
+  check("中枢卡有地址 / key / 三个事实",
+    ['id="serverUrl"', 'id="apiKey"', 'id="latency"', 'id="version"', 'id="transport"'].every(
+      (needle) => hub.includes(needle),
+    ));
+  check("身份卡有门牌前缀 / 超时 / 预算",
+    ['id="peerPrefix"', 'id="timeoutMs"', 'id="budgetTokens"'].every((needle) => hub.includes(needle)));
+  check("超时与预算同排一行（field pair）", /class="field pair"/.test(hub));
+
+  // ---- 摘要行：一行静态文字，不可点 ----
+  const summaryStart = hub.indexOf('id="checksSummary"');
+  const summaryLine = hub.slice(hub.lastIndexOf("<div", summaryStart), hub.indexOf(">", summaryStart) + 1);
   check("摘要行不是 button", summaryLine.includes("<button") === false, summaryLine);
-  check("摘要行没有 aria-expanded", html.includes("aria-expanded") === false);
-  check("摘要行不可点", /cursor\s*:\s*pointer/.test(summaryRule?.body || "") === false,
-    summaryRule?.body || "");
+  check("摘要行没有 aria-expanded", (app + hub).includes("aria-expanded") === false);
+  check("摘要行不可点", /cursor\s*:\s*pointer/.test(ruleBody(css, ".checks-summary") || "") === false);
   check("摘要行没有箭头伪元素", css.includes(".checks-summary::before") === false);
   check("箭头字符已经不在了", css.includes("▸") === false && css.includes("▾") === false);
   check("折叠状态的 open 类不再用", css.includes(".checks-summary.open") === false);
-  const statusRule = ruleFor(".checks li .check-status");
-  check("状态词规则在", statusRule !== null);
+  check("摘要行按档位上色（tone 直接当类名）", /:class="checksSummary\.tone"/.test(hub));
+  check("问题项按 statusTone 上色", hub.includes("statusTone(problem.status)"));
+  check("问题项的 details 只进 title", hub.includes("details.map(") && hub.includes(":title="));
+
+  // ---- CSS：这一轮没改样式文件，规则必须原样还在 ----
+  check("明细列表的规则还在", ruleBody(css, ".checks") !== null);
+  check(
+    "明细改成竖向一行一项（不再是横排胶囊）",
+    /display\s*:\s*grid/.test(ruleBody(css, ".checks") || "") &&
+      !/flex-wrap\s*:\s*wrap/.test(ruleBody(css, ".checks") || ""),
+    ruleBody(css, ".checks") || "",
+  );
+  check("摘要行的规则在", ruleBody(css, ".checks-summary") !== null);
+  check("状态词规则在", ruleBody(css, ".checks li .check-status") !== null);
   check(
     "状态词不叠 opacity（父项 li 已经半透，再乘一层就看不见了）",
-    /opacity/.test(statusRule?.body || "") === false,
-    statusRule?.body || "",
+    /opacity/.test(ruleBody(css, ".checks li .check-status") || "") === false,
+    ruleBody(css, ".checks li .check-status") || "",
   );
-  check("状态词前有分隔点", /content\s*:\s*"·\\20"|content\s*:\s*"·\s/.test(
-    ruleFor(".checks li .check-status::before")?.body || "",
-  ));
+  check("状态词前有分隔点", /content\s*:\s*"·/.test(ruleBody(css, ".checks li .check-status::before") || ""));
 
   // hidden 的兜底：display:grid / flex 不能再把 hidden 顶掉。
-  const hiddenRule = ruleFor(".page [hidden]");
+  const hiddenRule = ruleBody(css, ".page [hidden]");
   check("hidden 兜底规则在", hiddenRule !== null);
-  check(
-    "hidden 兜底是 display:none !important",
-    /display\s*:\s*none\s*!important/.test(hiddenRule?.body || ""),
-    hiddenRule?.body || "",
-  );
+  check("hidden 兜底是 display:none !important", /display\s*:\s*none\s*!important/.test(hiddenRule || ""),
+    hiddenRule || "");
   check(
     "hidden 兜底在 .checks 之前（先定规矩）",
-    (hiddenRule?.index ?? Infinity) < (checksRule?.index ?? -1),
+    css.indexOf(".page [hidden] {") < css.indexOf(".checks {"),
   );
+
+  // ---- 打分服务：容器在组件里，行由描述表驱动 ----
+  check("打分服务容器在前置卡里", prelude.includes('id="scoringServices"'));
+  check("前置卡在全局页里、中枢之后", globalPanel.indexOf("<PreludeCard") > globalPanel.indexOf("<HubIdentity"));
+  check("打分服务容器本身不是写死的两行",
+    prelude.includes('v-for="row in layout.rows"') && prelude.includes("scoringServiceLayout("));
+  check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
+  check("打分服务有样式", /\n\.services \{/.test(css));
+  check("服务行是竖向一条一条的栅格", /\n\.service-row \{/.test(css));
+  check(
+    "服务行五列：固定宽服务名 + 四个控件列",
+    /\n\.service-row \{[\s\S]{0,260}grid-template-columns:\s*3\.2em[^\n]*1\.4fr[^\n]*1fr[^\n]*0\.62fr[^\n]*auto/.test(css),
+  );
+  check("服务名固定宽度且右对齐", /\n\.service-name \{[\s\S]{0,120}text-align:\s*right/.test(css));
+  check("结果行独占第二行", /\.service-result \{[\s\S]{0,120}grid-column:\s*2 \/ -1/.test(css));
+  check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
+  check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
+  check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);
+  check("测试按钮靠底对齐", /\.field\.service-test \{[\s\S]{0,120}align-items:\s*flex-end/.test(css));
+  for (const tone of ["ok", "bad", "muted"]) {
+    check(`结果行的 ${tone} 档有样式`, new RegExp(`\\.service-result\\.${tone} \\{`).test(css));
+  }
+  check("结果行样式存在", /\n\.service-result \{/.test(css));
+  check("整对回退说明有样式", /\n\.channel-pair-note \{/.test(css));
+
+  // ---- 顶部身份条与页脚（根组件里） ----
+  check("顶部条有圆点 / 药丸 / 副标题 / 两个按钮",
+    ["id=\"dot\"", "id=\"statePill\"", "id=\"subLine\"", "id=\"testBtn\"", "id=\"refreshBtn\""].every(
+      (needle) => app.includes(needle),
+    ));
+  check("页脚在根组件里", app.includes('<footer id="foot" class="foot"'));
+  check("根组件用 data-hana-app-ui 标记面板根", /data-hana-app-ui/.test(app));
+  check("顶部条文案取自 statusView（不在模板里拼字符串）",
+    app.includes("view.pillText") && app.includes("view.subLine"));
+  check("刷新按钮在读取中禁用", /:disabled="refreshing"/.test(app));
+  check("测试连接按钮有测试中文案", app.includes('"测试中…"') && app.includes("测试连接"));
 }
 
 // ================= routes: peers =================
@@ -2004,107 +2207,347 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 }
 
-// ================= ui: 召回策略在主面板 =================
+// ================= ui: 召回策略在主面板（组件 + 状态机） =================
 {
-  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
-  const html = read("panel.html");
-  const panelJs = read("assets/panel.js");
-  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
-  const layersJs = read("assets/recall-layers.js");
-  const settingsHtml = read("settings.html");
-  const settingsJs = read("assets/settings.js");
+  // 旧版读 ui/panel.html + ui/assets/panel.js。整页迁到 Vue 后：
+  //   控件在 components/RecallCard.vue / ChannelList.vue / PreludeCard.vue；
+  //   读 / 写 / 回滚在 lib/panel-store.js（冒烟后面用假 fetch 真跑一遍）。
+  const html = panelHtml();
+  const css = panelCss();
+  const recall = uiCode("components/RecallCard.vue");
+  const channels = uiCode("components/ChannelList.vue");
+  const prelude = uiCode("components/PreludeCard.vue");
+  const hub = uiCode("components/HubIdentity.vue");
+  const memoryPanel = uiCode("components/MemoryPanel.vue");
+  const storeJs = uiSrcRaw("lib/panel-store.js");
+  const layersJs = uiSrcRaw("lib/recall-layers.js");
+  const settingsHtml = fs.readFileSync(path.join(import.meta.dirname, "../ui/settings.html"), "utf8");
+  const settingsJs = fs.readFileSync(path.join(import.meta.dirname, "../ui/assets/settings.js"), "utf8");
 
-  const gateIdx = html.indexOf('id="recallGate"');
-  const modeIdx = html.indexOf('id="queryMode"');
-  const rerankIdx = html.indexOf('id="rerank"');
+  const gateIdx = recall.indexOf('id="recallGate"');
+  const modeIdx = recall.indexOf('id="queryMode"');
+  const rerankIdx = recall.indexOf('id="rerank"');
   check("面板上有召回判断下拉", gateIdx > 0, `idx=${gateIdx}`);
   check("面板上有召回查询下拉", modeIdx > 0, `idx=${modeIdx}`);
   check("面板上有结果重排下拉", rerankIdx > 0, `idx=${rerankIdx}`);
-  check("召回判断有 rules 选项", html.includes('value="rules"') && html.includes("规则跳过"));
-  check("召回查询有 context 选项", html.includes('value="context"') && html.includes("带上文"));
-  check("结果重排有 off / llm 选项", html.includes("结果重排") && html.includes("开启") &&
-    /<select id="rerank">\s*<option value="off">关<\/option>\s*<option value="llm">开启<\/option>/.test(html));
-
-  // 位置：两栏之后、日志之前，占满整行（不在两栏里），跟 peer 名单同一栏。
-  const colsStart = html.indexOf('<section class="cols">');
-  const colsEnd = html.indexOf("</section>", colsStart);
-  const logsIdx = html.indexOf('<section class="card logs"');
-  const globalPanelStart = html.indexOf('id="panel-global"');
-  const memoryPanelStart = html.indexOf('id="panel-memory"');
-  const skillPanelStart = html.indexOf('id="panel-skill"');
-  const footStart = html.indexOf('<footer id="foot"');
-  const scopedIdx = html.indexOf('class="scoped-note"');
-  const recallStart = html.indexOf('<section class="card recall"');
-  const recallEnd = html.indexOf("</section>", recallStart);
-  const peerIdx = html.indexOf('id="peerList"');
-  const peerCountIdx = html.indexOf('id="peerCount"');
-  check("召回管理一栏找得到", recallStart > 0 && recallEnd > recallStart,
-    `recall=${recallStart}..${recallEnd}`);
-  check("召回管理在两栏之后", recallStart > colsEnd, `recall=${recallStart} colsEnd=${colsEnd}`);
   check(
-    "日志在全局页、召回管理在记忆页",
-    logsIdx > globalPanelStart && logsIdx < memoryPanelStart &&
-      recallStart > memoryPanelStart && recallStart < skillPanelStart,
-    `logs=${logsIdx} global=${globalPanelStart}..${memoryPanelStart} recall=${recallStart} skill=${skillPanelStart}`,
+    "召回判断三个选项齐全",
+    ['value="off"', 'value="rules"', 'value="llm"'].every((needle) => recall.includes(needle)) &&
+      recall.includes("规则跳过") &&
+      recall.includes("模型判断（用宿主模型）"),
   );
-  const hubIdx = html.indexOf(">中枢<");
-  const identIdx = html.indexOf(">身份<");
+  check("召回查询两个选项齐全",
+    recall.includes("带上文") && recall.includes('value="context"'));
   check(
-    "中枢与身份仍在两栏里、在召回管理之前",
-    hubIdx > colsStart && hubIdx < colsEnd && identIdx > colsStart && identIdx < colsEnd &&
-      identIdx < recallStart,
-    `hub=${hubIdx} ident=${identIdx} cols=${colsStart}..${colsEnd} recall=${recallStart}`,
+    "结果重排只有关 / 开启两项",
+    /<select id="rerank"[\s\S]{0,220}<option value="off">关<\/option>[\s\S]{0,120}<option value="llm">开启<\/option>/.test(
+      recall,
+    ),
+    recall.slice(rerankIdx, rerankIdx + 320),
   );
-
-  // 同一栏：三个下拉与 peer 名单都在这个 section 里。
-  check(
-    "三个下拉与 peer 列表在同一个 section 内",
-    gateIdx > recallStart && gateIdx < recallEnd &&
-      modeIdx > recallStart && modeIdx < recallEnd &&
-      rerankIdx > recallStart && rerankIdx < recallEnd &&
-      peerIdx > recallStart && peerIdx < recallEnd,
-    `recall=${recallStart}..${recallEnd} gate=${gateIdx} mode=${modeIdx} rerank=${rerankIdx} peer=${peerIdx}`,
-  );
-  check("计数也在这一栏里（仍算 peer 个数）",
-    peerCountIdx > recallStart && peerCountIdx < recallEnd);
-  const recallTitle = html
-    .slice(recallStart, recallEnd)
-    .match(/<h2 class="card-title">([^<]*)<\/h2>/);
-  eq("这一栏的标题是「召回管理」", recallTitle?.[1], "召回管理");
   check("召回判断在前、召回查询在后", gateIdx < modeIdx);
   check("结果重排排在召回查询之后", modeIdx < rerankIdx);
-  // 这一栏的主栅格恰好三个下拉；llm 判断 / 重排展开区各有一个模型下拉。
-  const advancedIdx = html.indexOf('id="gateAdvanced"');
-  const rerankAdvancedIdx = html.indexOf('id="rerankAdvanced"');
-  const sepAfterAdvanced = html.indexOf('<div class="recall-sep"', advancedIdx);
-  check("召回判断 / 查询 / 重排是三个主下拉",
-    (html.slice(recallStart, advancedIdx).match(/<select /g) || []).length === 3);
-  check("llm 判断展开区只有一个模型下拉（不再分两层）",
-    (html.slice(advancedIdx, rerankAdvancedIdx).match(/<select /g) || []).length === 1);
-  check("重排展开区只有一个模型下拉",
-    (html.slice(rerankAdvancedIdx, sepAfterAdvanced).match(/<select /g) || []).length === 1);
-  // 上下两块之间要有一条分隔，不然读起来像一锅端。
-  check("下拉与名单之间有分隔",
-    /class="recall-sep"/.test(html.slice(recallStart, recallEnd)));
+  // 这一栏的主栅格恰好三个下拉；两个展开区各只有一个模型下拉。
+  check(
+    "召回判断 / 查询 / 重排是三个主下拉",
+    (recall.slice(0, recall.indexOf('id="gateAdvanced"')).match(/<select /g) || []).length === 3,
+  );
+  const advancedIdx = recall.indexOf('id="gateAdvanced"');
+  const rerankAdvancedIdx = recall.indexOf('id="rerankAdvanced"');
+  check(
+    "llm 判断展开区只有一个模型下拉（不再分两层）",
+    (recall.slice(advancedIdx, rerankAdvancedIdx).match(/<select /g) || []).length === 1,
+  );
+  check(
+    "重排展开区只有一个模型下拉",
+    (recall.slice(rerankAdvancedIdx, recall.indexOf('<div class="recall-sep"')).match(/<select /g) || [])
+      .length === 1,
+  );
+  check("下拉与名单之间有分隔", /class="recall-sep"/.test(recall));
+  check("召回管理一栏在记忆页里", memoryPanel.includes("<RecallCard />"));
+  // 三个下拉与 peer 名单在同一个 section 里（同一栏）。
+  const recallStart = recall.indexOf('class="card recall"');
+  const recallEnd = recall.lastIndexOf("</section>");
+  check(
+    "三个下拉与 peer 列表在同一个 section 内",
+    [gateIdx, modeIdx, rerankIdx].every((idx) => idx > recallStart && idx < recallEnd) &&
+      recall.indexOf("<PeerList") > recallStart &&
+      recall.indexOf("<PeerList") < recallEnd,
+  );
+  check("计数也在这一栏里（仍算 peer 个数）", recall.includes('id="peerCount"'));
+  eq(
+    "这一栏的标题是「召回管理」",
+    /<h2 class="card-title">([^<]*)<\/h2>/.exec(recall)?.[1],
+    "召回管理",
+  );
+  check("面板没有为召回单设保存按钮",
+    recall.includes("recallSave") === false &&
+      (recall.match(/保存/g) || []).length === 0,
+    recall.match(/.{0,20}保存.{0,20}/g)?.join(" | ") ?? "");
+  check("说明小字用 field-hint", (recall.match(/class="field-hint"/g) || []).length >= 4);
+  check("规则跳过的说明在组件里", recall.includes("≤8 字") && recall.includes("指代词"));
+  check("带上文的说明在组件里",
+    recall.includes("300 字符") && recall.includes("最新一句保持完整"));
+  check(
+    "名单底部说明串起两件事",
+    uiCode("components/PeerList.vue").includes("点一下任意一行可以排除这个 peer") &&
+      uiCode("components/PeerList.vue").includes("不再参与上面的召回"),
+  );
+  check("旧的独立 recall-row 区块已经不在", !recall.includes("recall-row") && !css.includes(".recall-row"));
+  const recallRule = ruleBody(css, ".recall-grid");
+  check("下拉那一行有栅格", recallRule !== null);
+  check("召回那三个下拉并排（一行三列）", /grid-template-columns\s*:\s*1fr 1fr 1fr/.test(recallRule || ""),
+    recallRule || "");
+  check("分隔线有样式", /\n\.recall-sep \{/.test(css));
+  check("peer 名单样式还在", /\n\.peer-list \{/.test(css));
+  check("下拉沿用 field 输入框样式", /\.field input,\n\.field select \{/.test(css));
 
-  // 技能路由从开关排里搬出来，与记忆召回平级；探针归到「前置」卡。
-  // 这一页已经迁到 Vue（ui-src → ui/assets/panel-vue.js）：HTML 里只剩挂载点，
-  // 卡片本体（标题 / n-switch / 说明）在组件源码里，挂载由入口完成。
-  const preludeStart = html.indexOf('<section id="prelude"');
-  const preludeEnd = html.indexOf("</section>", preludeStart);
-  const preludeBlock = html.slice(preludeStart, preludeEnd);
-  const skillPanelBlock = html.slice(html.lastIndexOf("<div", skillPanelStart), footStart);
-  const skillRouteStart = html.indexOf('id="skill-route-app"');
-  const skillRouteEnd = html.indexOf("</div>", skillRouteStart);
-  const masterStart = html.indexOf('<section id="masterCard"');
-  const readUiSrc = (name) =>
-    fs.readFileSync(path.join(import.meta.dirname, "../ui-src", name), "utf8");
-  const skillRouteVue = readUiSrc("src/components/SkillRoute.vue");
-  const appVue = readUiSrc("src/App.vue");
-  const settingsAppVue = readUiSrc("src/SettingsApp.vue");
-  const settingsEntry = readUiSrc("src/entries/settings.js");
-  const themeJs = readUiSrc("src/theme.js");
-  const connFieldsJs = readUiSrc("src/conn-fields.js");
+  // ---- 即时生效：改了就发，没有保存按钮 ----
+  check(
+    "三个主下拉都绑 change 即时提交",
+    (recall.match(/@change="onSelect\('(recallGate|queryMode|rerank)'/g) || []).length === 3,
+    (recall.match(/@change="onSelect\(/g) || []).length,
+  );
+  check("select 的 change 走 store.setForm", recall.includes("setForm(key, event.target.value)"));
+  check(
+    "setForm 改完立刻 saveLayers",
+    /function setForm\(key, value\)[\s\S]{0,120}saveLayers\(\)/.test(storeJs),
+  );
+  check("面板读取召回策略", storeJs.includes('get("/recall-mode")'));
+  check("面板提交召回策略", storeJs.includes('post("/recall-mode"'));
+  check("提交把通道数组转成 JSON 串", storeJs.includes("rerankChannelsText(rerankChannels)"));
+  check(
+    "整单提交走 commitLayers 的 apply 链",
+    storeJs.includes("commitLayers({") &&
+      storeJs.includes("apply: (layers) =>") &&
+      storeJs.includes("normalize: paintRecallConfig"),
+  );
+  check(
+    "一次只发一单（请求在飞时改动记 dirty）",
+    storeJs.includes("layersPending") && storeJs.includes("layersDirty"),
+  );
+
+  // ---- llm 展开块：显隐由值决定，提示词是 value 不是 placeholder ----
+  check("llm 展开块存在", advancedIdx > 0);
+  check(
+    "展开块显隐由召回判断决定",
+    /id="gateAdvanced"[\s\S]{0,200}:hidden="!gateOpen"/.test(recall) &&
+      recall.includes('state.form.recallGate === "llm"'),
+    recall.slice(advancedIdx, advancedIdx + 220),
+  );
+  check("提示词框 rows=4", /id="gatePrompt"[\s\S]{0,200}rows="4"/.test(recall));
+  check("提示词框有长度上限 2000", /id="gatePrompt"[\s\S]{0,240}maxlength="2000"/.test(recall));
+  // 默认提示词靠 value 填，不靠 placeholder：placeholder 一敲键盘就消失，当不了草稿。
+  const promptTag = /<textarea[\s\S]*?id="gatePrompt"[\s\S]*?>/.exec(recall)?.[0] ?? "";
+  check("提示词框没有 placeholder", promptTag.includes("placeholder") === false, promptTag);
+  check("提示词框绑的是 value（草稿坐在框里）", /:value="state\.prompts\.gate"/.test(promptTag), promptTag);
+  check("默认提示词不写进组件", recall.includes(DEFAULT_GATE_PROMPT) === false);
+  check(
+    "恢复默认按钮在",
+    /id="gateResetPrompt"[\s\S]{0,200}@click="resetPrompt\('gate'\)"/.test(recall),
+  );
+  check(
+    "恢复默认只填框、走正常提交",
+    /function resetPrompt\(which\)[\s\S]{0,260}saveLayers\(\)/.test(storeJs) &&
+      storeJs.includes("touchPrompt(which, value)"),
+  );
+  check("提示词状态位在", recall.includes('id="gatePromptStatus"'));
+  check("状态小字由 promptStatus 生成",
+    recall.includes("gateStatus") && storeJs.includes("promptStatus(state.prompts.gate)"));
+  check(
+    "提示词框下有占位符说明",
+    recall.includes("用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。"),
+  );
+  check(
+    "提示词框绑 input 时标记 touched",
+    /@input="onPromptInput\('gate'/.test(recall) &&
+      storeJs.includes("state.prompts.gateTouched = true"),
+  );
+  check("空提示词不再写“留空使用默认”", recall.includes("留空使用默认提示词") === false);
+  check("没有模型来源两个单选", recall.includes('name="gateModelMode"') === false);
+  check("没有第二层 provider 下拉", recall.includes('id="gateProvider"') === false);
+  check("没有可展开的自选区", recall.includes('id="gateCustom"') === false);
+  check("判断模型只有一个下拉", (recall.match(/<select[^>]*id="gateModel"/g) || []).length === 1);
+  check(
+    "模型下拉选项来自目录（首项是默认）",
+    /v-for="option in gateModelOptions"/.test(recall) &&
+      storeJs.includes("[DEFAULT_MODEL_OPTION, ...modelOptions(state.models.models)]"),
+  );
+  check("目录坏了只留默认项", storeJs.includes("[DEFAULT_MODEL_OPTION]"));
+  check("模型下拉不预设禁用", /id="gateModel"[^>]*disabled/.test(recall) === false);
+  check("目录读不到时留原因位", recall.includes('id="gateModelsHint"'));
+  check("面板读模型目录", storeJs.includes('get("/models")'));
+  check("新控件有样式", /\n\.gate-advanced \{/.test(css));
+  check("textarea 有输入框样式", /\n\.field textarea \{/.test(css));
+
+  // ---- 结果重排：下拉、展开块、提示词与模型 ----
+  check("重排展开块存在", rerankAdvancedIdx > 0);
+  check(
+    "重排展开块显隐由结果重排决定",
+    /id="rerankAdvanced"[\s\S]{0,200}:hidden="!rerankOpen"/.test(recall) &&
+      recall.includes('state.form.rerank === "llm"'),
+  );
+  check("重排提示词框 rows=4", /id="rerankPrompt"[\s\S]{0,200}rows="4"/.test(recall));
+  const rerankPromptTag = /<textarea[\s\S]*?id="rerankPrompt"[\s\S]*?>/.exec(recall)?.[0] ?? "";
+  check("重排提示词框没有 placeholder", rerankPromptTag.includes("placeholder") === false, rerankPromptTag);
+  check("重排提示词框绑的是 value", /:value="state\.prompts\.rerank"/.test(rerankPromptTag));
+  check(
+    "重排恢复默认按钮在",
+    /id="rerankResetPrompt"[\s\S]{0,200}@click="resetPrompt\('rerank'\)"/.test(recall),
+  );
+  check("重排提示词状态位在", recall.includes('id="rerankPromptStatus"'));
+  check("重排状态小字由 rerankPromptStatus 生成",
+    storeJs.includes("rerankPromptStatus(state.prompts.rerank)"));
+  check(
+    "重排提示词框下有占位符说明",
+    recall.includes("用 {{message}} 表示当前这条用户消息") &&
+      recall.includes("用 {{candidates}} 表示候选清单"),
+  );
+  check(
+    "重排提示词框绑 input 时标记 touched",
+    /@input="onPromptInput\('rerank'/.test(recall) &&
+      storeJs.includes("state.prompts.rerankTouched = true"),
+  );
+  check("重排模型只有一个下拉", (recall.match(/<select[^>]*id="rerankModel"/g) || []).length === 1);
+  check("重排模型下拉选项来自目录", /v-for="option in rerankModelOptions"/.test(recall));
+  check("重排模型下拉不预设禁用", /id="rerankModel"[^>]*disabled/.test(recall) === false);
+  check("重排目录读不到时留原因位", recall.includes('id="rerankModelsHint"'));
+  check("重排展开区里放着通道列表", /<ChannelList \/>/.test(recall) &&
+    recall.indexOf("<ChannelList") > rerankAdvancedIdx);
+
+  // ---- 精排通道：列表、添加、空态、测试 ----
+  check("面板有通道列表", channels.includes('id="rerankChannelList"'));
+  check("通道行由 channelView 生成", channels.includes("channelView(channel, index)"));
+  check("面板有添加通道按钮", /id="rerankAddChannel"[\s\S]{0,220}添加通道/.test(channels));
+  check("通道为空时有空态文案", channels.includes("还没有通道，精排不会生效"));
+  check("面板有测试按钮", /id="rerankTestBtn"[\s\S]{0,220}测试/.test(channels));
+  check("面板有测试结果位", channels.includes('id="rerankTestResult"'));
+  check("通道类型选项按已配服务生成", channels.includes("channelTypeChoices()") &&
+    storeJs.includes("channelTypeOptions(state.layers)"));
+  check("通道行不再有 URL 与模型输入",
+    ["row.channel.url", "row.channel.model", 'placeholder="http'].every(
+      (needle) => channels.includes(needle) === false,
+    ));
+  check("服务未配置的通道会标红", channels.includes("row.unavailable") &&
+    channels.includes("服务未配置，不会生效") &&
+    storeJs.includes("channelServiceMissing(channel, state.layers)"));
+  check("两个服务都没配时添加按钮禁用",
+    channels.includes(":disabled=\"addDisabled\"") &&
+      /noService = computed\(\(\) => typeOptions\.value\.every/.test(channels));
+  check("删除按钮在通道行里", channels.includes(">删除</button>"));
+  check("权重输入有边界", channels.includes('min="0.1"') && channels.includes('max="10"'));
+  check("权重收敛在 store 里", /Math\.min\(10, Math\.max\(0\.1, parsed\)\)/.test(storeJs));
+  check("添加通道用空模板", storeJs.includes("emptyRerankChannel(firstType)"));
+  check(
+    "服务端投影落地时通道行跟着重画（没填完的行留在草稿里）",
+    /const pending = state\.channels\.filter\(\(channel\) => !isCompleteRerankChannel\(channel\)\)/.test(storeJs) &&
+      /state\.channels = \[\.\.\.state\.layers\.rerankChannels, \.\.\.pending\]/.test(storeJs),
+  );
+  check(
+    "打分服务字段的 change 也走整单提交",
+    /function setServiceField\(key, value\)[\s\S]{0,400}return saveLayers\(\)/.test(storeJs),
+  );
+  check(
+    "改一格就重算上一次的测试结果（旧结论作废）",
+    /const kind = serviceKindOfField\(key\);/.test(storeJs),
+  );
+  check("通道上限来自 lib", channels.includes("RERANK_CHANNELS_MAX") && storeJs.includes("RERANK_CHANNELS_MAX"));
+  check("测试按钮打通道测试端点", storeJs.includes('post("/recall-mode/test"'));
+  check("通道行有样式", /\n\.channel-row \{/.test(css));
+  check("测试结果有样式", /\n\.channel-result \{/.test(css));
+  eq("通道上限与后端一致", UI_RERANK_CHANNELS_MAX, RERANK_CHANNELS_MAX);
+  eq("三种通道都有下拉文案", Object.keys(RERANK_CHANNEL_LABELS), ["rerank", "systemone", "model"]);
+  eq("通道默认超时与后端一致", UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS, {
+    rerank: RERANK_CHANNEL_TIMEOUT_MS,
+    systemone: SYSTEMONE_CHANNEL_TIMEOUT_MS,
+    model: RERANK_MODEL_CHANNEL_TIMEOUT_MS,
+  });
+  eq("systemone 超时上限与后端一致", UI_SYSTEMONE_TIMEOUT_MAX, SYSTEMONE_TIMEOUT_MAX_MS);
+  eq(
+    "自适应两个参数与后端一致",
+    [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
+    [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
+  );
+  eq("候选上限与后端一致", UI_SYSTEMONE_MAX_CANDIDATES, SYSTEMONE_MAX_CANDIDATES);
+  eq("服务模型上限与后端一致", UI_SERVICE_MODEL_MAX, SERVICE_MODEL_MAX);
+  eq("服务地址上限与后端一致", UI_SERVICE_URL_MAX, RERANK_CHANNEL_URL_MAX);
+  check(
+    "面板提示写明默认 5 条",
+    channels.includes("默认 5 条") && channels.includes(`只问前 ${SYSTEMONE_MAX_CANDIDATES}`) === false,
+  );
+  check("通道行能编辑超时", channels.includes("超时（ms）"));
+  check(
+    "超时那一格注明候选越多越慢",
+    channels.includes("候选越多越慢") && channels.includes("SYSTEMONE_TIMEOUT_STEP"),
+  );
+  check(
+    "通道说明写清超时三层优先级",
+    channels.includes("通道自带 &gt; 服务配置 &gt; 类型默认值"),
+  );
+  check(
+    "通道说明写清地址与模型成对",
+    channels.includes("通道自带的地址与模型成对生效，只填一半就整对改用服务配置"),
+  );
+  check("通道行会画整对回退说明", channels.includes("row.pairNote") &&
+    storeJs.includes("channelPairNote(channel, state.layers)"));
+  check("添加通道旁提示指向上面", channels.includes("先在上面配好打分服务"));
+  check("提示不写“先在下面”", channels.includes("先在下面配好打分服务") === false);
+
+  // ---- 打分服务的接线点 ----
+  check("面板往 service-test 发请求", storeJs.includes('post("/recall-mode/service-test"'));
+  check("面板有服务测试的执行函数", /async function testService\(kind\)/.test(storeJs));
+  check("服务测试按钮进 loading 并禁用",
+    prelude.includes(":disabled=\"resultOf(row.kind).pending\"") && prelude.includes("测试中…"));
+  check(
+    "测试按钮由描述表推出",
+    prelude.includes('v-for="row in layout.rows"') &&
+      prelude.includes(":id=\"row.testId\"") &&
+      prelude.includes("@click=\"onTest(row.kind)\"") &&
+      prelude.includes("testService(kind)"),
+    prelude.slice(prelude.indexOf("<button"), prelude.indexOf("<button") + 200),
+  );
+  check("结果行按 tone 上色", prelude.includes(':class="resultOf(row.kind).tone"'));
+  check(
+    "结果行常驻（空着也占位，不设 hidden）",
+    /class="service-result"[\s\S]{0,120}:class="resultOf\(row\.kind\)\.tone"/.test(prelude) &&
+      prelude.includes(":hidden") === false,
+  );
+  check("结果行文案来自 serviceTestView",
+    storeJs.includes("serviceTestView(out, body.model)") &&
+      storeJs.includes("serviceTestView(null)"));
+  check("改一格就收掉上一次的测试结果",
+    /state\.serviceResults\[kind\] = \{ tone: "", text: "", pending: false \}/.test(storeJs));
+  check("服务字段按描述表渲染", prelude.includes("scoringServiceLayout()") &&
+    prelude.includes("state.draft[row.url.key]"));
+  check("服务地址与模型成对（半对不发）", storeJs.includes("readServicePair(service)") &&
+    /if \(Boolean\(url\) !== Boolean\(model\)\) return \{\}/.test(storeJs));
+  check("清空一半时另一半也清掉", storeJs.includes("servicePartnerOf(key)") &&
+    /if \(partner && !draftOf\(key\)\.trim\(\)\) state\.draft\[partner\] = ""/.test(storeJs));
+  check("置灰覆盖到召回下拉", /class="recall-grid"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(recall));
+  check("置灰覆盖到两个展开区",
+    (recall.match(/:class="\{ dim: !enabled \}"/g) || []).length >= 3);
+  check("总闸关着时打分服务也置灰",
+    /class="services"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(prelude));
+  check("总闸关着时探针也置灰",
+    /class="toggle"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(prelude));
+  check("总闸关着时技能路由也置灰",
+    /:class="\{ dim: !enabled \}"/.test(uiCode("components/SkillRoute.vue")));
+
+  // ---- 两份默认模板：lib 里各一份，组件与 HTML 里零份 ----
+  check("判断默认模板不在 HTML 里", html.includes(DEFAULT_GATE_PROMPT) === false);
+  check("重排默认模板不在 HTML 里", html.includes(DEFAULT_RERANK_PROMPT) === false);
+  eq("判断默认模板在 lib 里只有一份", layersJs.split(DEFAULT_GATE_PROMPT).length - 1, 1);
+  eq("重排默认模板在 lib 里只有一份", layersJs.split(DEFAULT_RERANK_PROMPT).length - 1, 1);
+  eq("两份重排默认提示词逐字一致", UI_DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_PROMPT);
+  eq("两份判断默认提示词逐字一致", UI_DEFAULT_GATE_PROMPT, DEFAULT_GATE_PROMPT);
+
+  // ---- Vue 组件与构建链 ----
+  const appVue = uiCode("App.vue");
+  const settingsAppVue = uiCode("SettingsApp.vue");
+  const settingsEntry = uiSrcRaw("entries/settings.js");
+  const panelEntry = uiSrcRaw("entries/panel.js");
+  const themeJs = uiSrcRaw("theme.js");
+  const connFieldsJs = uiSrcRaw("conn-fields.js");
   const builtPanelJs = fs.readFileSync(
     path.join(import.meta.dirname, "../ui/assets/panel-vue.js"),
     "utf8",
@@ -2114,36 +2557,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "utf8",
   );
 
-  check("前置一块存在", preludeStart > masterStart, `prelude=${preludeStart} master=${masterStart}`);
-  check("前置里有探针开关", preludeBlock.includes('data-key="probe"'));
-  check("前置里有两个打分服务", preludeBlock.includes('id="scoringServices"'));
-  check(
-    "前置里没有技能路由",
-    preludeBlock.includes('data-key="skillRouting"') === false,
-    preludeBlock,
-  );
-  check("前置里不含下拉", preludeBlock.includes("<select") === false, preludeBlock);
-  check("前置里只有一个开关（探针）",
-    (preludeBlock.match(/role="switch"/g) || []).length === 1, preludeBlock);
-
-  check("技能路由仍独立成一块（挂载点在前置之后）", skillRouteStart > preludeEnd, `skill=${skillRouteStart} preludeEnd=${preludeEnd}`);
-  eq(
-    "技能页内容只剩一个挂载点（卡片本体交给 Vue）",
-    skillPanelBlock
-      .replace(/^<div[^>]*id="panel-skill"[^>]*>/, "")
-      .replace(/<\/div>\s*$/, "")
-      .replace(/<!--[\s\S]*?-->/g, "")
-      .trim(),
-    '<div id="skill-route-app"></div>',
-  );
-  check(
-    "技能页不再写死技能路由 DOM",
-    ['data-key="skillRouting"', 'id="skillRoute"', 'class="switch'].every(
-      (needle) => skillPanelBlock.includes(needle) === false,
-    ),
-    skillPanelBlock,
-  );
-  check("Vue 组件用 n-switch 画那个开关", /<NSwitch\b/.test(skillRouteVue), skillRouteVue.slice(0, 160));
   check(
     "根组件把主题对齐到面板色板（n-config-provider + lightThemeOverrides + theme.js）",
     /<NConfigProvider\b/.test(appVue) &&
@@ -2152,12 +2565,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     appVue.slice(0, 160),
   );
   check(
-    "Vue 组件读写 /controls 的 skillRouting",
-    skillRouteVue.includes('"/controls"') && skillRouteVue.includes("skillRouting"),
-  );
-  check(
-    "构建产物只负责把组件挂到挂载点",
-    builtPanelJs.includes('mount("#skill-route-app")') &&
+    "构建产物把整页挂到 #panel-app",
+    builtPanelJs.includes('mount("#panel-app")') &&
       /["']\.\/chunk-vue\.js["']/.test(builtPanelJs),
     builtPanelJs.slice(0, 120),
   );
@@ -2167,6 +2576,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /["']\.\/chunk-vue\.js["']/.test(builtSettingsJs) &&
       /["']\.\/sdk\.js["']/.test(builtSettingsJs),
     builtSettingsJs.slice(0, 120),
+  );
+  check(
+    "面板入口只做接线 + 挂载",
+    panelEntry.includes('mount("#panel-app")') &&
+      panelEntry.includes('from "../App.vue"') &&
+      panelEntry.includes("createConfig({") &&
+      panelEntry.includes('from "../api.js"') &&
+      panelEntry.includes("/recall-mode") === false,
+    panelEntry.slice(0, 240),
   );
   check(
     "设置页入口文件只做挂载",
@@ -2201,13 +2619,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       .replace(/<!--[\s\S]*?-->/g, "")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/[^\n]*/gm, "");
-  const appCode = codeOnly(appVue);
-  const settingsCode = codeOnly(settingsAppVue);
+  const appCode = codeOnly(uiSrcRaw("App.vue"));
+  const settingsCode = codeOnly(uiSrcRaw("SettingsApp.vue"));
   const themeCode = codeOnly(themeJs);
   check(
     "theme.js 不 import darkTheme（不回 naive-ui 借深色底）",
-    /^\s*import\b/m.test(themeCode) === false &&
-      themeCode.includes("darkTheme") === false,
+    /^\s*import\b/m.test(themeCode) === false && themeCode.includes("darkTheme") === false,
     themeCode.slice(0, 160),
   );
   check(
@@ -2297,16 +2714,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /["']\.\/sdk\.js["']/.test(builtPanelJs),
   );
   check(
-    "技能路由不再由手写面板驱动",
-    panelJs.includes('SWITCH_KEYS = ["probe"]') &&
-      panelJs.includes('data-key="skillRouting"') === false,
-    panelJs.match(/const SWITCH_KEYS = [^\n]*/)?.[0] ?? "",
+    "手写面板不再驱动技能路由",
+    fs
+      .readFileSync(path.join(import.meta.dirname, "../ui/assets/panel.js"), "utf8")
+      .includes('data-key="skillRouting"') === false,
   );
   check("toggleGrid 容器已拆掉", html.includes('id="toggleGrid"') === false);
 
-  // ---- ui-src 构建链（试点）：依赖、产物位置与几个不能再丢的设定 ----
-  const uiPackage = JSON.parse(readUiSrc("package.json"));
-  const viteConfig = readUiSrc("vite.config.mjs");
+  // ---- ui-src 构建链：依赖、产物位置与几个不能再丢的设定 ----
+  const uiPackage = JSON.parse(uiProjectRaw("package.json"));
+  const viteConfig = uiProjectRaw("vite.config.mjs");
   eq("ui-src 工程名", uiPackage.name, "hanako-openviking-ui");
   eq("ui-src 的构建命令", uiPackage.scripts?.build, "vite build");
   check(
@@ -2317,6 +2734,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /^\^5\.2\./.test(uiPackage.devDependencies?.["@vitejs/plugin-vue"] ?? ""),
     JSON.stringify(uiPackage.dependencies) + JSON.stringify(uiPackage.devDependencies),
   );
+  check("不引 pinia / vue-router",
+    uiPackage.dependencies?.pinia === undefined &&
+      uiPackage.dependencies?.["vue-router"] === undefined &&
+      [storeJs, uiSrcRaw("composables/useConfig.js")].every(
+        (source) => /from\s+["']pinia["']/.test(source) === false &&
+          /from\s+["']vue-router["']/.test(source) === false,
+      ));
   check(
     "构建不清空 ui/assets（里面还有宿主下发的 sdk.js / app-ui.*）",
     /emptyOutDir:\s*false/.test(viteConfig),
@@ -2355,12 +2779,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ),
   );
   check(
-    "面板 HTML 引用手写 panel.js 与构建产物 panel-vue.js",
-    [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)]
-      .map((match) => match[1])
-      .join(",") === "panel.js,panel-vue.js",
-  );
-  check(
     "设置页 HTML 只引用构建产物 settings-vue.js，旧 settings.js 已断链",
     settingsHtml.includes('src="./assets/settings-vue.js"') &&
       settingsHtml.includes('src="./assets/settings.js"') === false,
@@ -2369,309 +2787,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 构建就会把整份手写 panel.css 覆盖成只剩这一页的几条规则。
   check(
     "SFC 里不写 <style>（样式集中在手写的 panel.css）",
-    /^\s*<style[\s>]/m.test(skillRouteVue + appVue + settingsAppVue) === false,
-  );
-  check("召回管理在前置之后", recallStart > preludeEnd, `recall=${recallStart} preludeEnd=${preludeEnd}`);
-
-  const logsStart = html.indexOf('<section class="card logs"');
-  const globalOrder = [masterStart, colsStart, preludeStart, logsStart];
-  check(
-    "全局页内顺序：总闸 → 中枢 / 身份 → 前置 → 日志",
-    globalOrder.every((value, index) =>
-      value > globalPanelStart && value < memoryPanelStart &&
-      (index === 0 || value > globalOrder[index - 1]),
-    ),
-    globalOrder.join(" < "),
-  );
-  check(
-    "记忆页顺序：按会话说明 → 召回管理",
-    memoryPanelStart < scopedIdx && scopedIdx < recallStart &&
-      recallStart < recallEnd && recallEnd < skillPanelStart,
-    `memory=${memoryPanelStart} scoped=${scopedIdx} recall=${recallStart}..${recallEnd} skill=${skillPanelStart}`,
-  );
-  check(
-    "技能页位置：技能路由挂载点在记忆页之后、页脚之前",
-    skillRouteStart > skillPanelStart && skillRouteEnd < footStart,
-    `skill=${skillRouteStart}..${skillRouteEnd} panel=${skillPanelStart} foot=${footStart}`,
-  );
-
-  // ---- 打分服务：总闸下面、按会话说明之前，占满整行 ----
-  const scoringIdx = html.indexOf('id="scoringServices"');
-  check("打分服务一块存在", scoringIdx > 0);
-  check(
-    "打分服务在前置卡里、仍在全局页，scoped-note 已搬到记忆页",
-    scoringIdx > preludeStart && scoringIdx > globalPanelStart &&
-      scoringIdx < memoryPanelStart && scoringIdx < scopedIdx &&
-      scopedIdx > memoryPanelStart,
-    `scoring=${scoringIdx} prelude=${preludeStart} global=${globalPanelStart} memory=${memoryPanelStart} scoped=${scopedIdx}`,
-  );
-  check(
-    "打分服务不在两栏里（在前置里，位于两栏之后）",
-    scoringIdx > colsEnd,
-    `scoring=${scoringIdx} cols=${colsStart}..${colsEnd}`,
-  );
-  // 静态 HTML 只放空容器：行、输入框、说明都由描述表渲染，不能写死两行。
-  const scoringInner = html.match(/<div id="scoringServices"[^>]*>([\s\S]*?)<\/div>/)?.[1];
-  eq("打分服务容器是空的", scoringInner, "");
-  check(
-    "HTML 里不写死服务行",
-    scoringInner !== undefined &&
-      /data-kind=/.test(scoringInner) === false &&
-      /ServiceUrl|ServiceModel|service-row/.test(scoringInner) === false,
-    scoringInner,
-  );
-  check("静态 HTML 里没有两组服务的写死块", html.includes('class="service-grid"') === false);
-  check("打分服务有样式", /\n\.services \{/.test(css));
-  check("服务行是竖向一条一条的栅格", /\n\.service-row \{/.test(css));
-  check(
-    "服务行五列：固定宽服务名 + 四个控件列",
-    /\n\.service-row \{[\s\S]{0,260}grid-template-columns:\s*3\.2em[^\n]*1\.4fr[^\n]*1fr[^\n]*0\.62fr[^\n]*auto/.test(
-      css,
+    ["components/TabBar.vue", "components/GlobalPanel.vue", "components/MemoryPanel.vue", "components/SkillPanel.vue", "App.vue", "SettingsApp.vue"].every(
+      (name) => /^\s*<style[\s>]/m.test(uiSrcRaw(name)) === false,
     ),
   );
-  check("服务名固定宽度且右对齐", /\n\.service-name \{[\s\S]{0,120}text-align:\s*right/.test(css));
-  check("结果行独占第二行", /\.service-result \{[\s\S]{0,120}grid-column:\s*2 \/ -1/.test(css));
-  check("结果行常驻占位（不定高跳动）", /\.service-result \{[\s\S]{0,160}min-height:\s*15px/.test(css));
-  check("列表下方只有一段总说明的样式", /\n\.services-note \{/.test(css));
-  check("旧的两栏栅格样式已拆掉", css.includes(".service-grid") === false);
-  check("总闸关着时打分服务也置灰", panelJs.includes('#scoringServices'));
-  check("测试按钮靠底对齐", /\.field\.service-test \{[\s\S]{0,120}align-items:\s*flex-end/.test(css));
-  for (const tone of ["ok", "bad", "muted"]) {
-    check(`结果行的 ${tone} 档有样式`, new RegExp(`\\.service-result\\.${tone} \\{`).test(css));
-  }
-  check("结果行样式存在", /\n\.service-result \{/.test(css));
-  check("整对回退说明有样式", /\n\.channel-pair-note \{/.test(css));
-  check("面板按描述表渲染服务行", panelJs.includes("renderScoringServices()") &&
-    panelJs.includes("scoringServiceLayout(services)"));
+  check("CSS 仍是手写的静态文件（构建不产出 panel.css）",
+    !viteConfig.includes('"panel-vue.css"') && !/input:\s*\{[^}]*panel\.css/.test(viteConfig));
 
-  // 前端的接线点：新路由、测试函数、结果行与回退说明。
-  check("面板往 service-test 发请求", panelJs.includes('/recall-mode/service-test'));
-  check("面板有服务测试的执行函数", /async function runServiceTest\(kind\)/.test(panelJs));
-  check("测试按钮进 loading 并禁用", /button\.disabled = true/.test(panelJs) &&
-    panelJs.includes('"测试中…"'));
-  check("测试按钮由描述表推出并绑上", /for \(const \[kind, buttonId\] of SERVICE_TESTS\)/.test(panelJs) &&
-    /const SERVICE_TESTS = SCORING_SERVICES\.map/.test(panelJs));
-  check("结果行按 tone 上色", /service-result \$\{view\.tone\}/.test(panelJs));
-  check("通道行会画整对回退说明", panelJs.includes("channelPairNote(channel, layers)"));
-
-  // 通道空态文案不能指向“下面”：打分服务在通道上面。
-  check("添加通道旁提示指向上面", html.includes("先在上面配好打分服务"));
-  check("提示不写“先在下面”", html.includes("先在下面配好打分服务") === false);
-  check("技能路由那块有样式", /\n\.skill-route \{/.test(css));
-  check("总闸关着时技能路由也置灰", panelJs.includes(".skill-route"));
-
-  // 说明文字沿用面板的 hint 样式。
-  check("规则跳过的说明在面板上", html.includes("≤8 字") && html.includes("指代词"));
-  check(
-    "带上文的说明在面板上",
-    html.includes("300 字符") && html.includes("最新一句保持完整"),
-  );
-  check("说明小字用 field-hint", (html.match(/class="field-hint"/g) || []).length >= 2);
-  // 原来那句排除说明保留，并说清排除了就不参与上面的召回。
-  check(
-    "名单底部说明串起两件事",
-    html.includes("点一下任意一行可以排除这个 peer") && html.includes("不再参与上面的召回"),
-  );
-
-  // 旧的独立 recall-row 区块已并进召回管理栏：HTML / CSS / 脚本都不该再有它。
-  check("HTML 里不再有独立的 recall-row 区块", html.includes("recall-row") === false);
-  check("CSS 里不再有 recall-row 规则", css.includes(".recall-row") === false);
-  check("脚本里不再引用 recall-row", panelJs.includes("recall-row") === false);
-
-  const recallRule = css.indexOf(".recall-grid {");
-  check("下拉那一行有栅格", recallRule >= 0);
-  check(
-    "召回那三个下拉并排（一行三列）",
-    /grid-template-columns\s*:\s*1fr 1fr 1fr/.test(css.slice(recallRule, css.indexOf("}", recallRule))),
-  );
-  check("分隔线有样式", /\n\.recall-sep \{/.test(css));
-  check("peer 名单样式还在", /\n\.peer-list \{/.test(css));
-  check("下拉沿用 field 输入框样式", /\.field input,\n\.field select \{/.test(css));
-  // 总闸关着时下拉也要跟着暗，别再指向已经不存在的类名。
-  check("置灰覆盖到召回下拉", /\.toggle, \.recall-grid/.test(panelJs));
-
-  // 面板脚本：读 + 整单提交，改了就发，没有保存按钮。
-  check("面板读取召回策略", panelJs.includes('jsonGet("/recall-mode")'));
-  check("面板提交召回策略", panelJs.includes('jsonPost("/recall-mode"'));
-  check(
-    "两个下拉绑 change 即时提交",
-    /for \(const id of \["recallGate", "queryMode"\]\)[\s\S]{0,160}addEventListener\("change"/.test(
-      panelJs,
-    ),
-  );
-  check(
-    "结果重排下拉也绑 change 即时提交",
-    /rerank"\)\.addEventListener\("change"[\s\S]{0,80}saveLayers\b/.test(panelJs),
-  );
-  check("面板没有为召回单设保存按钮", html.includes("recallSave") === false);
-
-  // ---- llm 档：选项、展开块、提示词与模型来源 ----
-  check("召回判断有 llm 选项", html.includes('value="llm"') && html.includes("模型判断（用宿主模型）"));
-  check("llm 展开块存在", advancedIdx > 0);
-  const advancedTag = html.slice(advancedIdx, html.indexOf(">", advancedIdx));
-  check("llm 展开块默认 hidden", /\shidden(?:\s|$)/.test(advancedTag), advancedTag);
-  check("提示词框 rows=4", /id="gatePrompt"[^>]*rows="4"/.test(html));
-  // 默认提示词靠 value 填，不靠 placeholder：placeholder 一敲键盘就消失，当不了草稿。
-  const promptTag = /<textarea[^>]*id="gatePrompt"[^>]*>/.exec(html)?.[0] ?? "";
-  check("提示词框没有 placeholder", promptTag.includes("placeholder") === false, promptTag);
-  check(
-    "默认提示词不再写进 HTML 的 placeholder",
-    html.includes(DEFAULT_GATE_PROMPT) === false,
-  );
-  check("恢复默认按钮在", /id="gateResetPrompt"[^>]*>\s*恢复默认\s*</.test(html));
-  check("提示词状态位在", /id="gatePromptStatus"/.test(html));
-  check(
-    "提示词框下有占位符说明",
-    html.includes("用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。"),
-  );
-  check(
-    "恢复默认走正常提交",
-    /gateResetPrompt"\)\.addEventListener\("click"[\s\S]{0,200}saveLayers\(\)/.test(panelJs),
-  );
-  check(
-    "提示词框绑 input 并标记过 touched",
-    /gatePrompt"\)\.addEventListener\("input"/.test(panelJs) &&
-      panelJs.includes("promptTouched = true"),
-  );
-  check("空提示词不再写“留空使用默认”", html.includes("留空使用默认提示词") === false);
-  // 模型只能一步选到位：一个下拉，首项是默认；没有 radio，也没有第二层 provider + 模型。
-  check("判断模型只有一个下拉", (html.match(/<select[^>]*id="gateModel"/g) || []).length === 1);
-  check(
-    "模型下拉首项是默认",
-    /<select id="gateModel">\s*<option value="">默认（宿主辅助模型）<\/option>/.test(html),
-  );
-  check("没有模型来源两个单选", html.includes('name="gateModelMode"') === false);
-  check("没有第二层 provider 下拉", html.includes('id="gateProvider"') === false);
-  check("没有可展开的自选区", html.includes('id="gateCustom"') === false);
-  check("模型下拉不预设禁用", /id="gateModel"[^>]*disabled/.test(html) === false);
-  check("目录读不到时留原因位", /id="gateModelsHint"/.test(html));
-  check("面板读模型目录", panelJs.includes('jsonGet("/models")'));
-  check(
-    "llm 展开区受召回判断控制",
-    panelJs.includes("paintGatePanels") && panelJs.includes("gateAdvanced"),
-  );
-  check("模型下拉由目录填充", panelJs.includes("modelOptions(modelCatalog.models)"));
-  check("目录坏了只留默认项", panelJs.includes("[DEFAULT_MODEL_OPTION]"));
-  check("新控件有样式", /\n\.gate-advanced \{/.test(css));
-  check("textarea 有输入框样式", /\n\.field textarea \{/.test(css));
-
-  // ---- 结果重排：下拉、展开块、提示词与模型 ----
-  check("重排展开块存在", rerankAdvancedIdx > 0);
-  const rerankAdvancedTag = html.slice(rerankAdvancedIdx, html.indexOf(">", rerankAdvancedIdx));
-  check("重排展开块默认 hidden", /\shidden(?:\s|$)/.test(rerankAdvancedTag), rerankAdvancedTag);
-  check("重排提示词框 rows=4", /id="rerankPrompt"[^>]*rows="4"/.test(html));
-  const rerankPromptTag = /<textarea[^>]*id="rerankPrompt"[^>]*>/.exec(html)?.[0] ?? "";
-  check("重排提示词框没有 placeholder", rerankPromptTag.includes("placeholder") === false, rerankPromptTag);
-  check("重排恢复默认按钮在", /id="rerankResetPrompt"[^>]*>\s*恢复默认\s*</.test(html));
-  check("重排提示词状态位在", /id="rerankPromptStatus"/.test(html));
-  check(
-    "重排提示词框下有占位符说明",
-    html.includes("用 {{message}} 表示当前这条用户消息") &&
-      html.includes("用 {{candidates}} 表示候选清单"),
-  );
-  check(
-    "重排恢复默认走正常提交",
-    /rerankResetPrompt"\)\.addEventListener\("click"[\s\S]{0,220}saveLayers\(\)/.test(panelJs),
-  );
-  check(
-    "重排提示词框绑 input 并标记过 touched",
-    /rerankPrompt"\)\.addEventListener\("input"/.test(panelJs) &&
-      panelJs.includes("rerankPromptTouched = true"),
-  );
-  check("重排模型只有一个下拉", (html.match(/<select[^>]*id="rerankModel"/g) || []).length === 1);
-  check(
-    "重排模型下拉首项是默认",
-    /<select id="rerankModel">\s*<option value="">默认（宿主辅助模型）<\/option>/.test(html),
-  );
-  check("重排模型下拉不预设禁用", /id="rerankModel"[^>]*disabled/.test(html) === false);
-  check("重排目录读不到时留原因位", /id="rerankModelsHint"/.test(html));
-  check(
-    "重排展开区受结果重排控制",
-    panelJs.includes("paintRerankPanels") && panelJs.includes("rerankAdvanced"),
-  );
-
-  // ---- 精排通道：列表、添加、空态、测试 ----
-  check("面板有通道列表", html.includes('id="rerankChannelList"'));
-  check(
-    "面板有添加通道按钮",
-    /id="rerankAddChannel"[^>]*>\s*添加通道\s*</.test(html),
-  );
-  check("通道为空时有空态文案", html.includes("还没有通道，精排不会生效"));
-  check("面板有测试按钮", /id="rerankTestBtn"[^>]*>\s*测试\s*</.test(html));
-  check("面板有测试结果位", html.includes('id="rerankTestResult"'));
-  check(
-    "通道行由脚本渲染可选类型",
-    panelJs.includes("renderRerankChannels") && panelJs.includes("channelTypeOptions"),
-  );
-  check("通道行不再有 URL 与模型输入", panelJs.includes('channelCell("URL"') === false &&
-    panelJs.includes('channelCell("模型"') === false &&
-    panelJs.includes('textInput(channel.url') === false &&
-    panelJs.includes('textInput(channel.model') === false);
-  check("服务未配置的通道会标红", panelJs.includes("channelServiceMissing") &&
-    panelJs.includes("服务未配置，不会生效"));
-  check("两个服务都没配时添加按钮禁用", panelJs.includes("typeOptions.every") &&
-    panelJs.includes("|| noService"));
-  check("删除按钮在通道行里", panelJs.includes('textContent = "删除"'));
-  check("权重输入有边界", panelJs.includes('weight.min = "0.1"') && panelJs.includes('weight.max = "10"'));
-  check("添加通道用空模板", panelJs.includes("emptyRerankChannel(firstType)"));
-  check("测试按钮打新端点", panelJs.includes('jsonPost("/recall-mode/test"'));
-  check("通道行有样式", /\n\.channel-row \{/.test(css));
-  check("测试结果有样式", /\n\.channel-result \{/.test(css));
-  eq("通道上限与后端一致", UI_RERANK_CHANNELS_MAX, RERANK_CHANNELS_MAX);
-  eq("三种通道都有下拉文案", Object.keys(RERANK_CHANNEL_LABELS), ["rerank", "systemone", "model"]);
-  // 界面那一格的默认超时跟后端常量同值：两边对不上就是界面在骗人。
-  eq("通道默认超时与后端一致", UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS, {
-    rerank: RERANK_CHANNEL_TIMEOUT_MS,
-    systemone: SYSTEMONE_CHANNEL_TIMEOUT_MS,
-    model: RERANK_MODEL_CHANNEL_TIMEOUT_MS,
-  });
-  eq("systemone 超时上限与后端一致", UI_SYSTEMONE_TIMEOUT_MAX, SYSTEMONE_TIMEOUT_MAX_MS);
-  eq(
-    "自适应两个参数与后端一致",
-    [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
-    [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
-  );
-  eq("候选上限与后端一致", UI_SYSTEMONE_MAX_CANDIDATES, SYSTEMONE_MAX_CANDIDATES);
-  eq("服务模型上限与后端一致", UI_SERVICE_MODEL_MAX, SERVICE_MODEL_MAX);
-  eq("服务地址上限与后端一致", UI_SERVICE_URL_MAX, RERANK_CHANNEL_URL_MAX);
-  check(
-    "面板提示写明默认 5 条",
-    html.includes("默认 5 条") && html.includes(`只问前 ${SYSTEMONE_MAX_CANDIDATES}`) === false,
-  );
-  check("通道行能编辑超时", panelJs.includes('channelCell("超时（ms）", timeout)'));
-  check(
-    "超时那一格注明候选越多越慢",
-    html.includes("超时（ms）") && html.includes("候选越多越慢"),
-  );
-  check(
-    "通道说明写清超时三层优先级",
-    html.includes("通道自带 &gt; 服务配置 &gt; 类型默认值"),
-    html.slice(html.indexOf("超时优先级") - 40, html.indexOf("超时优先级") + 60),
-  );
-  check(
-    "通道说明写清地址与模型成对",
-    html.includes("通道自带的地址与模型成对生效，只填一半就整对改用服务配置"),
-  );
-  // 两份默认模板各只有一份：HTML 里零份，recall-layers.js 里恰好一份。
-  check("判断默认模板不在 HTML 里", html.includes(DEFAULT_GATE_PROMPT) === false);
-  check("重排默认模板不在 HTML 里", html.includes(DEFAULT_RERANK_PROMPT) === false);
-  eq(
-    "判断默认模板在 recall-layers.js 里只有一份",
-    layersJs.split(DEFAULT_GATE_PROMPT).length - 1,
-    1,
-  );
-  eq(
-    "重排默认模板在 recall-layers.js 里只有一份",
-    layersJs.split(DEFAULT_RERANK_PROMPT).length - 1,
-    1,
-  );
-  eq("两份重排默认提示词逐字一致", UI_DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_PROMPT);
-
-  // 设置页只剩连接：不再有召回分组、下拉、也不再碰 /recall-mode。
-  const settingsVue = fs.readFileSync(
-    path.join(import.meta.dirname, "../ui-src/src/SettingsApp.vue"),
-    "utf8",
-  );
+  // ---- 设置页只剩连接 ----
+  const settingsVue = uiSrcRaw("SettingsApp.vue");
   check("设置页不再有召回判断", settingsHtml.includes("recallGate") === false);
   check("设置页不再有召回查询", settingsHtml.includes("queryMode") === false);
   check("设置页不再有下拉", settingsHtml.includes("<select") === false);
@@ -2699,6 +2823,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       settingsJs.includes('hana.api.fetch("/conn", {'),
   );
 
+  // ---- manifest 声明 ----
   const manifest = JSON.parse(
     fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
   );
@@ -2738,143 +2863,116 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("manifest 声明 app/models.infer", manifest.capabilities.includes("app/models.infer"));
 }
 
-// ================= ui: 面板标签页 =================
+// ================= ui: 面板标签页（组件） =================
 {
-  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
-  const html = read("panel.html");
-  const panelJs = read("assets/panel.js");
-  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  // 标签栏现在是 TabBar.vue，三块内容在 App.vue 里始终挂载、用 hidden 切显隐。
+  // 键名 / 默认页 / 非法值回退 / storage 容错全部还在 lib/tabs.js（纯逻辑，下面直接验）。
+  const app = uiCode("App.vue");
+  const tabBar = uiCode("components/TabBar.vue");
+  const logsCard = uiCode("components/LogsCard.vue");
+  const css = panelCss();
+  const storeJs = uiSrcRaw("lib/panel-store.js");
 
-  const globalStart = html.indexOf('id="panel-global"');
-  const memoryStart = html.indexOf('id="panel-memory"');
-  const skillStart = html.indexOf('id="panel-skill"');
-  const footStart = html.indexOf('<footer id="foot"');
-  const globalPanel = html.slice(globalStart, memoryStart);
-  const memoryPanel = html.slice(memoryStart, skillStart);
-  const skillPanel = html.slice(skillStart, footStart);
   const panelTag = (name) =>
-    new RegExp(`<div[^>]*id="panel-${name}"[^>]*>`).exec(html)?.[0] ?? "";
+    new RegExp(`<div[\\s\\S]{0,120}id="panel-${name}"[\\s\\S]{0,240}?>`).exec(app)?.[0] ?? "";
 
   // ---- 标签按钮 ----
-  check("标签栏只有一个 tablist", (html.match(/role="tablist"/g) || []).length === 1);
   check(
-    "三个标签都在",
-    ["global", "memory", "skill"].every((name) => html.includes(`id="tab-${name}"`)),
+    "TabBar 用 TABS 渲染（不是写死三个按钮）",
+    tabBar.includes('v-for="tab in TABS"') && tabBar.includes('from "../lib/tabs.js"'),
   );
-  eq("role=tab 恰好三枚", (html.match(/role="tab"/g) || []).length, 3);
+  check("三个标签 id 由 TABS 生成", tabBar.includes(":id=\"`tab-${tab}`\""), tabBar.slice(0, 200));
   check(
-    "data-tab 三值齐全",
-    ["global", "memory", "skill"].every((name) => html.includes(`data-tab="${name}"`)),
+    "三个标签文案齐全",
+    ["全局配置", "记忆配置", "共享技能"].every((label) => tabBar.includes(label)),
   );
-  eq("aria-selected=true 恰好一枚", (html.match(/aria-selected="true"/g) || []).length, 1);
-  const globalTabTag = /<button[^>]*id="tab-global"[^>]*>/.exec(html)?.[0] ?? "";
+  check("标签栏只有一个 tablist", (tabBar.match(/role="tablist"/g) || []).length === 1);
+  eq("每枚标签都是 role=tab", (tabBar.match(/role="tab"/g) || []).length, 1);
   check(
-    "默认选中全局页且可聚焦",
-    /aria-selected="true"/.test(globalTabTag) && /tabindex="0"/.test(globalTabTag),
-    globalTabTag,
+    "选中态跟 active 走（aria-selected 仍是字符串 true/false）",
+    tabBar.includes(":aria-selected=\"props.active === tab ? 'true' : 'false'\""),
   );
-  for (const name of ["memory", "skill"]) {
-    const tag = new RegExp(`<button[^>]*id="tab-${name}"[^>]*>`).exec(html)?.[0] ?? "";
-    check(
-      `未选中的 ${name} 标签 aria-selected=false / tabindex=-1`,
-      /aria-selected="false"/.test(tag) && /tabindex="-1"/.test(tag),
-      tag,
-    );
-  }
-  for (const name of ["global", "memory", "skill"]) {
-    check(
-      `${name} 标签 aria-controls 指向内容块`,
-      new RegExp(`aria-controls="panel-${name}"`).test(html),
-    );
-  }
+  check("未选中的标签 tabindex=-1", tabBar.includes(":tabindex=\"props.active === tab ? 0 : -1\""));
+  check("aria-controls 指向 panel-<name>", tabBar.includes(":aria-controls=\"`panel-${tab}`\""));
+  check("data-tab 带着页名", tabBar.includes(":data-tab=\"tab\""));
+  check("点击发 select", tabBar.includes('@click="select(tab)"'));
+  check(
+    "键盘左右 / Home / End 都能换",
+    ["ArrowRight", "ArrowLeft", "Home", "End"].every((key) => tabBar.includes(`"${key}"`)),
+  );
+  check("键盘切换后焦点跟着走", tabBar.includes(".focus?.()"));
 
   // ---- tabpanel ----
-  eq("role=tabpanel 恰好三块", (html.match(/role="tabpanel"/g) || []).length, 3);
-  for (const name of ["global", "memory", "skill"]) {
-    check(
-      `${name} 内容块用对应 tab 标注`,
-      panelTag(name).includes(`aria-labelledby="tab-${name}"`),
-      panelTag(name),
-    );
-    check(`${name} 内容块有 tab-panel 类`, /class="tab-panel"/.test(panelTag(name)), panelTag(name));
+  eq("role=tabpanel 恰好三块", (app.match(/role="tabpanel"/g) || []).length, 3);
+  for (const name of TABS) {
+    const tag = panelTag(name);
+    check(`${name} 内容块有 id`, tag.includes(`id="panel-${name}"`), tag);
+    check(`${name} 内容块用对应 tab 标注`, tag.includes(`aria-labelledby="tab-${name}"`), tag);
+    check(`${name} 内容块有 tab-panel 类`, /class="tab-panel"/.test(tag), tag);
+    check(`${name} 内容块按当前页切 hidden`, tag.includes(`:hidden="tab !== '${name}'"`), tag);
   }
-  check("初始只显示全局页", panelTag("global").includes("hidden") === false, panelTag("global"));
-  check("初始隐藏记忆页", /\shidden(?:\s|>)/.test(panelTag("memory")), panelTag("memory"));
-  check("初始隐藏技能页", /\shidden(?:\s|>)/.test(panelTag("skill")), panelTag("skill"));
+  check("三页都挂在根组件里", ["<GlobalPanel", "<MemoryPanel", "<SkillPanel"].every((n) => app.includes(n)));
+  eq("三页的 tabpanel 主键齐全", ["global", "memory", "skill"].map((name) => panelTag(name).includes(`id="panel-${name}"`)), [true, true, true]);
+  check("切页用 hidden，不用 v-if（隐藏页的节点不能消失）", /v-if="tab\b/.test(app) === false);
 
-  // ---- 内容归属 ----
-  for (const needle of [
-    'id="swEnabled"',
-    'id="prelude"',
-    'id="scoringServices"',
-    'class="cols"',
-    'class="card logs"',
-  ]) {
-    check(`全局页包含 ${needle}`, globalPanel.includes(needle), needle);
-  }
-  for (const needle of [
-    'class="scoped-note"',
-    'class="card recall"',
-    'id="recallGate"',
-    'id="queryMode"',
-    'id="rerank"',
-    'id="peerList"',
-  ]) {
-    check(`记忆页包含 ${needle}`, memoryPanel.includes(needle), needle);
-  }
+  // ---- 切页接线 ----
+  check("启动时读上次停的页", app.includes("readTab(safeLocalStorage())"));
+  check("非法值回退走 normalizeTab", app.includes("normalizeTab(name ?? DEFAULT_TAB)"));
+  check("点击切页会持久化", app.includes("writeTab(safeLocalStorage(), active)"));
+  check("storage 取不到 / 抛错不崩", app.includes("function safeLocalStorage()") && app.includes("catch"));
   check(
-    "scoped-note 在记忆页顶部、召回管理之前",
-    memoryPanel.indexOf('class="scoped-note"') > 0 &&
-      memoryPanel.indexOf('class="scoped-note"') < memoryPanel.indexOf('class="card recall"'),
+    "启动时先摆好上次停的页、再开始读数据",
+    app.indexOf("readTab(safeLocalStorage())") > 0 &&
+      app.indexOf("readTab(safeLocalStorage())") < app.lastIndexOf("refresh()"),
+    `${app.indexOf("readTab(safeLocalStorage())")} < ${app.lastIndexOf("refresh()")}`,
   );
-  check("技能页包含 Vue 挂载点", skillPanel.includes('id="skill-route-app"'));
+  const selectTabBody = app.match(/function selectTab\(name\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  check("selectTab 函数取到了", selectTabBody.length > 0, app.slice(0, 120));
   check(
-    "技能页不再包含手写开关",
-    skillPanel.includes('data-key="skillRouting"') === false &&
-      skillPanel.includes('id="skillRoute"') === false,
-    skillPanel,
-  );
-  eq(
-    "面板先跑手写页、再挂 Vue（顺序决定挂载点已经存在）",
-    [...html.matchAll(/<script type="module" src="\.\/assets\/([^"]+)"><\/script>/g)].map(
-      (match) => match[1],
+    "selectTab 不触发重算或写入",
+    ["refresh", "saveLayers", "applyLayers", "rerankChannels", "patchControls"].every(
+      (name) => selectTabBody.includes(name) === false,
     ),
-    ["panel.js", "panel-vue.js"],
-  );
-  for (const needle of ["recallGate", "peerList", "skillRouting"]) {
-    check(`全局页不包含 ${needle}`, globalPanel.includes(needle) === false, needle);
-  }
-
-  // ---- 切换接线与日志折叠（三页共用顶部 / 页脚） ----
-  check(
-    "selectTab 同时改 aria-selected / tabindex / hidden",
-    panelJs.includes('button.setAttribute("aria-selected"') &&
-      panelJs.includes("button.tabIndex = selected ? 0 : -1") &&
-      panelJs.includes("panel.hidden = !selected"),
-  );
-  check(
-    "启动时先摆好上次停的页再读数据",
-    panelJs.includes("selectTab(readTab(safeLocalStorage()), { persist: false })"),
-  );
-  check(
-    "点击标签会持久化并带键盘切换",
-    /node\.addEventListener\("click", \(\) => selectTab\(tab, \{ persist: true \}\)\)/.test(panelJs) &&
-      panelJs.includes("event.key === \"ArrowRight\"") &&
-      panelJs.includes("event.key === \"Home\""),
-  );
-  check(
-    "日志折叠仍在全局页",
-    globalPanel.includes('id="logToggle"') && globalPanel.includes('id="logBody"'),
-  );
-  check("日志正文默认隐藏", /id="logBody"[^>]*hidden/.test(html));
-  check(
-    "折叠按钮仍只切隐藏与文案",
-    /\$\("logToggle"\)\.addEventListener\("click"/.test(panelJs) &&
-      panelJs.includes('$("logBody").hidden = !logOpen') &&
-      panelJs.includes('logOpen ? "收起" : "展开"'),
+    selectTabBody,
   );
 
-  // ---- localStorage 键与归一化 ----
+  // ---- 日志折叠（行为第 9 条） ----
+  check("日志折叠仍在全局页", logsCard.includes('id="logToggle"') && logsCard.includes('id="logBody"'));
+  check("日志正文默认折叠", /:hidden="!open"/.test(logsCard));
+  check(
+    "折叠按钮只切隐藏与文案",
+    logsCard.includes('open ? "收起" : "展开"') && logsCard.includes("@click=\"toggle()\""),
+  );
+  check("折叠状态在 store 里（切页不丢）", /function toggleLogs\(\)[\s\S]{0,120}state\.logs\.open = !state\.logs\.open/.test(storeJs));
+  check("日志计数条来自 logChips", logsCard.includes("chips") && storeJs.includes("logChips(state.logs.lines)"));
+  check("日志正文来自 logBodyText", storeJs.includes("logBodyText(state.logs.lines)"));
+
+  // ---- 置灰覆盖三页（行为第 8 条） ----
+  const dimBindings = [
+    ["探针", /class="toggle"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(uiCode("components/PreludeCard.vue"))],
+    ["打分服务", /class="services"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(uiCode("components/PreludeCard.vue"))],
+    ["召回下拉", /class="recall-grid"[\s\S]{0,80}:class="\{ dim: !enabled \}"/.test(uiCode("components/RecallCard.vue"))],
+    ["两个展开区", (uiCode("components/RecallCard.vue").match(/class="gate-advanced"[\s\S]{0,80}:class="\{ dim: !enabled \}"/g) || []).length === 2],
+    ["技能路由", /class="card skill-route"[\s\S]{0,120}:class="\{ dim: !enabled \}"/.test(uiCode("components/SkillRoute.vue"))],
+  ];
+  for (const [label, ok] of dimBindings) check(`置灰覆盖 ${label}`, ok);
+  check(
+    "置灰判据只有一个：总闸（store.enabled）",
+    storeJs.includes("const enabled = () => state.controls.enabled !== false") &&
+      uiSrcRaw("composables/useConfig.js").includes("enabled: computed(() => store.enabled())"),
+  );
+  check(
+    "总闸关着时总闸卡自己也是灰底（data-off）",
+    /:data-off="state\.controls\.enabled \? 'false' : 'true'"/.test(uiCode("components/MasterCard.vue")),
+  );
+  check(
+    "手写面板的 paintDim 不再参与（旧脚本已断链）",
+    fs
+      .readFileSync(path.join(import.meta.dirname, "../ui/panel.html"), "utf8")
+      .includes("panel.js") === false,
+  );
+
+  // ---- localStorage 键与归一化（纯逻辑，直接验） ----
   eq("tab 记忆键", TAB_KEY, "hanako-openviking:tab");
   check("tab 记忆键带 app 前缀", TAB_KEY.startsWith("hanako-openviking:"));
   eq("默认页", DEFAULT_TAB, "global");
@@ -2928,161 +3026,71 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     true,
   );
 
-  // ---- 置灰覆盖三页 ----
-  const dimSource = panelJs.slice(
-    panelJs.indexOf("function paintDim("),
-    panelJs.indexOf("function renderStatus("),
-  );
-  const dimSelector = dimSource.match(/querySelectorAll\(\s*"([^"]+)"/)?.[1] ?? "";
-  check("paintDim 选择器取到了", dimSelector.length > 0, dimSource.slice(0, 120));
-  for (const selector of [
-    ".toggle",
-    "#scoringServices",
-    ".recall-grid",
-    ".gate-advanced",
-    ".skill-route",
-  ]) {
-    check(`置灰覆盖 ${selector}`, dimSelector.includes(selector), dimSelector);
-  }
-  check(
-    "全局页有可置灰节点",
-    /class="toggle"/.test(globalPanel) && globalPanel.includes('id="scoringServices"'),
-  );
-  check(
-    "记忆页有可置灰节点",
-    memoryPanel.includes('class="recall-grid"') && memoryPanel.includes('class="gate-advanced"'),
-  );
-  check("技能页有可置灰节点", skillPanel.includes("skill-route"));
-  check(
-    "paintDim 没有限定在单个面板",
-    ["panel-global", "panel-memory", "panel-skill"].every(
-      (name) => dimSelector.includes(name) === false,
-    ),
-    dimSelector,
-  );
-
-  // ---- 跨页重算：改服务 -> 保存 -> 重画通道类型，不需要切页/刷新 ----
-  const applySource = panelJs.match(/\nfunction applyLayers\([\s\S]*?\n\}/)?.[0] ?? "";
-  check("applyLayers 会重画通道行", applySource.includes("renderRerankChannels"), applySource.slice(0, 120));
-  const renderSource = panelJs.match(/\nfunction renderRerankChannels\([\s\S]*?\n\}/)?.[0] ?? "";
-  check(
-    "renderRerankChannels 用 channelTypeOptions(layers)",
-    renderSource.includes("channelTypeOptions(layers)"),
-    renderSource.slice(0, 120),
-  );
-  check(
-    "服务字段 change 仍走 saveLayers",
-    /\$\(id\)\.addEventListener\("change"[\s\S]{0,240}saveLayers\(\)/.test(panelJs),
-  );
-  check(
-    "saveLayers 仍走 commitLayers 的 apply 链",
-    /apply:\s*applyLayers/.test(panelJs) && panelJs.includes("commitLayers"),
-  );
-  const selectSource = panelJs.match(/\nfunction selectTab\([\s\S]*?\n\}/)?.[0] ?? "";
-  check("selectTab 函数取到了", selectSource.length > 0, panelJs.slice(0, 80));
-  check(
-    "selectTab 不触发重算或写入",
-    ["renderRerankChannels", "applyLayers", "saveLayers", "refresh"].every(
-      (name) => selectSource.includes(name) === false,
-    ),
-    selectSource,
-  );
-  check(
-    "记忆页的通道下拉节点还在（隐藏面板不删节点）",
-    memoryPanel.includes('id="rerankChannelList"'),
-  );
-
   // ---- CSS ----
   check("标签栏样式存在", /\n\.tabs \{/.test(css));
   check("选中标签样式存在", /\n\.tab\[aria-selected="true"\] \{/.test(css));
   check("内容块样式存在", /\n\.tab-panel \{/.test(css));
-  const tabsRule = css.slice(css.indexOf(".tabs {"), css.indexOf("}", css.indexOf(".tabs {")));
-  check("标签栏一行不换行", /flex-wrap:\s*nowrap/.test(tabsRule), tabsRule);
-  const panelRule = css.slice(
-    css.indexOf(".tab-panel {"),
-    css.indexOf("}", css.indexOf(".tab-panel {")),
-  );
+  const tabsRule = ruleBody(css, ".tabs");
+  check("标签栏一行不换行", /flex-wrap:\s*nowrap/.test(tabsRule || ""), tabsRule || "");
+  const panelRule = ruleBody(css, ".tab-panel");
   check(
     "内容块是 flex 列 + 8px 间距（吃满剩余高度）",
-    /display:\s*flex/.test(panelRule) &&
-      /flex-direction:\s*column/.test(panelRule) &&
-      /gap:\s*8px/.test(panelRule),
-    panelRule,
+    /display:\s*flex/.test(panelRule || "") &&
+      /flex-direction:\s*column/.test(panelRule || "") &&
+      /gap:\s*8px/.test(panelRule || ""),
+    panelRule || "",
   );
-  const tabRule = css.slice(css.indexOf(".tab {"), css.indexOf("}", css.indexOf(".tab {")));
-  check("标签字号沿用 12px", /font-size:\s*12px/.test(tabRule), tabRule);
+  const tabRule = ruleBody(css, ".tab");
+  check("标签字号沿用 12px", /font-size:\s*12px/.test(tabRule || ""), tabRule || "");
 }
 
 // ================= ui: 面板一屏布局（静态） =================
 {
   // 这一块守的是「整页不滚」的静态契约：高度基准、根容器、内容区、
-  // 两个区内滚动点，以及矮屏降级。真观感要 reload 后在真机看。
-  const read = (name) => fs.readFileSync(path.join(import.meta.dirname, "../ui", name), "utf8");
-  const html = read("panel.html");
-  const css = read("assets/panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
-
-  const ruleFor = (selector) => {
-    const index = css.indexOf(`${selector} {`);
-    if (index < 0) return null;
-    const open = css.indexOf("{", index);
-    const end = css.indexOf("}", open);
-    return { index, body: css.slice(open + 1, end) };
-  };
+  // 两个区内滚动点，以及矮屏降级。样式仍是手写的 ui/assets/panel.css
+  // （构建不产出它），所以规则断言一条没改；变的只是「哪个组件挂哪个类」。
+  const css = panelCss();
+  const app = uiCode("App.vue");
+  const master = uiCode("components/MasterCard.vue");
+  const hub = uiCode("components/HubIdentity.vue");
+  const prelude = uiCode("components/PreludeCard.vue");
+  const logsCard = uiCode("components/LogsCard.vue");
+  const skillPanel = uiCode("components/SkillPanel.vue");
 
   // 高度基准：宿主把整页 iframe 装进定高容器，html/body 的 100% 就是它给的高度。
   // app-ui.css 里没有 html 选择器，这两条只能由面板自己写。
-  const rootRule = ruleFor("html, body");
+  const rootRule = ruleBody(css, "html, body");
   check("html/body 有高度规则", rootRule !== null);
-  check(
-    "html/body 取 100%（宿主定高容器的百分比，不是 100vh）",
-    /height\s*:\s*100%/.test(rootRule?.body || ""),
-    rootRule?.body || "",
-  );
+  check("html/body 取 100%（宿主定高容器的百分比，不是 100vh）",
+    /height\s*:\s*100%/.test(rootRule || ""), rootRule || "");
   check("不用 100vh 当高度基准", css.includes("100vh") === false);
 
   // 根容器：吃满高度、自己不出滚动条、纵向 flex。
-  const pageRule = ruleFor(".page");
+  const pageRule = ruleBody(css, ".page");
   check("根容器规则在", pageRule !== null);
   check(
     "根容器高度 100% + 纵向 flex",
-    /height\s*:\s*100%/.test(pageRule?.body || "") &&
-      /display\s*:\s*flex/.test(pageRule?.body || "") &&
-      /flex-direction\s*:\s*column/.test(pageRule?.body || ""),
-    pageRule?.body || "",
+    /height\s*:\s*100%/.test(pageRule || "") &&
+      /display\s*:\s*flex/.test(pageRule || "") &&
+      /flex-direction\s*:\s*column/.test(pageRule || ""),
+    pageRule || "",
   );
-  check(
-    "根容器不自滚（overflow: hidden）",
-    /overflow\s*:\s*hidden/.test(pageRule?.body || ""),
-    pageRule?.body || "",
-  );
-  check(
-    "根容器带 box-sizing: border-box（padding 不算进高度）",
-    /box-sizing\s*:\s*border-box/.test(pageRule?.body || ""),
-    pageRule?.body || "",
-  );
+  check("根容器不自滚（overflow: hidden）", /overflow\s*:\s*hidden/.test(pageRule || ""), pageRule || "");
+  check("根容器带 box-sizing: border-box（padding 不算进高度）",
+    /box-sizing\s*:\s*border-box/.test(pageRule || ""), pageRule || "");
+  check("根容器就是 .page（Vue 挂载在 #panel-app 里）",
+    /<main class="page" data-hana-app-ui>/.test(app), app.slice(app.indexOf("<main"), app.indexOf("<main") + 60));
 
   // 内容区：吃掉剩余高度；min-height: 0 是让子元素能收缩的关键。
-  const panelRule = ruleFor(".tab-panel");
+  const panelRule = ruleBody(css, ".tab-panel");
   check("内容区规则在", panelRule !== null);
-  check(
-    "内容区 flex: 1 1 auto",
-    /flex\s*:\s*1 1 auto/.test(panelRule?.body || ""),
-    panelRule?.body || "",
-  );
-  check(
-    "内容区 min-height: 0",
-    /min-height\s*:\s*0/.test(panelRule?.body || ""),
-    panelRule?.body || "",
-  );
-  check(
-    "内容区纵向 flex 列",
-    /flex-direction\s*:\s*column/.test(panelRule?.body || ""),
-    panelRule?.body || "",
-  );
+  check("内容区 flex: 1 1 auto", /flex\s*:\s*1 1 auto/.test(panelRule || ""), panelRule || "");
+  check("内容区 min-height: 0", /min-height\s*:\s*0/.test(panelRule || ""), panelRule || "");
+  check("内容区纵向 flex 列", /flex-direction\s*:\s*column/.test(panelRule || ""), panelRule || "");
 
   // 三页各自的内容区都要吃满剩余高度，而不是只有全局页。
-  for (const name of ["global", "memory", "skill"]) {
-    const tag = new RegExp(`<div[^>]*id="panel-${name}"[^>]*>`).exec(html)?.[0] ?? "";
+  for (const name of TABS) {
+    const tag = new RegExp(`<div[\\s\\S]{0,120}id="panel-${name}"[\\s\\S]{0,240}?>`).exec(app)?.[0] ?? "";
     check(`panel-${name} 挂的是同一套 tab-panel 契约`, /class="tab-panel"/.test(tag), tag);
   }
   check(
@@ -3091,42 +3099,44 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       new RegExp(`#panel-global > \\${sel}`).test(css),
     ),
   );
-  const recallRule = ruleFor(".recall");
-  check("召回管理吃满记忆页剩余高度", /flex\s*:\s*1 1 auto/.test(recallRule?.body || ""),
-    recallRule?.body || "");
-  check("召回管理内部可收缩", /min-height\s*:\s*0/.test(recallRule?.body || ""),
-    recallRule?.body || "");
+  // 这三块现在是组件的根节点：选择器仍然落在同一个位置（tab-panel 的直接子元素）。
+  check("总闸组件根节点是 .master", /<section id="masterCard" class="master"/.test(master));
+  check("前置组件根节点是 .prelude", /<section id="prelude" class="card prelude"/.test(prelude));
+  check("两栏组件根节点是 .cols", /<section class="cols">/.test(hub));
+  check("日志组件根节点是 .card.logs", /<section class="card logs">/.test(logsCard));
+
+  const recallRule = ruleBody(css, ".recall");
+  check("召回管理吃满记忆页剩余高度", /flex\s*:\s*1 1 auto/.test(recallRule || ""), recallRule || "");
+  check("召回管理内部可收缩", /min-height\s*:\s*0/.test(recallRule || ""), recallRule || "");
   check("召回管理溢出时自己滚（两段展开 + 通道多也不会裁掉按钮）",
-    /overflow-y\s*:\s*auto/.test(recallRule?.body || ""), recallRule?.body || "");
+    /overflow-y\s*:\s*auto/.test(recallRule || ""), recallRule || "");
   check(
     "技能页不为了填满拉伸（拉伸约束落在挂载点上）",
-    /#panel-skill > #skill-route-app \{[\s\S]{0,80}flex\s*:\s*0 0 auto/.test(css),
+    /#panel-skill > #skill-route-app \{[\s\S]{0,80}flex\s*:\s*0 0 auto/.test(css) &&
+      /<div id="skill-route-app">/.test(skillPanel),
   );
 
   // 日志：固定 120px，超出自己滚；被挤压时留 64px 下限。
-  const logRule = ruleFor(".log");
+  const logRule = ruleBody(css, ".log");
   check("日志区规则在", logRule !== null);
-  check("日志区有固定高度 120px", /height\s*:\s*120px/.test(logRule?.body || ""),
-    logRule?.body || "");
-  check("日志区自己滚", /overflow\s*:\s*auto/.test(logRule?.body || ""), logRule?.body || "");
-  check("日志区保留可读下限 64px", /min-height\s*:\s*64px/.test(logRule?.body || ""),
-    logRule?.body || "");
-  const logsRule = ruleFor(".logs");
-  check("日志卡可收缩但不会缩没", /flex\s*:\s*0 1 auto/.test(logsRule?.body || "") &&
-    /min-height\s*:\s*124px/.test(logsRule?.body || ""), logsRule?.body || "");
+  check("日志区有固定高度 120px", /height\s*:\s*120px/.test(logRule || ""), logRule || "");
+  check("日志区自己滚", /overflow\s*:\s*auto/.test(logRule || ""), logRule || "");
+  check("日志区保留可读下限 64px", /min-height\s*:\s*64px/.test(logRule || ""), logRule || "");
+  const logsRule = ruleBody(css, ".logs");
+  check("日志卡可收缩但不会缩没",
+    /flex\s*:\s*0 1 auto/.test(logsRule || "") && /min-height\s*:\s*124px/.test(logsRule || ""),
+    logsRule || "");
 
   // peer 名单：区内滚，不再靠 296px 的固定上限。
-  const peerRule = ruleFor(".peer-list");
+  const peerRule = ruleBody(css, ".peer-list");
   check("peer 名单规则在", peerRule !== null);
-  check("peer 名单吃满召回管理剩余高度", /flex\s*:\s*1 1 auto/.test(peerRule?.body || ""),
-    peerRule?.body || "");
-  check("peer 名单自己滚", /overflow-y\s*:\s*auto/.test(peerRule?.body || ""),
-    peerRule?.body || "");
-  check("peer 名单不再用固定 max-height", /max-height/.test(peerRule?.body || "") === false,
-    peerRule?.body || "");
-  const channelRule = ruleFor(".channel-list");
-  check("通道列表条目多时区内滚", /overflow-y\s*:\s*auto/.test(channelRule?.body || "") &&
-    /max-height\s*:\s*\d+px/.test(channelRule?.body || ""), channelRule?.body || "");
+  check("peer 名单吃满召回管理剩余高度", /flex\s*:\s*1 1 auto/.test(peerRule || ""), peerRule || "");
+  check("peer 名单自己滚", /overflow-y\s*:\s*auto/.test(peerRule || ""), peerRule || "");
+  check("peer 名单不再用固定 max-height", /max-height/.test(peerRule || "") === false, peerRule || "");
+  const channelRule = ruleBody(css, ".channel-list");
+  check("通道列表条目多时区内滚",
+    /overflow-y\s*:\s*auto/.test(channelRule || "") && /max-height\s*:\s*\d+px/.test(channelRule || ""),
+    channelRule || "");
 
   // 矮屏降级：640px 以下允许整页滚（压一屏会把控件挤成一条线）。
   const mediaIdx = css.indexOf("@media (max-height: 640px)");
@@ -3139,11 +3149,557 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /html,\s*\n?\s*body \{[\s\S]{0,160}overflow\s*:\s*visible/.test(mediaBody),
     mediaBody.slice(0, 200),
   );
-  check(
-    "矮屏下根容器改回自适应高度",
-    /\.page \{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody),
-    mediaBody.slice(0, 200),
+  check("矮屏下根容器改回自适应高度", /\.page \{[\s\S]{0,80}height\s*:\s*auto/.test(mediaBody),
+    mediaBody.slice(0, 200));
+  check("矮屏下 peer 名单退回固定高度上限",
+    /\.peer-list \{[\s\S]{0,120}max-height/.test(mediaBody));
+}
+
+
+// ================= ui: 面板视图投影（纯函数） =================
+{
+  // 这些是从手写 ui/assets/panel.js 里搬出来的字符串 / 档位逻辑（lib/panel-view.js）。
+  // 组件不再各自拼一遍文案，所以它们必须能单独验。
+  eq("出口念法：受管代理", transportTextOf("runtime"), "受管代理");
+  eq("出口念法：直连", transportTextOf("direct"), "直连（仅白名单）");
+  eq("出口念法：其它一律不可用", transportTextOf("down"), "不可用");
+  eq("版本号带 v 就原样", versionTextOf("v0.4.16"), "v0.4.16");
+  eq("版本号不带 v 就补一个（不出现 vv）", versionTextOf("0.4.16"), "v0.4.16");
+  eq("版本号空就不编", versionTextOf(""), "");
+  eq("圆点：ok", dotClassOf("ok"), "dot ok");
+  eq("圆点：down", dotClassOf("down"), "dot down");
+  eq("圆点：其它是 idle", dotClassOf("idle"), "dot idle");
+  eq("key 占位：没填", apiKeyPlaceholder(false), "未填写");
+  eq("key 占位：已填只说留空不改", apiKeyPlaceholder(true), "已填写（留空表示不改）");
+
+  const okStatus = {
+    enabled: true,
+    apiKeySet: true,
+    serverUrl: "http://127.0.0.1:8000",
+    reach: "ok",
+    transport: "runtime",
+    health: { version: "0.4.16" },
+    ready: { checks: [{ name: "agfs", status: "ok" }] },
+  };
+  const view = statusView(okStatus, 42);
+  eq("已连接时药丸是绿的", [view.pillText, view.pillTone], ["已连接", "ok"]);
+  eq("副标题：出口 · 版本 · 往返", view.subLine, "受管代理 · v0.4.16 · 42 ms");
+  eq("往返只在 ok 时念", view.latency, "42 ms");
+  eq("版本单独一格", view.version, "v0.4.16");
+  eq("总闸开着时说明是“已开启”", view.masterHint, MASTER_HINT_ON);
+  check("总闸开着时说明不标红", view.masterHintWarn === false);
+  eq("检查项从 ready.checks 取", view.checks.length, 1);
+  const offView = statusView({ ...okStatus, enabled: false }, 42);
+  eq("总闸关着：药丸未启用", offView.pillText, "未启用");
+  eq("总闸关着：说明换成关的那句", offView.masterHint, MASTER_HINT_OFF);
+  eq("总闸关着：说明标红", offView.masterHintWarn, true);
+  eq("缺 key：药丸提示缺 API Key", statusView({ ...okStatus, apiKeySet: false }, 5).pillText, "缺 API Key");
+  eq("连不上：药丸连不上 + 红档", (() => {
+    const v = statusView({ ...okStatus, reach: "down" }, null);
+    return [v.pillText, v.pillTone, v.latency];
+  })(), ["连不上", "down", "—"]);
+  eq("待命：既没 ok 也没 down", statusView({ ...okStatus, reach: "idle" }, null).pillText, "待命");
+  eq("reach 失败时的错误进 error 行", statusView({ ...okStatus, reach: "down", error: "ECONNREFUSED" }, 3).error, "ECONNREFUSED");
+  const readFailed = statusView(okStatus, 42, "网络不通");
+  eq("这一轮没读到：药丸说读取失败，不沿用已连接", [readFailed.pillText, readFailed.pillTone], ["读取失败", "down"]);
+  eq("这一轮没读到：错误原文进 readError", readFailed.readError, "网络不通");
+  eq("没读到时不假装有检查项", readFailed.checks, []);
+
+  // ---- peer 行 ----
+  eq("本机行：本机 + 条数 + 参与召回", peerMetaText({ self: true, count: 3 }), "本机 · 3 条 · 参与召回");
+  eq(
+    "外部行被排除：已排除",
+    peerMetaText({ name: "x", count: 4, excluded: true }),
+    "外部 · 4 条 · 已排除",
   );
+  eq("条数没读到念「—」不念 0", peerMetaText({ name: "x", count: null }), "外部 · — · 参与召回");
+  eq("数到上限加一个 +", peerMetaText({ name: "x", count: 500, countCapped: true }), "外部 · 500+ 条 · 参与召回");
+  eq("本机不会被当成已排除", peerExcluded({ self: true, excluded: true }), false);
+  eq("外部被排除就是已排除", peerExcluded({ name: "x", excluded: true }), true);
+  eq("本机不可点", peerTappable({ name: "me", self: true }), false);
+  eq("外部可点", peerTappable({ name: "x" }), true);
+  eq("没名字的不可点", peerTappable({}), false);
+  eq("本机悬停说明", peerTitle({ self: true }), "本机，不参与排除");
+  eq("已排除悬停说明", peerTitle({ name: "x", excluded: true }), "已排除，不参与召回，点击恢复");
+  eq("参与中悬停说明", peerTitle({ name: "x" }), "点击排除，之后召回不再包含它的记忆");
+
+  // ---- 日志 ----
+  eq("计数条按事件聚合并保序", logChips([{ event: "a" }, { event: "b" }, { event: "a" }]).map((c) => c.text),
+    ["a × 2", "b × 1"]);
+  eq("没有事件给一句暂无事件", logChips([]), [{ text: "暂无事件", muted: true }]);
+  eq("kind 当事件名用", logChips([{ kind: "k" }])[0].text, "k × 1");
+  eq("正文空时是（还没有记录）", logBodyText([]), LOG_EMPTY);
+  eq(
+    "正文倒序（最新在上）且一行一条 JSON",
+    logBodyText([{ a: 1 }, { a: 2 }]).split("\n"),
+    ['{"a":2}', '{"a":1}'],
+  );
+
+  // ---- 通道测试结果排版 ----
+  eq(
+    "通道测试：合并与保留（全部成功）",
+    formatChannelTest({
+      candidates: 3,
+      elapsedMs: 12,
+      channels: [{ type: "model", ok: true, elapsedMs: 4, scores: [0.5, null], normalized: [1, 0], weight: 2 }],
+      merged: [0.4, 0.1],
+      kept: [0, 1],
+    }).split("\n"),
+    [
+      "候选 3 条 · 1 路通道 · 12ms",
+      "宿主模型 · ok 4ms · 原始 [0.50, —]",
+      "宿主模型 · 标准化 [1.00, 0.00] × 权重 2",
+      "合并：[0.40, 0.10]",
+      "保留：#1, #2",
+    ],
+  );
+  check(
+    "通道测试：弃权与回退说明都写出来",
+    formatChannelTest({
+      candidates: 1,
+      channels: [{ type: "rerank", name: "n", ok: false, abstained: true, error: "超时", pairNote: "已改用服务配置" }],
+      fallback: true,
+    }).includes("精排服务 n · 弃权 0ms · 超时"),
+  );
+  check(
+    "通道测试：全部弃权时说原样保留",
+    formatChannelTest({ channels: [], fallback: true }).includes("全部通道弃权，原样保留全部候选"),
+  );
+
+  // ---- 下拉补存量值 ----
+  eq(
+    "存量值不在目录里也要留住",
+    withStoredOption([{ value: "", label: "默认" }], "p/m"),
+    [{ value: "", label: "默认" }, { value: "p/m", label: "p/m（不在目录里）" }],
+  );
+  eq("存量值在目录里就不重复加", withStoredOption([{ value: "p/m", label: "x" }], "p/m").length, 1);
+  eq("空存量值不加", withStoredOption([{ value: "", label: "默认" }], "").length, 1);
+  eq("空工具函数：读不到时间就不编", readFootText(null), "");
+}
+
+
+// ================= ui: 面板状态机（假 fetch） =================
+{
+  // 这一块是新的：整页迁到 Vue 之后，「改了就提交 / 失败回滚 / 整单提交」这些
+  // 语义都在 lib/panel-store.js 里，由 composables/useConfig.js 套上响应式。
+  // 用假 fetch 真跑一遍状态机，比在源码里正则捞字符串靠谱。
+  //
+  // 注意：createConfig 会替换模块里的单例，后面别再拿旧的 store。
+  const backend = {
+    "/status": {
+      enabled: true,
+      apiKeySet: true,
+      serverUrl: "http://127.0.0.1:8000",
+      reach: "ok",
+      transport: "runtime",
+      health: { version: "0.4.16" },
+      ready: {
+        checks: [
+          { name: "agfs", status: "ok" },
+          { name: "ollama", status: "not_configured" },
+        ],
+      },
+    },
+    "/probe": {
+      lines: [
+        { event: "agent/before-start", at: "t1" },
+        { event: "agent/before-start", at: "t2" },
+        { event: "provider/before-request", at: "t3" },
+      ],
+    },
+    "/controls": {
+      enabled: true,
+      probe: true,
+      skillRouting: false,
+      requestTimeoutMs: 1500,
+      injectBudgetTokens: 2500,
+    },
+    "/conn": {
+      serverUrl: "http://127.0.0.1:8000",
+      peerPrefix: "lab",
+      peerPrefixValid: true,
+      apiKeySet: true,
+      apiKeyHead: "abcd",
+      apiKeyTail: "wxyz",
+    },
+    "/peers": {
+      ok: true,
+      peers: [
+        { name: "self-one", self: true, count: 3 },
+        { name: "peer-a", count: 4, countCapped: true },
+        { name: "peer-b", count: null },
+      ],
+    },
+    "/recall-mode": {
+      recallGate: "off",
+      queryMode: "last",
+      gatePrompt: "",
+      gateModel: "",
+      rerank: "off",
+      rerankPrompt: "",
+      rerankModel: "",
+      // 一行服务已被清空：通道保留但标红，别自动删。
+      rerankChannels: [{ type: "rerank", name: "孤儿通道", weight: 2, enabled: true }],
+      rerankServiceUrl: "http://127.0.0.1:8098",
+      rerankServiceModel: "bge-reranker-v2-m3",
+      rerankServiceTimeoutMs: null,
+      systemoneServiceUrl: "",
+      systemoneServiceModel: "",
+      systemoneServiceTimeoutMs: null,
+    },
+    "/models": { ok: true, models: [{ provider: "p", id: "m" }] },
+  };
+
+  const calls = [];
+  let rejectNextPost = "";
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const get = async (path) => {
+    calls.push({ method: "GET", path });
+    const key = path.split("?")[0];
+    return clone(backend[key]);
+  };
+  const post = async (path, body) => {
+    calls.push({ method: "POST", path, body });
+    if (rejectNextPost) {
+      const error = rejectNextPost;
+      rejectNextPost = "";
+      // 网络错走抛，业务拒走 ok:false —— 两条路都验。
+      if (error === "throw") throw new Error("网络不通");
+      return { ok: false, error };
+    }
+    if (path === "/controls") {
+      Object.assign(backend["/controls"], body);
+      return { ...clone(backend["/controls"]), ok: true };
+    }
+    if (path === "/conn") {
+      Object.assign(backend["/conn"], { peerPrefix: body.peerPrefix }, body);
+      return { ...clone(backend["/conn"]), ok: true };
+    }
+    if (path === "/peers") return { ok: true, excluded: body.excluded };
+    if (path === "/recall-mode") {
+      Object.assign(backend["/recall-mode"], body, {
+        rerankChannels: JSON.parse(body.rerankChannels),
+      });
+      return { ok: true, ...clone(backend["/recall-mode"]) };
+    }
+    if (path === "/recall-mode/service-test") {
+      return { ok: true, elapsedMs: 12, model: body.model };
+    }
+    if (path === "/recall-mode/test") {
+      return {
+        candidates: 2,
+        elapsedMs: 9,
+        channels: [{ type: "model", ok: true, elapsedMs: 9, scores: [0.5, 0.25], normalized: [1, 0], weight: 1 }],
+        merged: [0.5, 0.25],
+        kept: [0],
+      };
+    }
+    return { ok: true };
+  };
+
+  createConfig({ get, post, sessionKey: async () => "01a1585b-86d2", schedule: () => 0 });
+  const ui = useConfig();
+  const state = ui.state;
+
+  // ---- 响应式真的接上了（否则组件永远是首屏那份） ----
+  {
+    const seen = [];
+    const stop = vueEffect(() => seen.push(state.status.view.pillText));
+    await ui.refresh();
+    stop();
+    check(
+      "状态写入能被 Vue 的 effect 看见（replaceState 接对了）",
+      seen.includes("已连接") && seen[0] !== "已连接",
+      seen.join(" → "),
+    );
+  }
+  check("首屏读的是带会话的 /status",
+    calls.some((call) => call.path === "/status?session=01a1585b-86d2"));
+  check("模型目录独立读（/models）", calls.some((call) => call.method === "GET" && call.path === "/models"));
+
+  // ---- 读：状态 / 检查项 / 开关 / 连接 / 召回 ----
+  eq("药丸跟着 /status 走", [state.status.view.pillText, state.status.view.pillTone], ["已连接", "ok"]);
+  eq("检查项摘要只说比例", state.status.checksSummary.text, "服务端 1/2 就绪");
+  eq("检查项档位是灰（只是没配）", state.status.checksSummary.tone, "muted");
+  eq("检查项明细只列问题项", state.status.checksSummary.problems, [
+    { name: "ollama", status: "not_configured", label: "未配置" },
+  ]);
+  eq("开关从 /controls 读回", [state.controls.enabled, state.controls.probe, state.controls.skillRouting], [true, true, false]);
+  eq("超时与预算从 /controls 读回", [state.controls.requestTimeoutMs, state.controls.injectBudgetTokens], [1500, 2500]);
+  eq("地址从 /status 读回（key 不回显）", state.conn.serverUrl, "http://127.0.0.1:8000");
+  eq("key 占位说「留空表示不改」", state.conn.apiKeyPlaceholder, "已填写（留空表示不改）");
+  eq("门牌前缀从 /conn 读回", state.conn.peerPrefix, "lab");
+  eq("三个下拉读回服务端的值", [state.form.recallGate, state.form.queryMode, state.form.rerank], ["off", "last", "off"]);
+  eq("提示词框里坐的是默认全文（值是 value 不是 placeholder）",
+    state.prompts.gate, DEFAULT_GATE_PROMPT);
+  eq("重排提示词框同理", state.prompts.rerank, DEFAULT_RERANK_PROMPT);
+  eq("打分服务地址读回", state.draft.rerankServiceUrl, "http://127.0.0.1:8098");
+  eq("打分服务模型读回", state.draft.rerankServiceModel, "bge-reranker-v2-m3");
+  eq("超时留空仍是空（placeholder 显示默认值）", state.draft.rerankServiceTimeoutMs, "");
+  eq("通道草稿按服务端投影", state.channels.map((channel) => channel.name), ["孤儿通道"]);
+  eq("模型目录进来了", ui.store.modelChoices(state.form.gateModel).map((option) => option.value), ["", "p/m"]);
+  check("目录可用时不显示原因", ui.store.modelHint() === "");
+  eq("peer 行：本机不可点", ui.store.peerRows().map((row) => [row.name, row.self, row.tappable]), [
+    ["self-one", true, false],
+    ["peer-a", false, true],
+    ["peer-b", false, true],
+  ]);
+  eq("peer 计数", ui.store.peerCountText(), "3 个");
+  eq("日志计数条", ui.store.logChips().map((chip) => chip.text), [
+    "agent/before-start × 2",
+    "provider/before-request × 1",
+  ]);
+  eq("日志正文倒序", ui.store.logBody().split("\n")[0], JSON.stringify(backend["/probe"].lines[2]));
+  eq("提示位初始是空的", state.note.text, "");
+  check("页脚写了上次读取", /^上次读取 /.test(state.foot), state.foot);
+
+  // ---- 过期服务：通道保留但标红（行为第 6 条） ----
+  {
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      rerankServiceUrl: "",
+      rerankServiceModel: "",
+    };
+    await ui.refresh();
+    const row = ui.store.channelView(state.channels[0], 0);
+    eq("服务被清空后通道还在", state.channels.length, 1);
+    check("通道被标红（运行时不会生效）", row.unavailable === true, JSON.stringify(row));
+    eq("类型选项只剩宿主模型（加一行存量类型）", row.options.map((option) => option.value), ["model", "rerank"]);
+    check("存量类型的文案说清服务未配置", row.options[1].label.includes("服务未配置"), row.options[1].label);
+    eq("已配服务为空时类型选项只有宿主模型", ui.store.channelTypeChoices().map((option) => option.value), ["model"]);
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      rerankServiceUrl: "http://127.0.0.1:8098",
+      rerankServiceModel: "bge-reranker-v2-m3",
+    };
+    await ui.refresh();
+    eq("服务配回来之后类型选项多一项", ui.store.channelTypeChoices().map((option) => option.value), ["rerank", "model"]);
+  }
+
+  // ---- 写：改了就提交，失败回滚（行为第 1、2 条） ----
+  {
+    const before = calls.filter((call) => call.method === "POST" && call.path === "/recall-mode").length;
+    await ui.setForm("queryMode", "context");
+    const saves = calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq("一次提交只发一单", saves.length - before, 1);
+    check(
+      "整单把两个基础下拉一起带走（行为第 3 条）",
+      saves.at(-1).body.recallGate === "off" && saves.at(-1).body.queryMode === "context",
+      JSON.stringify(saves.at(-1).body),
+    );
+    check(
+      "提示词与模型也在同一单里",
+      saves.at(-1).body.gatePrompt === DEFAULT_GATE_PROMPT &&
+        saves.at(-1).body.rerankPrompt === DEFAULT_RERANK_PROMPT,
+      JSON.stringify({ gate: saves.at(-1).body.gatePrompt.slice(0, 8), rerank: saves.at(-1).body.rerankPrompt.slice(0, 8) }),
+    );
+    check("通道以 JSON 串提交", typeof saves.at(-1).body.rerankChannels === "string");
+    eq("提交成功后控件停在服务端的值上", state.form.queryMode, "context");
+    eq("成功提示", [state.note.text, state.note.bad], ["召回策略已生效", false]);
+  }
+  {
+    rejectNextPost = "queryMode 只能是 last / context";
+    await ui.setForm("queryMode", "bogus");
+    eq("被拒后控件退回上一次确认的值", state.form.queryMode, "context");
+    eq("被拒后提示位显示服务端原文", [state.note.text, state.note.bad],
+      ["queryMode 只能是 last / context", true]);
+  }
+  {
+    rejectNextPost = "throw";
+    await ui.setForm("recallGate", "llm");
+    eq("网络错同样回滚", state.form.recallGate, "off");
+    eq("网络错同样提示", [state.note.text, state.note.bad], ["网络不通", true]);
+  }
+  {
+    // 请求在飞时又改一格：不丢这次改动，上一单收笔后再发一单。
+    backend["/recall-mode"].queryMode = "last";
+    state.form.queryMode = "last";
+    state.layers = paintRecallConfig(backend["/recall-mode"]);
+    const first = ui.setForm("queryMode", "context");
+    const second = ui.setForm("recallGate", "rules");
+    await Promise.all([first, second]);
+    const saves = calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq("两单收笔后最后的值与服务端一致", [state.form.queryMode, state.form.recallGate], ["context", "rules"]);
+    eq("最后一单带着两个键", [saves.at(-1).body.queryMode, saves.at(-1).body.recallGate], ["context", "rules"]);
+  }
+
+  // ---- 提示词：恢复默认只填框 + 正常提交（行为第 4 条） ----
+  {
+    state.prompts.gate = "我的提示词";
+    state.prompts.gateTouched = true;
+    await ui.setPrompt("gate", "我的提示词");
+    eq("自定义提示词提交后仍在框里", state.prompts.gate, "我的提示词");
+    eq("状态小字说已修改", ui.gatePromptStatus(), "已修改");
+    await ui.resetPrompt("gate");
+    eq("恢复默认把默认全文填回框里", state.prompts.gate, DEFAULT_GATE_PROMPT);
+    eq("恢复默认后状态说默认", ui.gatePromptStatus(), "当前为默认提示词");
+    await ui.touchPrompt("gate", "");
+    await ui.setPrompt("gate", "");
+    eq("清空后状态提醒不拦截", ui.gatePromptStatus().includes("不会拦截任何召回"), true);
+    eq("清空的值也提交（配置为空）", backend["/recall-mode"].gatePrompt, "");
+    // 复位，后面的断言按默认草稿走。
+    await ui.resetPrompt("gate");
+  }
+
+  // ---- 打分服务：地址与模型成对（行为第 5 条） ----
+  {
+    // 先把这一对清空，再只填地址：这才是「半对」的现场。
+    await ui.setServiceField("rerankServiceUrl", "");
+    await ui.setServiceField("rerankServiceModel", "");
+    await ui.setServiceField("rerankServiceUrl", "http://other:8098");
+    // 半对不许出现在任何一单里：两格必须同时有值才提交（服务端也要求成对）。
+    check(
+      "半对不发服务端（地址与模型成对）",
+      calls
+        .filter((call) => call.method === "POST" && call.path === "/recall-mode")
+        .every((call) => call.body.rerankServiceUrl !== "http://other:8098"),
+      JSON.stringify(
+        calls
+          .filter((call) => call.method === "POST" && call.path === "/recall-mode")
+          .map((call) => call.body.rerankServiceUrl),
+      ),
+    );
+    eq("半对留在界面上继续编辑", state.draft.rerankServiceUrl, "http://other:8098");
+    check("半对时刷新不会抹掉这一格", (() => {
+      const before2 = state.draft.rerankServiceUrl;
+      ui.store.applyLayers(backend["/recall-mode"]);
+      return state.draft.rerankServiceUrl === before2;
+    })());
+    await ui.setServiceField("rerankServiceModel", "bge-v2");
+    const pairBody = calls.filter((call) => call.method === "POST" && call.path === "/recall-mode").at(-1).body;
+    eq("成对后整对发出去", [pairBody.rerankServiceUrl, pairBody.rerankServiceModel],
+      ["http://other:8098", "bge-v2"]);
+    await ui.setServiceField("rerankServiceUrl", "");
+    eq("清空一半时另一半也清掉", [state.draft.rerankServiceUrl, state.draft.rerankServiceModel], ["", ""]);
+    eq("清空后上一次的测试结果也收掉", state.serviceResults.rerank, { tone: "", text: "", pending: false });
+  }
+  {
+    // 没填全不许发请求：结果行直接说「先填地址和模型」。
+    const before = calls.filter((call) => call.method === "POST").length;
+    await ui.testService("rerank");
+    eq("没填全时不发请求", calls.filter((call) => call.method === "POST").length, before);
+    eq("结果行说先填地址和模型", state.serviceResults.rerank.text, "先填地址和模型");
+    eq("结果行是灰档", state.serviceResults.rerank.tone, "muted");
+    await ui.setServiceField("rerankServiceUrl", "http://127.0.0.1:8098");
+    await ui.setServiceField("rerankServiceModel", "bge-reranker-v2-m3");
+    await ui.testService("rerank");
+    eq("测试成功念可用 + 耗时 + 模型", state.serviceResults.rerank.text, "可用 · 12ms · bge-reranker-v2-m3");
+    eq("成功是绿档", state.serviceResults.rerank.tone, "ok");
+    eq("测试打完停在 idle", state.serviceResults.rerank.pending, false);
+    rejectNextPost = "connect ECONNREFUSED";
+    await ui.testService("rerank");
+    eq("服务不可用是红档", state.serviceResults.rerank.tone, "bad");
+    check("失败原因原样带上", state.serviceResults.rerank.text.includes("connect ECONNREFUSED"),
+      state.serviceResults.rerank.text);
+  }
+
+  // ---- 开关：乐观 + 回滚 ----
+  {
+    rejectNextPost = "写入失败";
+    await ui.flip("enabled", false);
+    eq("总闸写失败后回滚", state.controls.enabled, true);
+    eq("总闸写失败有提示", [state.note.text, state.note.bad], ["写入失败", true]);
+    await ui.flip("probe", false);
+    eq("探针写成功", state.controls.probe, false);
+    eq("探针写成功有提示", [state.note.text, state.note.bad], ["已保存", false]);
+    await ui.flip("probe", true);
+    eq("再点回来", state.controls.probe, true);
+  }
+
+  // ---- 连接三字段 ----
+  {
+    state.conn.apiKey = "new-key";
+    await ui.saveConnection();
+    const body = calls.filter((call) => call.method === "POST" && call.path === "/conn").at(-1).body;
+    eq("提交带上新 key 与门牌前缀", [body.apiKey, body.peerPrefix], ["new-key", "lab"]);
+    eq("提交后 key 框清空（不留在界面上）", state.conn.apiKey, "");
+    eq("门牌前缀原样", state.conn.peerPrefix, "lab");
+    backend["/conn"].peerPrefixValid = false;
+    backend["/conn"].peerPrefix = "主力机";
+    state.conn.peerPrefix = "主力机";
+    await ui.saveConnection();
+    check("脏前缀被放行时说明它不会生效",
+      state.note.text.includes("不会生效") && state.note.text.includes("主力机"),
+      state.note.text);
+    eq("脏前缀的完整措辞（含「其余设置已保存」）",
+      uiPrefixWarn("主力机", "（其余设置已保存）"),
+      "门牌前缀「主力机」不会生效，请改成字母、数字或连字符（其余设置已保存）");
+    backend["/conn"].peerPrefixValid = true;
+  }
+  {
+    await ui.setControlsNumber("requestTimeoutMs", "3000");
+    eq("超时改了就提交", backend["/controls"].requestTimeoutMs, 3000);
+    await ui.setControlsNumber("requestTimeoutMs", "");
+    eq("清空数字框不提交（保留旧值）", backend["/controls"].requestTimeoutMs, 3000);
+    await ui.setControlsNumber("requestTimeoutMs", "abc");
+    eq("非数字也不提交", backend["/controls"].requestTimeoutMs, 3000);
+  }
+
+  // ---- peer 名单：整单提交 + 乐观回滚（行为第 7 条） ----
+  {
+    await ui.store.togglePeer("peer-a");
+    const body = calls.filter((call) => call.method === "POST" && call.path === "/peers").at(-1).body;
+    eq("排除名单整单提交", body.excluded, ["peer-a"]);
+    eq("本机永远不在排除名单里", body.excluded.includes("self-one"), false);
+    eq("写成功有提示", state.note.text, "排除名单已更新");
+    rejectNextPost = "写入失败";
+    await ui.store.togglePeer("peer-b");
+    eq("写失败回滚到点击前", ui.store.peerRows().map((row) => [row.name, row.excluded]), [
+      ["self-one", false],
+      ["peer-a", true],
+      ["peer-b", false],
+    ]);
+    eq("写失败有提示", [state.note.text, state.note.bad], ["写入失败", true]);
+  }
+
+  // ---- 通道：增删 / 权重 / 超时 / 测试 ----
+  {
+    await ui.addChannel();
+    eq("添加通道用当前第一个可选类型", state.channels.at(-1).type, "rerank");
+    const index = state.channels.length - 1;
+    await ui.setChannelWeight(index, "99");
+    eq("权重收敛到 10", state.channels[index].weight, 10);
+    await ui.setChannelWeight(index, "abc");
+    eq("权重非数字不改", state.channels[index].weight, 10);
+    await ui.setChannelTimeout(index, "250");
+    eq("超时收成数字", state.channels[index].timeoutMs, 250);
+    await ui.setChannelTimeout(index, "");
+    eq("超时留空 = 删掉这一格", "timeoutMs" in state.channels[index], false);
+    await ui.removeChannel(index);
+    eq("删除通道后就少了这一行", state.channels.length, 1);
+    eq("通道计数文案", ui.store.channelView(state.channels[0], 0).title, "通道 1");
+    await ui.testChannels();
+    eq("通道测试结果有首行", state.channelTest.text.split("\n")[0], "候选 2 条 · 1 路通道 · 9ms");
+    check("通道测试结果不是失败文案", state.channelTest.text.startsWith("测试失败") === false);
+    eq("测试结果不再挂 pending", state.channelTest.pending, false);
+    // 无会话时给一句能读的失败，而不是空结果。
+    createConfig({ get, post, sessionKey: async () => null, schedule: () => 0 });
+    const sessionless = useConfig();
+    await sessionless.refresh();
+    await sessionless.testChannels();
+    eq("没有会话时通道测试说清楚为什么",
+      sessionless.state.channelTest.text,
+      "测试失败：当前会话还没绑定，先打开一次对话再试");
+  }
+
+  // ---- 日志折叠 / 编辑中的格子不被刷新覆盖 ----
+  {
+    createConfig({ get, post, sessionKey: async () => "01a1585b-86d2", schedule: () => 0 });
+    const fresh = useConfig();
+    await fresh.refresh();
+    eq("日志默认折叠", fresh.state.logs.open, false);
+    fresh.store.toggleLogs();
+    eq("点一下展开", fresh.state.logs.open, true);
+    fresh.store.toggleLogs();
+    eq("再点收回", fresh.state.logs.open, false);
+    fresh.setFocus("serverUrl");
+    backend["/status"].serverUrl = "http://changed:9000";
+    await fresh.refresh();
+    eq("正在改地址时刷新不回写那一格", fresh.state.conn.serverUrl, "http://127.0.0.1:8000");
+    fresh.setFocus("");
+    await fresh.refresh();
+    eq("失焦后刷新正常回写", fresh.state.conn.serverUrl, "http://changed:9000");
+  }
 }
 
 // ================= ui: 召回下拉的收笔逻辑 =================
