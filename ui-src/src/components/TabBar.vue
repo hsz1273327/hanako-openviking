@@ -4,12 +4,20 @@
 // 纯逻辑（键名、默认页、非法值回退、键盘换页、读写 storage 的容错）在 lib/tabs.js，
 // 这里只管绑定按键与 aria。切页不触发任何读 / 写 / 重算（见行为清单第 10 条）。
 //
-// 为什么不用 n-tabs：n-tabs 的标签是它自己生成的节点，无法同时保留
-//   id="tab-<name>" / aria-controls / aria-labelledby / data-tab 与 roving tabindex
-// 这套现有契约 —— 换过去只会让 App.vue 里四个 role="tabpanel" 的标注脱钩。
-// 所以标签栏继续手写 <button role="tab">，样式只留等分 / nowrap / 选中态 / focus 环
-// （不画渐变，也不模拟卡片边框：那是 n-card 的活）。
-import { nextTick, ref } from "vue";
+// 为什么是 n-tabs 并且还要自己挂 aria：
+//   naive-ui 2.45 的 tabs 只画一个 div（data-name），不输出 role / aria，也没有
+//   keydown 处理（node_modules/naive-ui/es/tabs/src/Tabs.mjs 与 Tab.mjs 全文没有
+//   ArrowLeft / ArrowRight / Home / End）。所以 role、id、aria-controls、
+//   aria-selected、data-tab、roving tabindex 与键盘映射全部由这里补上。
+//   Tab.mjs 的渲染是 mergeProps({ class, onClick, style }, this.$attrs)，
+//   自己写 <NTab> 子节点时走 $attrs 那一支，且我们传的属性排在后面（优先），
+//   所以这些属性会落到真正带 data-name 的 tab div 上。
+//
+// 形态用 type="line" 而不是 segment：标签栏在页头，下面已经是浅底 + 无边框卡片；
+// segment 会再叠一层灰胶囊容器，等于第三层容器。line 只有文字 + 品牌色下划线。
+// justifyContent 用 space-evenly：四个标签按内容宽度散开，不强行等分。
+import { nextTick } from "vue";
+import { NTab, NTabs } from "naive-ui";
 import { TABS, nextTab } from "../lib/tabs.js";
 
 const LABELS = Object.freeze({
@@ -24,10 +32,6 @@ const props = defineProps({
 });
 const emit = defineEmits(["select"]);
 
-// 键盘切换之后要把焦点挪到新标签上，否则方向键按到第二次就丢了。
-// 用容器 + id 查节点，比给每个按钮挂函数 ref 稳：按钮本身会随选中态重渲染。
-const listEl = ref(null);
-
 function select(name) {
   emit("select", name);
 }
@@ -37,34 +41,38 @@ function onKeydown(event, tab) {
   if (!next) return;
   event.preventDefault();
   select(next);
-  // 等 Vue 把选中态（tabindex）刷到新标签上再聚焦。
-  nextTick(() => listEl.value?.querySelector(`#tab-${next}`)?.focus?.());
+  // 等 Vue 把选中态（tabindex）刷到新标签上再聚焦。标签根节点是内层 div，
+  // 从当前事件节点往上找 .n-tabs，比给每个 NTab 挂函数 ref 更稳。
+  const root = event.currentTarget?.closest?.(".n-tabs");
+  nextTick(() => root?.querySelector(`#tab-${next}`)?.focus?.());
 }
 </script>
 
 <template>
-  <!-- 四个中文标签窄屏也放得下一行：等分宽度（flex: 1 1 0）、绝不换行（.tabs / .tab）。
-       宽度账：.page 左右各 16px、标签栏三处 4px 间隙，所以每格 = (宽 − 44) / 4；
-       560px 时约 129px、760px 时约 179px，减去 20px 内边距还剩 109 / 159px，
-       而最长标签「全局配置」四个 12px 汉字约 48px。够用。
-       极限在 ~316px 视口（4 × 48 + 4 × 20 + 12 + 32），更窄时 nowrap 会溢出：
-       那时仍不改字号、不换行（等分 + nowrap 是有意的取舍）。 -->
-  <div ref="listEl" class="tabs" role="tablist" aria-label="配置分类">
-    <button
+  <!-- 一个 tablist 里四个 role=tab。n-tabs 不生成这些语义，所以挂在这里。 -->
+  <NTabs
+    class="tabs"
+    type="line"
+    size="small"
+    role="tablist"
+    aria-label="配置分类"
+    :value="props.active"
+    justify-content="space-evenly"
+    @update:value="select"
+  >
+    <NTab
       v-for="tab in TABS"
-      :id="`tab-${tab}`"
       :key="tab"
-      class="tab"
-      type="button"
+      :name="tab"
+      :id="`tab-${tab}`"
       role="tab"
-      :data-tab="tab"
+      :aria-controls="`panel-${tab}`"
       :aria-selected="props.active === tab ? 'true' : 'false'"
       :tabindex="props.active === tab ? 0 : -1"
-      :aria-controls="`panel-${tab}`"
-      @click="select(tab)"
+      :data-tab="tab"
       @keydown="onKeydown($event, tab)"
     >
       {{ LABELS[tab] }}
-    </button>
-  </div>
+    </NTab>
+  </NTabs>
 </template>

@@ -9,10 +9,9 @@
 //   --ok      #5d7d56                                     ui/assets/panel.css .pill.ok
 //   --bad     #b8564d                                     ui/assets/panel.css .pill.down
 //
-// 组件级覆盖（Input / Button / Alert）和 common.borderRadius 全部删掉了：
-// 那些「中性灰底 + 自绘边框 + 9px 圆角」的写法等于把 naive-ui 当画板重画一遍，
-// 每次升级都要跟着调。现在输入框、按钮、卡片、圆角、阴影一律用 naive-ui 自己的
-// 亮色默认值，只把品牌色钉住。
+// 组件级覆盖只留两条：卡片圆角统一 6px；标签字号沿用原来的 12px（naive-ui
+// small 档默认 14px，放大字号等于破版）。
+// 其余输入框、按钮、卡片、阴影一律用 naive-ui 自己的亮色默认值。
 //
 // 不引用宿主主题变量：App 的 iframe 里没有 --text / --accent 这类变量，
 // 引用了整条声明会静默作废，且不报错。
@@ -33,5 +32,13 @@ export const lightThemeOverrides = {
     errorColorHover: "#c2554b",
     errorColorPressed: "#a84a42",
     errorColorSuppl: "#b8564d",
+  },
+  // 卡片不再画 1px 边框，靠底色分层；圆角 3px 偏硬，统一到 6px。
+  Card: {
+    borderRadius: "6px",
+  },
+  // 标签栏是页头顶层导航，字号沿用原来手写版的 12px（small 档默认 14px）。
+  Tabs: {
+    tabFontSizeSmall: "12px",
   },
 };

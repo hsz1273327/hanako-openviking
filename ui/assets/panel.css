@@ -28,6 +28,10 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 页面底色比卡片深一点点（卡片仍是 naive-ui 的白），靠底色分层而不是 1px 边框。
+   .page 保持透明，让底色一路透到卡片之间的缝隙里。 */
+body { background-color: rgba(0, 0, 0, 0.02); }
+
 /* Vue 的挂载层也要跟着定高，否则 .page 的 height:100% 按内容解析，
    一屏契约整条落空（实测：page 888px / 视口 673px，文档自己滚）。 */
 #panel-app { height: 100%; }
@@ -42,7 +46,7 @@ html, body {
   padding: 12px 16px 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 16px;
   overflow: hidden;
 }
 
@@ -84,27 +88,6 @@ html, body {
   letter-spacing: -0.01em;
   line-height: 1.2;
 }
-.pill {
-  font-size: 11px;
-  line-height: 1;
-  padding: 4px 9px;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.28);
-  opacity: 0.85;
-  white-space: nowrap;
-}
-.pill.ok {
-  border-color: rgba(111, 143, 104, 0.5);
-  background: rgba(111, 143, 104, 0.12);
-  color: #5d7d56;
-  opacity: 1;
-}
-.pill.down {
-  border-color: rgba(194, 85, 75, 0.5);
-  background: rgba(194, 85, 75, 0.1);
-  color: #b8564d;
-  opacity: 1;
-}
 .sub {
   margin: 3px 0 0;
   font-size: 11.5px;
@@ -116,37 +99,28 @@ html, body {
 
 /* ---------- 标签页 ---------- */
 
-/* 四个中文标签窄屏也放得下一行：等分宽度、绝不换行。
-   宽度账：(宽 − .page 两侧 32px − 三处 4px 间隙) / 4；560px 时每格约 129px、
-   760px 时约 179px，减 20px 内边距还剩 109 / 159px，最长标签四个 12px 字约 48px。
-   极限在 ~316px 视口，更窄时 nowrap 会溢出（有意不改字号、不换行）。
-   不画渐变、不模拟卡片边框（那是 n-card 的活），只留选中态与 focus 环。 */
+/* 标签栏本体交给 naive-ui 的 n-tabs（type="line"）：文字 + 品牌色下划线，
+   没有方框、没有第三层胶囊容器。这里只留三件事：
+     1) 不参与 .page 的纵向伸缩；
+     2) 字号 12px（theme.js 的 Tabs.tabFontSizeSmall 与这里双保险）；
+     3) 可见的键盘焦点环（n-tabs 自己不画）。
+   n-tabs 的 wrapper 本来就是 flex + nowrap，四个标签按 space-evenly 散开。 */
 .tabs {
   flex: none;
-  display: flex;
   flex-wrap: nowrap;
-  gap: 4px;
   min-width: 0;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
 }
-.tab {
-  flex: 1 1 0;
-  min-width: 0;
-  font: inherit;
+.tabs .n-tabs-nav { line-height: 1.2; }
+.tabs .n-tabs-tab {
   font-size: 12px;
   line-height: 1.2;
-  white-space: nowrap;
-  padding: 6px 10px 8px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  opacity: 0.62;
-  cursor: pointer;
-  transition: opacity 0.15s;
+  padding: 6px 0 8px;
 }
-.tab:hover { opacity: 0.85; }
-.tab[aria-selected="true"] { opacity: 1; font-weight: 600; }
-.tab:focus-visible { outline: 2px solid rgba(128, 128, 128, 0.45); outline-offset: -2px; }
+.tabs .n-tabs-tab:focus-visible {
+  outline: 2px solid rgba(128, 128, 128, 0.45);
+  outline-offset: -2px;
+}
+/* 选中态的品牌色下划线由 n-tabs 的 bar 画，字重交给 naive-ui（不覆盖）。 */
 
 /* 四页内容各自成组；隐藏仍由 .page [hidden] 兜底。
    内容区吃满剩余高度（flex:1 + min-height:0）。少了 min-height:0，子元素
@@ -159,7 +133,7 @@ html, body {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -173,42 +147,36 @@ html, body {
    data-off 仍在根节点上（MasterCard.vue），所以这条选择器照旧成立。 */
 .master[data-off="true"] { background: rgba(128, 128, 128, 0.035); }
 .master[data-off="true"] .n-card-header__main { opacity: 0.6; }
-.master-hint { margin: 0; min-width: 0; font-size: 12px; opacity: 0.62; line-height: 1.4; }
-.master-hint.warn { color: #b8564d; opacity: 0.95; }
 
-/* ---------- 字段：标签 / 控件 / 小字 ---------- */
+/* ---------- 字段：只剩 naive 管不到的三个尺寸 ---------- */
 
-/* 控件本体交给 naive-ui（size="small"），这里只管栅格里的尺寸与标签。
-   两格并排交给 n-grid，不再需要手写的成对栅格规则。 */
-.field { display: grid; gap: 4px; margin-bottom: 8px; }
-.field:last-child { margin-bottom: 0; }
-.field label,
-.field .label,
-.field .field-label { font-size: 11.5px; line-height: 1.35; opacity: 0.62; }
+/* 字段本体已经交给 NFormItem（label / 间距 / for 关联都它管），这里只补三件事：
+   控件撑满格宽、字段之间的竖向节奏、以及裸 <b> 的字重。 */
 .field .n-select,
 .field .n-input,
 .field .n-input-number { width: 100%; min-width: 0; }
+
+/* NFormItem 自带的下边距是 18px（为校验反馈行留的位）；我们统一关了反馈行，
+   于是那个下边距就成了空转的大间隙。这里改回间距节奏里的 8px。 */
+.fields .n-form-item { margin-bottom: 8px; }
+.fields .n-form-item:last-child { margin-bottom: 0; }
+/* NFormItem 不指定字重，裸 <b> 会跟着浏览器的 bolder 一路变粗（实测 900）。
+   事实行的值没有语义上的“强调”，回到旧的 560。 */
+.facts b { font-weight: 560; }
+
+/* 为什么还留着 .field / .field-label / .field-hint：
+   带 label 的 input 已经全部用 NFormItem（它生成 <label for>，关联是真的）。
+   但**下拉**（NSelect 非 filterable）根本不渲染内部 <input>，NFormItem 的 label
+   会指到一个不存在的 id，等于指空；而 naive 也没有「只有文字标签」的组件。
+   所以这三条只为「文字标签 + 控件 + 一句小字」这种形式存在，不模仿任何组件外观：
+   字号/行高/透明度是为了跟 NFormItem 的 label 看起来一致，不是另一套设计。 */
+.field { display: grid; gap: 4px; margin-bottom: 8px; }
+.field:last-child { margin-bottom: 0; }
+.field-label { font-size: 11.5px; line-height: 1.35; opacity: 0.62; }
 .field-hint { font-size: 10.5px; line-height: 1.4; opacity: 0.45; }
 
 /* ---------- 前置：探针一行 + 打分服务 ---------- */
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  background: rgba(128, 128, 128, 0.025);
-  min-width: 0;
-}
-.toggle > .n-switch { margin-left: auto; }
-.toggle-copy { display: grid; gap: 1px; min-width: 0; }
-.toggle-copy b { font-size: 12.5px; font-weight: 600; }
-.toggle-copy span { font-size: 11px; opacity: 0.55; line-height: 1.35; }
-
-.services { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.services-title { font-size: 12px; font-weight: 600; }
-.service-list { display: grid; gap: 6px; min-width: 0; }
+.services { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 
 /* 一条服务一行 NGrid（服务名 / 地址 / 模型 / 超时 / 测试）。
    服务名贴左下：列宽已经被下面的列宽表压成内容宽（两个汉字），
@@ -223,7 +191,9 @@ html, body {
   font-size: 12px;
   font-weight: 600;
 }
-.service .field { margin-bottom: 0; }
+.service .field { margin-bottom: 0; gap: 2px; }
+.service .field label,
+.service .field .field-label { line-height: 1.2; }
 .service .field.service-test { display: flex; align-items: flex-end; height: 100%; }
 
 /* 服务行的列宽表（≥700px）：auto | minmax(0,1fr) | minmax(0,.8fr) | 92px | auto
@@ -267,63 +237,34 @@ html, body {
 /* 列表下方唯一一段总说明；每行不再各带一句。
    margin-top: auto 让它落到底：前置卡吃满全局页剩余高度之后，抬高的是卡，
    不是页面留白（见下面的 #panel-global > .prelude）。 */
-.services-note { margin: 0; margin-top: auto; font-size: 10.5px; line-height: 1.4; opacity: 0.55; }
+.services-note { margin: 0; margin-top: auto; font-size: 10.5px; line-height: 1.25; opacity: 0.55; }
 
-/* ---------- 中枢 / 身份：事实行 + 服务端检查项 ---------- */
-/* 列交给 NGrid（cols="1 520:3"），这里只留分隔线与上下留白。 */
-.facts {
-  margin: 6px 0 2px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(128, 128, 128, 0.16);
-}
-.fact { display: grid; gap: 1px; min-width: 0; }
-.fact span { font-size: 10.5px; opacity: 0.5; }
-.fact b {
-  font-size: 12.5px;
-  font-weight: 560;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
+/* ---------- 中枢 / 身份：事实行交给 NDescriptions ---------- */
 
-.checks-block { margin-top: 8px; }
+/* 三列表格与分隔线都由 NDescriptions / NDivider 画，这里只剩两处组件管不到的：
+   表格与上面字段的竖向距离，以及描述表自己的内边距归零（它自带 8px 会把卡撑高）。 */
+.facts { margin: 0; }
+.facts .n-descriptions-table { margin: 0; }
 
-/* 摘要就一行。全绿时就是一句静态文字：没有箭头、不可点、没有按钮语义。
-   有问题时这一行只说比例，项名交给下面的问题列表。
-   颜色只看整体档位：全绿 = 绿，只是没配 = 灰，有红项 = 红。 */
-.checks-summary { font-size: 11.5px; line-height: 1.5; color: inherit; opacity: 0.72; }
-.checks-summary.ok { color: #5d7d56; opacity: 1; }
-.checks-summary.muted { color: inherit; opacity: 0.72; }
-.checks-summary.bad { color: #b8564d; opacity: 1; }
+.checks-block { margin-top: 4px; }
 
-/* 明细只有问题项，竖向一行一项，读作「名字 · 状态词」。 */
-.checks { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 1px; }
-.checks li {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 11px;
-  line-height: 1.5;
-  padding: 3px 2px;
-  border-radius: 6px;
-}
-.checks li .check-name {
+/* 检查项列表：布局交给 NList，这里只留两个组件不提供的东西：
+   检查名用等宽（长名字不抖），状态词不被挤断行。 */
+.check-name {
   font: 11px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 分隔点紧跟名字，状态词不再甩到行尾：一行最后只剩一两个词，
-   左右分栏会让人以为在读数表。这里刻意不设 opacity（父项 li 已经半透了）。 */
-.checks li .check-status { flex: none; white-space: nowrap; }
-.checks li .check-status::before { content: "· "; }
-.checks li.bad { color: #b8564d; }
-.checks li.muted { color: inherit; opacity: 0.6; }
+.check-status { flex: none; white-space: nowrap; }
 
-.err { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; color: #b8564d; overflow-wrap: anywhere; }
-.save-hint { margin: 6px 0 0; font-size: 11px; opacity: 0.5; min-height: 14px; }
-.save-hint.ok { color: #5d7d56; opacity: 0.9; }
-.save-hint.bad { color: #b8564d; opacity: 0.9; }
+/* 提示行：文案与颜色都交给 NText（type / depth），这里只留行距与不换行溢出。 */
+.hint-line { font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+/* 字段之间夹的说明行要跟 NFormItem 的下边距对齐，否则会贴着下一个 label。 */
+.fields .hint-line { margin: 0 0 8px; }
+/* NText 默认 14px；面板整体是 12px 档，不随组件默认值为了“正常”而变胖。 */
+.hint-body { font-size: 12px; line-height: 1.35; }
 
 /* ---------- 召回管理（记忆页） ---------- */
 
@@ -473,21 +414,6 @@ html, body {
    后端没有清空 / 刷新接口，所以页头只有标题与计数条 #logChips。 */
 #panel-logs { overflow: hidden; }
 
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  min-width: 0;
-  justify-content: flex-end;
-}
-.chips span {
-  font-size: 10.5px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
-  opacity: 0.8;
-  white-space: nowrap;
-}
 
 /* 卡吃满本页剩余高度；卡内容区必须也做成 flex 列 + min-height:0，
    否则 .log 拿到的“剩余高度”不是确定值，滚动会退化成把卡撑高。
@@ -593,5 +519,4 @@ html, body {
 
 /* ---------- 窄屏：chips 让一步 ---------- */
 @media (max-width: 520px) {
-  .chips { justify-content: flex-start; }
 }

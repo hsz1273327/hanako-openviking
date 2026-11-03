@@ -9,7 +9,7 @@
 // 但本机**不挂** click / role / tabindex（rowAttrs 里直接不给），
 // 免得键盘用户点进去得到一个什么都不会发生的按钮。
 import { computed } from "vue";
-import { NList, NListItem, NScrollbar, NTag, NText } from "naive-ui";
+import { NEmpty, NList, NListItem, NScrollbar, NTag, NText } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 import { usePeers } from "../composables/usePeers.js";
 
@@ -63,7 +63,9 @@ function rowClass(row) {
     :class="{ empty: rows.length === 0 }"
     :title="listTitle"
   >
-    <p v-if="rows.length === 0" class="peer-empty">{{ emptyText }}</p>
+    <div v-if="rows.length === 0" class="peer-empty">
+      <NEmpty size="small" :description="emptyText" />
+    </div>
     <NScrollbar v-else class="peer-scroll">
       <NList clickable :show-divider="false">
         <NListItem

@@ -1181,18 +1181,27 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("手写的成对栅格规则已从 panel.css 删掉",
     /\.field\.pair\s*\{/.test(css) === false && /\.fact\.wide\s*\{/.test(css) === false);
 
-  // ---- 事实行也交给 n-grid（不写手写三列 / 不再单独给 .facts 做 520px 降级） ----
-  const factsGrid = /<NGrid[^>]*class="facts"[^>]*cols="1 520:3"[^>]*responsive="screen"/.exec(hub)?.[0] ?? "";
-  check("中枢事实行是 NGrid（cols=\"1 520:3\" + screen 断点）",
-    factsGrid !== "", hub.slice(hub.indexOf("facts"), hub.indexOf("facts") + 200));
+  // ---- 事实行交给 NDescriptions（三列、label 在上、无边框） ----
+  // 以前这里是「NGrid cols="1 520:3" + 三个 .fact」，靠手写 CSS 做 label 在上。
+  // 换成 NDescriptions 之后：label/值的上下关系交给 label-placement，
+  // 语义也从 div 变成表格（读屏能读出「标签：值」的配对）。
   const factsStart = hub.indexOf('class="facts"');
-  const factsBlock = factsStart < 0 ? "" : hub.slice(factsStart, hub.indexOf("</NGrid>", factsStart));
-  eq("事实行三个 NGridItem", (factsBlock.match(/<NGridItem>/g) || []).length, 3);
+  const factsOpen = factsStart < 0 ? -1 : hub.lastIndexOf("<NDescriptions", factsStart);
+  const factsBlock = factsOpen < 0 ? "" : hub.slice(factsOpen, hub.indexOf("</NDescriptions>", factsStart));
+  check("中枢事实行是 NDescriptions（三列 + label 在上 + 无边框）",
+    /<NDescriptions[\s\S]{0,300}?:column="3"/.test(factsBlock) &&
+      /<NDescriptions[\s\S]{0,300}?label-placement="top"/.test(factsBlock) &&
+      /<NDescriptions[\s\S]{0,300}?:bordered="false"/.test(factsBlock),
+    factsBlock.slice(0, 220));
+  eq("事实行三个 NDescriptionsItem", (factsBlock.match(/<NDescriptionsItem/g) || []).length, 3);
   check("事实行仍是往返 / 版本 / 出口（id 与顺序不变）",
     factsBlock.indexOf('id="latency"') >= 0 &&
       factsBlock.indexOf('id="latency"') < factsBlock.indexOf('id="version"') &&
       factsBlock.indexOf('id="version"') < factsBlock.indexOf('id="transport"'),
     factsBlock);
+  // 标签字号仍由 label-style 钉在 10.5px：Descriptions 自带是 14px，放大等于破版。
+  check("事实行标签字号由 label-style 钉住（10.5px）",
+    /FACT_LABEL_STYLE[\s\S]{0,160}fontSize:\s*"10\.5px"/.test(hub), hub.slice(0, 900));
   check(".facts 不再写手写栅格列",
     /grid-template-columns/.test(ruleBody(css, ".facts") || "") === false,
     ruleBody(css, ".facts") || "");
@@ -1210,36 +1219,45 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("摘要行没有箭头伪元素", css.includes(".checks-summary::before") === false);
   check("箭头字符已经不在了", css.includes("▸") === false && css.includes("▾") === false);
   check("折叠状态的 open 类不再用", css.includes(".checks-summary.open") === false);
-  check("摘要行按档位上色（tone 直接当类名）", /:class="checksSummary\.tone"/.test(hub));
+  // 两档颜色以前靠手写类名（tone 直接当 class）。现在语交给 NText 的 type / depth，
+  // 三档仍必须能分出来：ok→success、bad→error、muted→depth 3。
+  check("摘要行按档位上色（tone → NText 的 type/depth）",
+    /const TONE_TYPE = Object\.freeze\(\{[^}]*TONE_OK\]:\s*"success"[^}]*TONE_BAD\]:\s*"error"/.test(hub) &&
+      /:type="summaryType"/.test(hub) && /:depth="summaryDepth"/.test(hub),
+    hub.slice(0, 1200));
+  check("摘要行三档都有落点（muted 走 depth 3）",
+    /TONE_DEPTH = Object\.freeze\(\{[^}]*TONE_MUTED\]:\s*3/.test(hub));
   check("问题项按 statusTone 上色", hub.includes("statusTone(problem.status)"));
   check("问题项的 details 只进 title", hub.includes("details.map(") && hub.includes(":title="));
 
-  // ---- CSS：这一轮没改样式文件，规则必须原样还在 ----
-  check("明细列表的规则还在", ruleBody(css, ".checks") !== null);
-  check(
-    "明细改成竖向一行一项（不再是横排胶囊）",
-    /display\s*:\s*grid/.test(ruleBody(css, ".checks") || "") &&
-      !/flex-wrap\s*:\s*wrap/.test(ruleBody(css, ".checks") || ""),
-    ruleBody(css, ".checks") || "",
-  );
-  check("摘要行的规则在", ruleBody(css, ".checks-summary") !== null);
-  check("状态词规则在", ruleBody(css, ".checks li .check-status") !== null);
-  check(
-    "状态词不叠 opacity（父项 li 已经半透，再乘一层就看不见了）",
-    /opacity/.test(ruleBody(css, ".checks li .check-status") || "") === false,
-    ruleBody(css, ".checks li .check-status") || "",
-  );
-  check("状态词前有分隔点", /content\s*:\s*"·/.test(ruleBody(css, ".checks li .check-status::before") || ""));
+  // ---- 检查项：列表交给 NList，样式不再手搓 ----
+  check("检查项列表用 NList（一行一项，无分隔线）",
+    /<NList[\s\S]{0,200}class="checks"/.test(hub) && /:show-divider="false"/.test(hub),
+    hub.slice(hub.indexOf("<NList"), hub.indexOf("<NList") + 200));
+  check("问题项用 NListItem + NText（不再手写 ul/li）",
+    /<NListItem[\s\S]{0,200}?:title="detailTitle\(problem\)"/.test(hub) &&
+      hub.includes("<NListItem") && hub.includes("</NListItem>"),
+    hub.slice(hub.indexOf("<NListItem"), hub.indexOf("<NListItem") + 160));
+  check("摘要行是 NText（颜色交给 type/depth，不再自写 .checks-summary）",
+    /<NText[\s\S]{0,200}id="checksSummary"/.test(hub) && ruleBody(css, ".checks-summary") === null);
+  check("状态词样式只剩「不被挤断行」这一条",
+    ruleBody(css, ".check-status") !== null &&
+      /white-space\s*:\s*nowrap/.test(ruleBody(css, ".check-status") || ""),
+    ruleBody(css, ".check-status") || "");
+  check("状态词不叠 opacity（父项已经半透，再乘一层就看不见了）",
+    /opacity/.test(ruleBody(css, ".check-status") || "") === false,
+    ruleBody(css, ".check-status") || "");
+  check("分隔点写成模板里的字面量（不再靠 ::before）",
+    /·\s*\{\{\s*problem\.label\s*\}\}/.test(hub), hub.slice(hub.indexOf("check-status"), hub.indexOf("check-status") + 160));
 
   // hidden 的兜底：display:grid / flex 不能再把 hidden 顶掉。
   const hiddenRule = ruleBody(css, ".page [hidden]");
   check("hidden 兜底规则在", hiddenRule !== null);
   check("hidden 兜底是 display:none !important", /display\s*:\s*none\s*!important/.test(hiddenRule || ""),
     hiddenRule || "");
-  check(
-    "hidden 兜底在 .checks 之前（先定规矩）",
-    css.indexOf(".page [hidden] {") < css.indexOf(".checks {"),
-  );
+  check("没有任何 .checks 规则再写 display（否则会盖过 hidden）",
+    ruleBody(css, ".checks") === null,
+    ruleBody(css, ".checks") || "");
 
   // ---- 打分服务：容器在组件里，行由描述表驱动 ----
   check("打分服务容器在前置卡里", prelude.includes('id="scoringServices"'));
@@ -1260,7 +1278,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   eq("服务行是五格 + 结果行一格，六格都是 NGridItem",
     (serviceGridBody.match(/<NGridItem/g) || []).length, 6);
-  check("服务行用小间距", /:x-gap="6" :y-gap="4"/.test(prelude));
+  check("服务行 y-gap 压到 0（结果行紧贴字段行，少一层缝）", /:x-gap="6" :y-gap="0"/.test(prelude));
   // 列宽表：服务名列压成内容宽 + 左对齐，地址列吃剩余宽度。“精排 / 决策”
   // 两个汉字等宽，不存在右对齐原本要防的“换类型时左边跟着抖”。
   check("服务名左对齐并贴底",
@@ -1779,14 +1797,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     return { index, body: css.slice(open + 1, end) };
   };
   const guard = ruleFor(".page [hidden]");
-  check("检查项列表确实是 display:grid（当初被顶掉的原因）",
-    /display\s*:\s*grid/.test(ruleFor(".checks")?.body || ""));
+  check("检查项列表的布局交给 NList（CSS 里不再有 .checks 块）",
+    ruleFor(".checks") === null &&
+      /<NList[\s\S]{0,200}class="checks"/.test(uiCode("components/HubIdentity.vue")));
   check("兑底规则存在", guard !== null);
   check("兑底规则带 !important", /!important/.test(guard?.body || ""));
-  check(
-    "兑底规则在 .checks 之前（不会被后写规则覆盖）",
-    (guard?.index ?? Infinity) < (ruleFor(".checks")?.index ?? -1),
-  );
   // 旧的嵌套 details 样式已经随渲染方式一起删掉，不该再有死规则。
   check("没有嵌套 details 的死规则", css.includes(".checks li > ul") === false);
 }
@@ -2631,11 +2646,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       prelude.includes("testService(kind)"),
     prelude.slice(prelude.indexOf("<button"), prelude.indexOf("<button") + 200),
   );
-  check("结果行按 tone 上色", prelude.includes(':class="resultOf(row.kind).tone"'));
+  // 两档颜色以前靠手写类名（:class="…tone"）。现在交给 NText 的 type / depth，
+  // 三档仍必须能分出来：ok→success、bad→error、muted→depth 3。
+  check("结果行按 tone 上色（三档 → NText 的 type/depth）",
+    /function toneType\(tone\) \{[\s\S]{0,160}?"ok"\) return "success"[\s\S]{0,80}?"bad"\) return "error"/.test(prelude) &&
+      /function toneDepth\(tone\) \{[\s\S]{0,80}?"muted" \? 3/.test(prelude) &&
+      prelude.includes(':type="toneType(resultOf(row.kind).tone)"') &&
+      prelude.includes(':depth="toneDepth(resultOf(row.kind).tone)"'),
+    prelude.slice(prelude.indexOf("function toneType"), prelude.indexOf("function toneDepth") + 80));
+  // 结果行常驻：取那一格 NGridItem 的整段源码，里面既不能有 v-if / v-show / hidden，
+  // 又要真的渲染一个 .service-result。空着也占位，页不会因为出结果而跳一下。
+  const resultCellStart = prelude.indexOf('<NGridItem span="1 700:4" class="service-result-cell">');
+  const resultCell = resultCellStart < 0
+    ? ""
+    : prelude.slice(resultCellStart, prelude.indexOf("</NGridItem>", resultCellStart) + "</NGridItem>".length);
   check(
-    "结果行常驻（空着也占位，不设 hidden）",
-    /class="service-result"[\s\S]{0,120}:class="resultOf\(row\.kind\)\.tone"/.test(prelude) &&
-      prelude.includes(":hidden") === false,
+    "结果行常驻（空着也占位，不设 hidden / v-if）",
+    resultCell.includes('class="service-result') &&
+      !/\bv-if=|\bv-show=|\bhidden\b/.test(resultCell),
+    resultCell.slice(0, 260),
   );
   check("结果行文案来自 serviceTestView",
     storeJs.includes("serviceTestView(out, body.model)") &&
@@ -2766,21 +2795,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     lightThemeOverrides.Switch,
     undefined,
   );
-  // 组件级覆盖与 common.borderRadius 全部删掉：naive-ui 自己的亮色默认值就是
-  // 我们要的样子，再钉一遍等于把它当画板重画。
+  // 组件级覆盖只留两条：卡片圆角 6px、标签字号 12px。其余（输入框、按钮、
+  // 卡片底色 / 边框 / 阴影）一律用 naive-ui 自己的亮色默认值。
   eq("Input 不再有组件级覆盖（底色 / 边框 / 圆角全交给 naive-ui）",
     lightThemeOverrides.Input, undefined);
   eq("Button 不再有组件级覆盖", lightThemeOverrides.Button, undefined);
   eq("Alert 不再有组件级覆盖", lightThemeOverrides.Alert, undefined);
   eq("common 不再覆盖 borderRadius", lightThemeOverrides.common?.borderRadius, undefined);
   check(
-    "主题只剩品牌色（common 里的 primary / success / error 三组）",
-    Object.keys(lightThemeOverrides).join(",") === "common" &&
+    "主题只剩品牌色 + 两条组件级覆盖（Card 圆角 / Tabs 字号）",
+    Object.keys(lightThemeOverrides).sort().join(",") === "Card,Tabs,common" &&
       Object.keys(lightThemeOverrides.common).every((key) =>
         /^(primary|success|error)Color(Hover|Pressed|Suppl)?$/.test(key),
       ),
-    Object.keys(lightThemeOverrides.common).join(","),
+    Object.keys(lightThemeOverrides).join(","),
   );
+  eq("卡片圆角统一到 6px", lightThemeOverrides.Card?.borderRadius, "6px");
+  eq("标签字号仍是 12px（不放大）", lightThemeOverrides.Tabs?.tabFontSizeSmall, "12px");
   check("品牌色一个都没少",
     ["#6f8f68", "#7ea176", "#5f7d59", "#5d7d56", "#b8564d"].every((color) =>
       Object.values(lightThemeOverrides.common).includes(color),
@@ -3029,7 +3060,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("未选中的标签 tabindex=-1", tabBar.includes(":tabindex=\"props.active === tab ? 0 : -1\""));
   check("aria-controls 指向 panel-<name>", tabBar.includes(":aria-controls=\"`panel-${tab}`\""));
   check("data-tab 带着页名", tabBar.includes(":data-tab=\"tab\""));
-  check("点击发 select", tabBar.includes('@click="select(tab)"'));
+  check("点击切页走 n-tabs 的 update:value", tabBar.includes('@update:value="select"'));
+  check("标签栏用 n-tabs（type=line + space-evenly）",
+    /<NTabs\b[\s\S]{0,240}type="line"/.test(tabBar) &&
+      tabBar.includes('justify-content="space-evenly"') &&
+      /<NTab\b/.test(tabBar) && tabBar.includes("<button") === false,
+    tabBar.slice(0, 400));
   check(
     "键盘左右 / Home / End 都能换（映射在 lib/tabs.js 的 nextTab，下面直接测）",
     tabBar.includes("nextTab") && tabBar.includes("event.key") &&
@@ -3179,19 +3215,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- CSS ----
   check("标签栏样式存在", /\n\.tabs \{/.test(css));
-  check("选中标签样式存在", /\n\.tab\[aria-selected="true"\] \{/.test(css));
+  check("标签保留可见焦点环（n-tabs 自己不画）",
+    /\n\.tabs \.n-tabs-tab:focus-visible \{/.test(css), ruleBody(css, ".tabs .n-tabs-tab:focus-visible") || "");
   check("内容块样式存在", /\n\.tab-panel \{/.test(css));
   const tabsRule = ruleBody(css, ".tabs");
   check("标签栏一行不换行", /flex-wrap:\s*nowrap/.test(tabsRule || ""), tabsRule || "");
   const panelRule = ruleBody(css, ".tab-panel");
   check(
-    "内容块是 flex 列 + 8px 间距（吃满剩余高度）",
+    "内容块是 flex 列 + 12px 间距（吃满剩余高度）",
     /display:\s*flex/.test(panelRule || "") &&
       /flex-direction:\s*column/.test(panelRule || "") &&
-      /gap:\s*8px/.test(panelRule || ""),
+      /gap:\s*12px/.test(panelRule || ""),
     panelRule || "",
   );
-  const tabRule = ruleBody(css, ".tab");
+  const tabRule = ruleBody(css, ".tabs .n-tabs-tab");
   check("标签字号沿用 12px", /font-size:\s*12px/.test(tabRule || ""), tabRule || "");
 }
 
@@ -8714,13 +8751,37 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("七张卡都是 NCard 且都有 title",
     titledCards.every(([, pattern, source]) => pattern.test(source)),
     titledCards.filter(([, pattern, source]) => pattern.test(source) === false).map(([name]) => name).join(", "));
+
+  // 卡片靠底色分层，不靠 1px 边框：递归扫 ui-src/src 下全部 .vue，
+  // 命中任何一个没有 :bordered="false" 的 NCard 就红。
+  const allVueFiles = (function walk(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      return entry.name.endsWith(".vue") ? [full] : [];
+    });
+  })(UI_SRC_DIR);
+  const allCardTags = [];
+  for (const file of allVueFiles) {
+    const code = uiCode(path.relative(UI_SRC_DIR, file));
+    for (const match of code.matchAll(/<NCard\b[^>]*>/g)) {
+      allCardTags.push([path.relative(UI_SRC_DIR, file), match[0]]);
+    }
+  }
+  const unBordered = allCardTags.filter(([, tag]) => tag.includes(':bordered="false"') === false);
+  check("所有 NCard 都去掉默认边框（:bordered=\"false\"）",
+    allCardTags.length > 0 && unBordered.length === 0,
+    unBordered.map(([file, tag]) => `${file}: ${tag.slice(0, 80)}`).join(" | "));
   check("技能卡的 aria-label 还在",
     /<NCard\b[\s\S]{0,300}aria-label="技能路由"/.test(skillRoute), skillRoute.slice(0, 360));
-  check("需要右侧附件的地方用 #header-extra（总闸开关 / peer 计数 / 日志计数 / 技能开关）",
-    [/<template #header-extra>[\s\S]{0,160}<NSwitch/.test(master),
-      /<template #header-extra>[\s\S]{0,160}id="peerCount"/.test(recall),
+  check("需要右侧附件的地方用 #header-extra（peer 计数 / 日志计数 / 技能开关）",
+    [/<template #header-extra>[\s\S]{0,160}id="peerCount"/.test(recall),
       /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsPanel),
       /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute)].every(Boolean));
+  // 总闸那一行不是卡头附件：标题就是卡头「总闸」，说明与开关是正文里的一行（NSpace）。
+  check("总闸那一行是 NSpace + NText + NSwitch（说明在左、开关在右）",
+    /<NSpace[\s\S]{0,200}id="masterHint"/.test(master) &&
+      /<NSwitch[\s\S]{0,200}aria-label="总闸"/.test(master));
   check("NCard 不降到 tiny（压内边距，不压字号）",
     /size="tiny"/.test([master, hub, prelude, recall, channels, logsPanel, skillRoute].join("\n")) === false &&
       [master, prelude, recall, logsPanel, skillRoute].every((source) => source.includes('size="small"')));
@@ -8896,8 +8957,30 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("面板组件里没有裸 label（既没 for 也没包住控件）", bareLabels, []);
   eq("不带 for 的 label 只剩 channel-cell 三格（名称 / 权重 / 超时）", wrappingLabels.length, 3);
   eq("每个 label for 的目标都能在同类组件的 :input-props 里找到", forIssues, []);
-  check("label for 目标清单非空（HubIdentity 五处 + RecallCard 两个提示词框 + PreludeCard 三处）",
-    forTargets.length === 10, forTargets.map(([file, id]) => `${file}:${id}`).join(", "));
+  // NFormItem 的 label 不在源码里写 <label>，而是由组件生成。所以关联分三块算：
+  //   手写 <label for=x>                     → 2 处（RecallCard 的两个提示词框）
+  //   NFormItem label-props="{ for: 'x' }"   → 5 处（HubIdentity：中枢 2 + 身份 3）
+  //   NFormItem label-props="{ for: row.x.id }" → 3 处（PreludeCard 的地址/模型/超时描述表）
+  // 三块加起来必须是 10，少一块就是又漏了一个关联。
+  const hubOrAll = uiCode("components/HubIdentity.vue");
+  const formItemFor = [...hubOrAll.matchAll(/:label-props="\{ for: '([\w-]+)' \}"/g)].map((m) => m[1]);
+  const serviceFor = [...prelude.matchAll(/:label-props="\{ for: (row\.[\w.]+) \}"/g)].map((m) => m[1]);
+  eq("手写 label for 剩 2 处（字段大多已交给 NFormItem）", forTargets.length, 2);
+  eq("NFormItem 接管了 HubIdentity 的五个字段关联", formItemFor, [
+    "serverUrl", "apiKey", "peerPrefix", "timeoutMs", "budgetTokens",
+  ]);
+  eq("NFormItem 也接管了前置卡的三格（地址 / 模型 / 超时）", serviceFor, [
+    "row.url.id", "row.model.id", "row.timeout.id",
+  ]);
+  check("每个 NFormItem 的 for 都能在 HubIdentity 的 :input-props 里找到 id",
+    formItemFor.every((id) => new RegExp(`id:\\s*'${reEscape(id)}'`).test(hub)),
+    formItemFor.filter((id) => new RegExp(`id:\\s*'${reEscape(id)}'`).test(hub) === false).join(", "));
+  check("前置卡三格的 for 与 :input-props 的 id 同源（都是 row.*.id）",
+    serviceFor.every((expr) => new RegExp(`id: ${reEscape(expr)}(?=[,}\\s])`).test(prelude)),
+    serviceFor.join(", "));
+  check("label for 总数仍是 10（手写 2 + NFormItem 8）",
+    forTargets.length + formItemFor.length + serviceFor.length === 10,
+    `${forTargets.length} + ${formItemFor.length} + ${serviceFor.length}`);
   // 黑名单：这五个 id 的控件拿不到程序化关联，任何组件里都不许再为它们写 for=
   const NO_FOR_IDS = selectLabels.map(([id]) => id);
   check("五个下拉的 id 在「禁止出现 for=」的黑名单里，且面板组件里确实没有引用",
@@ -8917,14 +9000,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     /\.channel-cell \{/.test(css) && /\.channel-cell > span \{/.test(css));
 
   // ---- .field-label 的排版必须与原 label 一致（改标签等于改字号是破版） ----
-  const fieldLabelRule = ruleBody(css, ".field .field-label") || "";
-  check(".field-label 继承了原来 label 的字号 / 行高 / 透明度",
+  // 带 <input> 的字段已经全部换 NFormItem（label 由组件生成，for 关联是真的）；
+  // 下拉（NSelect）没有内部 input，NFormItem 的 label 会指空，所以那里仍是文字标签。
+  const fieldLabelRule = ruleBody(css, ".field-label") || "";
+  check(".field-label 与 NFormItem 的 label 同一档字号 / 行高 / 透明度",
     /\bfont-size:\s*11\.5px/.test(fieldLabelRule) &&
       /\bline-height:\s*1\.35/.test(fieldLabelRule) &&
       /\bopacity:\s*0\.62/.test(fieldLabelRule),
-    fieldLabelRule || "缺 .field .field-label 规则");
-  check("原来的 .field label 规则还在（NInput / NInputNumber 的真 label 照旧）",
-    css.includes(".field label,"));
+    fieldLabelRule || "缺 .field-label 规则");
+  check("带输入框的字段都改用 NFormItem（不再手写 <label for>）",
+    (hub.match(/<NFormItem/g) || []).length >= 5 && (prelude.match(/<NFormItem/g) || []).length >= 4,
+    `hub ${(hub.match(/<NFormItem/g) || []).length} / prelude ${(prelude.match(/<NFormItem/g) || []).length}`);
   const promptFieldLabelRule = ruleBody(css, ".prompt-head .field-label") || "";
   check(".prompt-head 里的 .field-label 也补了 margin:0（和原 label 同排版）",
     /\bmargin\s*:\s*0/.test(promptFieldLabelRule),
@@ -8949,12 +9035,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /:value="state\.controls\.probe"/.test(prelude) &&
       /:value="routing"/.test(skillRoute));
 
-  // ---- TabBar 仍是手写 tablist（n-tabs 保不住现有 aria 契约） ----
-  check("TabBar 仍是手写 role=tab 按钮，而不是 n-tabs",
-    tabBar.includes('role="tab"') && tabBar.includes('role="tablist"') &&
-      tabBar.includes("<button") && /<NTabs\b/.test(tabBar) === false);
-  check("TabBar 的注释写清了为什么不用 n-tabs",
-    /n-tabs/.test(uiSrcRaw("components/TabBar.vue")) && /aria-controls/.test(uiSrcRaw("components/TabBar.vue")));
+  // ---- TabBar 用 n-tabs 的 NTab，aria / 键盘自己补（naive-ui 2.45 不输出这些） ----
+  check("TabBar 用 n-tabs 的 NTab 渲染，不再是手写按钮",
+    /<NTabs\b/.test(tabBar) && /<NTab\b/.test(tabBar) && tabBar.includes("<button") === false,
+    tabBar.slice(0, 200));
+  check("TabBar 的注释写清了 n-tabs 不带 aria / 键盘，所以由组件补",
+    /NTabs|n-tabs/.test(uiSrcRaw("components/TabBar.vue")) &&
+      /aria-controls/.test(uiSrcRaw("components/TabBar.vue")) &&
+      /keydown/.test(uiSrcRaw("components/TabBar.vue")));
 }
 
 

@@ -81,7 +81,7 @@ function onPromptChange(which, value) {
 </script>
 
 <template>
-  <NCard class="recall" size="small" title="召回管理" content-style="padding: 8px 12px">
+  <NCard class="recall" size="small" title="召回管理" :bordered="false" header-style="padding: 4px 16px" content-style="padding: 16px">
     <template #header-extra>
       <span id="peerCount" class="peer-count">{{ peerCountText }}</span>
     </template>

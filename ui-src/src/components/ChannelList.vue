@@ -115,10 +115,11 @@ function timeoutTitle(row) {
             class="channel-card"
             :class="{ warn: row.unavailable }"
             size="small"
+            :bordered="false"
             :title="row.title"
             :data-index="row.index"
-            header-style="padding: 4px 10px"
-            content-style="padding: 6px 10px 8px"
+            header-style="padding: 4px 16px"
+            content-style="padding: 16px"
           >
             <template #header-extra>
               <div class="channel-head-extra">

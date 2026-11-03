@@ -11,7 +11,7 @@
 // （键就是像素阈值 0 / 520 / 700），所以组件里能直接写 cols="1 700:2"。
 // 布局 / 配色一律留在 ui/assets/panel.css，SFC 里不写 <style>。
 import { computed, onMounted, ref } from "vue";
-import { NButton, NConfigProvider, zhCN } from "naive-ui";
+import { NButton, NConfigProvider, NTag, zhCN } from "naive-ui";
 import GlobalPanel from "./components/GlobalPanel.vue";
 import LogsPanel from "./components/LogsPanel.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
@@ -71,6 +71,10 @@ async function onTest() {
 
 const dotClass = computed(() => view.value.dotClass);
 
+// 状态药丸的档位（ok / down / ""）→ NTag 的 type。三档一张表，不在模板里写 ? :。
+const PILL_TYPE = Object.freeze({ ok: "success", down: "error" });
+const pillType = computed(() => PILL_TYPE[view.value.pillTone]);
+
 onMounted(() => {
   appReady();
   // 先摆好上次停的页（上面已经读好了），再开始读数据：
@@ -97,13 +101,13 @@ onMounted(() => {
           <div class="ident-text">
             <div class="ident-line">
               <h1 class="title">OpenViking</h1>
-              <span id="statePill" class="pill" :class="view.pillTone">{{ view.pillText }}</span>
+              <NTag id="statePill" size="small" round :type="pillType">{{ view.pillText }}</NTag>
             </div>
             <p id="subLine" class="sub">{{ view.subLine }}</p>
           </div>
         </div>
         <div class="top-actions">
-          <NButton id="testBtn" size="small" :disabled="testing" @click="onTest">
+          <NButton id="testBtn" size="small" type="primary" :disabled="testing" @click="onTest">
             {{ testing ? "测试中…" : "测试连接" }}
           </NButton>
           <NButton

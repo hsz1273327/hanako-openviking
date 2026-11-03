@@ -9,7 +9,7 @@
 // 形态交给 naive-ui：一张 n-card（title="日志"）吃满本页，计数条 #logChips
 // 放卡的 #header-extra（标题在左、计数在右），正文是 NScrollbar > pre。
 // 高度全部由 panel.css 的 #panel-logs / .logs / .log 三条规则接起来。
-import { NCard, NScrollbar } from "naive-ui";
+import { NCard, NScrollbar, NSpace, NTag } from "naive-ui";
 import { useLogs } from "../composables/useLogs.js";
 
 const { chips, body } = useLogs();
@@ -20,16 +20,22 @@ const { chips, body } = useLogs();
     class="logs"
     size="small"
     title="日志"
-    content-style="padding: 4px 12px 8px"
+    :bordered="false"
+    header-style="padding: 4px 16px"
+    content-style="padding: 16px"
   >
     <template #header-extra>
-      <div id="logChips" class="chips">
-        <span
+      <!-- 计数条：一枚 NTag 一个计数，muted 的用 type=default + 降透明度。 -->
+      <NSpace id="logChips" :size="4" justify="end">
+        <NTag
           v-for="(chip, index) in chips"
           :key="index"
-          :style="chip.muted ? { opacity: 0.45 } : undefined"
-        >{{ chip.text }}</span>
-      </div>
+          size="small"
+          round
+          :type='chip.muted ? "default" : "info"'
+          :style="chip.muted ? { opacity: 0.55 } : undefined"
+        >{{ chip.text }}</NTag>
+      </NSpace>
     </template>
 
     <NScrollbar class="log">

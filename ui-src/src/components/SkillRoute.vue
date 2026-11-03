@@ -58,8 +58,10 @@ async function onToggle(next) {
     class="skill-route"
     size="small"
     title="技能路由"
+    :bordered="false"
+    header-style="padding: 4px 16px"
     aria-label="技能路由"
-    content-style="padding: 6px 12px 8px"
+    content-style="padding: 16px"
     :class="{ dim: !enabled }"
   >
     <template #header-extra>
