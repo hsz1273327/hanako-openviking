@@ -6,10 +6,11 @@
 // 召回判断四档（关闭 / 规则判断 / 语言模型判断 / 决策模型判断），展开区间不一样：
 //   off / rules —— 什么都不展开；
 //   llm         —— 展开提示词（gatePrompt）与判断模型（宿主生成式模型）；
-//   decision    —— 展开提示词（gateDecisionPrompt）、召回门槛（gateDecisionThreshold）
-//                  与一行决策服务状态，判断模型下拉隐藏（模型由服务配置决定）。
-// 两份提示词是同一位置、同一套三态与「恢复默认」，但绑的键不同：分开存、分开提交，
-// 改一份不动另一份，切档也不丢内容。
+//   decision    —— 展开判断前文（gateContext / gateContextTurns）、提示词、召回门槛
+//                  （gateDecisionThreshold）与一行决策服务状态，判断模型下拉隐藏。
+// 提示词是同一位置、同一套三态与「恢复默认」，但绑的键不同：llm 一份，decision 再按
+// gateContext 分「不看前文 / 带前文」两份。分开存、分开提交，改一份不动另一份，
+// 切档或切 gateContext 都不丢内容。
 //
 // 第四档只在决策服务（地址 + 模型）配好时才出现在下拉里：没见过这一项的人不会选到
 // 一个永远不生效的档位。选项由 lib/recall-layers.js 的纯函数生成，组件只渲染。
@@ -37,6 +38,10 @@ import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSelect } from 
 import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import {
+  GATE_CONTEXT_TURNS_DEFAULT,
+  GATE_CONTEXT_TURNS_MAX,
+  GATE_CONTEXT_TURNS_MIN,
+  GATE_CONTEXT_TURNS_STEP,
   GATE_DECISION_THRESHOLD_DEFAULT,
   GATE_DECISION_THRESHOLD_HINT,
   GATE_DECISION_THRESHOLD_MAX,
@@ -44,9 +49,12 @@ import {
   GATE_DECISION_THRESHOLD_STEP,
   decisionServiceConfigured,
   decisionServiceView,
+  gateContextOptions,
   gateFallbackOptions,
   gateHasFailurePath,
   recallGateOptions,
+  recallPromptField,
+  recallPromptKey,
 } from "../lib/recall-layers.js";
 
 const {
@@ -54,11 +62,13 @@ const {
   enabled,
   setForm,
   setDecisionThreshold,
+  setGateContextTurns,
   setPrompt,
   touchPrompt,
   resetPrompt,
   gatePromptStatus,
   decisionPromptStatus,
+  contextPromptStatus,
   setFocus,
 } = useConfig();
 const { options, hint: modelsHint } = useModels();
@@ -70,19 +80,30 @@ const gateOptions = computed(() => recallGateOptions(decisionConfigured.value));
 
 const gateOpen = computed(() => state.form.recallGate === "llm");
 const decisionOpen = computed(() => state.form.recallGate === "decision");
-// 两份判据共用一块展开区：同一个位置、同一套三态，只是绑的键不同。
+// 「带最近几轮」只在 decision 档 + gateContext=turns 时出现。
+const gateContextTurnsOpen = computed(
+  () => decisionOpen.value && state.form.gateContext === "turns",
+);
+// 判据共用一块展开区：同一个位置、同一套三态，只是绑的键不同。
+// decision 档里再按 gateContext 分两份题面：none 坐 gateDecisionPrompt，
+// turns 坐 gateContextPrompt。切回来时各自草稿都还在。
 const promptOpen = computed(() => gateOpen.value || decisionOpen.value);
-const promptWhich = computed(() => (decisionOpen.value ? "decision" : "gate"));
-const promptField = computed(() => (decisionOpen.value ? "gateDecisionPrompt" : "gatePrompt"));
-const promptValue = computed(() =>
-  decisionOpen.value ? state.prompts.decision : state.prompts.gate,
+const promptWhich = computed(() =>
+  recallPromptKey(state.form.recallGate, state.form.gateContext),
 );
-const promptStatusText = computed(() =>
-  decisionOpen.value ? decisionPromptStatus() : gatePromptStatus(),
+const promptField = computed(() =>
+  recallPromptField(state.form.recallGate, state.form.gateContext),
 );
+const promptValue = computed(() => state.prompts[promptWhich.value]);
+const promptStatusText = computed(() => {
+  if (promptWhich.value === "gate") return gatePromptStatus();
+  if (promptWhich.value === "context") return contextPromptStatus();
+  return decisionPromptStatus();
+});
 const promptPlaceholder = computed(() =>
-  decisionOpen.value ? "留空则不拦截任何召回" : "留空则用内置默认模板",
+  promptWhich.value === "gate" ? "留空则用内置默认模板" : "留空则不拦截任何召回",
 );
+const contextOptions = Object.freeze(gateContextOptions());
 // 决策服务状态行：纯函数给文案，组件只排版（与其它卡片同一习惯）。
 const decisionService = computed(() => decisionServiceView(state.layers));
 
@@ -173,6 +194,41 @@ function onPromptChange(value) {
          llm 坐 gatePrompt，decision 坐 gateDecisionPrompt —— 同一个位置，两份值互不影响。 -->
     <div id="gateAdvanced" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!promptOpen">
       <NGrid cols="1 700:2" responsive="screen" :x-gap="10" :y-gap="8">
+        <!-- 判断前文只属于 decision 档：none 只看最后一句，turns 带最近几轮问答。 -->
+        <NGridItem v-if="decisionOpen">
+          <div class="field">
+            <span class="field-label">判断前文</span>
+            <NSelect
+              size="small"
+              aria-label="判断前文"
+              :options="contextOptions"
+              :input-props="{ id: 'gateContext' }"
+              :value="state.form.gateContext"
+              @update:value="(value) => onSelect('gateContext', value)"
+            />
+            <span class="field-hint">不看前文只判断最后一条用户消息；带最近几轮会把最近几轮问答一起给模型，问的是「上面有没有」。</span>
+          </div>
+        </NGridItem>
+        <!-- 只有选「带最近几轮」才出现。失焦 / 回车才提交，清空不提交、回填已确认值。 -->
+        <NGridItem v-if="gateContextTurnsOpen">
+          <div class="field">
+            <label for="gateContextTurns">带最近几轮</label>
+            <NInputNumber
+              size="small"
+              style="width: 100%"
+              :show-button="false"
+              :update-value-on-input="false"
+              :min="GATE_CONTEXT_TURNS_MIN"
+              :max="GATE_CONTEXT_TURNS_MAX"
+              :step="GATE_CONTEXT_TURNS_STEP"
+              :placeholder="String(GATE_CONTEXT_TURNS_DEFAULT)"
+              :input-props="{ id: 'gateContextTurns' }"
+              :value="state.form.gateContextTurns"
+              @update:value="(value) => setGateContextTurns(value)"
+            />
+            <span class="field-hint">1–12 的整数，默认 {{ GATE_CONTEXT_TURNS_DEFAULT }} 轮；一问一答算一轮。</span>
+          </div>
+        </NGridItem>
         <NGridItem>
           <div class="field">
             <div class="prompt-head">
@@ -199,6 +255,8 @@ function onPromptChange(value) {
                  占位符不能靠 v-pre 躲：v-pre 会连 v-if 一起跳过，两个 span 会同时渲染。
                  用 HTML 实体写双花括号，编译期不当插值，渲染出来仍是 {{message}}。 -->
             <span v-if="!decisionOpen" class="field-hint">用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
+            <span v-else-if="gateContextTurnsOpen" id="gateContextPromptHint" class="field-hint">这一格是「带前文模式」的题面：模型能看到上面几轮对话，判定标准换成「上面有没有 / 要不要翻更早的记录」那一套。前文取不到时（比如会话第一句）自动退回不带前文的题面，不会因此失败。
+              用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它时这句就是纯题面（前文与消息本身都在 state 里，不会重复发）。</span>
             <span v-else id="decisionPromptHint" class="field-hint">这一格是题面，不是让模型生成文本：判定标准由内置的两条描述决定（有指代或省略 / 自己把话说完整），模型只在两者之间选一个并给出置信度。选「有指代或省略」且置信度不低于下面的召回门槛（默认 0.45）时照常召回，选「自己把话说完整」时跳过召回。
               为什么这么问：直接问「要不要查记忆」，模型看一句孤立的话会倾向答「不用查」，实测十条该召回的全漏；改问「不看之前的对话够不够回答」，它才会去找这句话缺了什么。两个问法测的是同一件事，后者才问得动。
               用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它时这句就是纯题面（消息本身在 state 里，不会重复发）。</span>

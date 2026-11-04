@@ -17,6 +17,9 @@ import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
   GATE_DECISION_THRESHOLD_DEFAULT,
+  normalizeGateContext,
+  normalizeGateContextPrompt,
+  normalizeGateContextTurns,
   normalizeGateDecisionThreshold,
   normalizeGateFallback,
   normalizeServiceTimeout,
@@ -34,6 +37,7 @@ import {
   injectMemory,
   lastUserText,
   recallQuery,
+  recentDialogue,
   trimToBudget,
 } from "../inject/plan.js";
 
@@ -704,6 +708,37 @@ export const DECISION_GATE_CRITERIA = Object.freeze({
 });
 
 /**
+ * 带前文模式的判据：问的不是「这句话自不自足」，而是「上面那几轮里有没有」。
+ *
+ * 同一道 choice 题，选项名不变（need / standalone），变的只是两段描述的看的地方：
+ * 前文已经解释过的东西算 standalone（不用翻更早的记录），前文没出现过的算 need。
+ */
+export const DECISION_GATE_CONTEXT_CRITERIA = Object.freeze({
+  need: "这句话要的信息，上面的对话里没有。开了个新话题；问一件在这次会话里从没提过的事；提到一个上面没出现过的名词、文件、项目、配置项；要查证一个之前没讨论过的结论。得去翻这次会话之前的记录才知道。",
+  standalone: "这句话要的信息，上面的对话里已经有了；或者它自己就把话说全了，不需要额外信息。上面提到过的名词、正在处理的那件事、刚刚说过的结论，都算这一边。",
+});
+
+/** 这一轮看不看前文：认不出的值按 none（与读取侧同一个归一化）。 */
+export function gateContextOf(switches) {
+  return normalizeGateContext(switches?.gateContext);
+}
+
+/** 带前文时带几轮：越界 / 非整数 / 缺项一律回 4。 */
+export function gateContextTurnsOf(switches) {
+  return normalizeGateContextTurns(switches?.gateContextTurns);
+}
+
+/**
+ * 带前文模式那份题面的读数：与 gateDecisionPromptOf 同一条语义。
+ * 空串 = 没有判据（不是「偷偷用默认」）。
+ */
+export function gateContextPromptOf(switches) {
+  return typeof switches?.gateContextPrompt === "string"
+    ? normalizeGateContextPrompt(switches.gateContextPrompt).trim()
+    : "";
+}
+
+/**
  * 默认召回门槛（need 且置信度不低于它才算需要召回）。
  *
  * 与配置默认值（src/ov/settings.js 的 DEFAULTS.gateDecisionThreshold）同一个数：调用方不给门槛
@@ -787,26 +822,36 @@ function decisionAnswerOf(value) {
  * 判据看最后一条用户原话（调用方传进来的就是 lastText），与 llm 档同源，
  * 不看拼接后的查询。提示词复用 renderDecisionPrompt：谁想用占位符就把 {{message}}
  * 写进去，没写就只发题面；渲染后的那一段就是 instructions。
- * state.content 仍然是最后一条用户消息本身，不跟着模板变形。
+ *
+ * context 是可选的前文（recentDialogue 的结果）：
+ *   - 空串（默认）——行为与没加这个参数之前完全一样：state.content 就是最后一条
+ *     用户消息，题面里的 {{message}} 也用它；
+ *   - 非空——state.content = 前文 + 空行 + 当前消息，当前消息仍在最下面，
+ *     criteria 换成 DECISION_GATE_CONTEXT_CRITERIA（问「上面有没有」而不是「自不自足」）。
+ *     题面里的 {{message}} 仍然替换当前消息，不把整段前文再塞进 instructions。
  *
  * 题型固定 choice + criteria：criteria 缺了服务端 400，所以它跟着请求一起发，
- * 不放在用户可编辑的提示词里。
+ * 不放在用户可编辑的提示词里。两套 criteria 的选项名都是 need / standalone，
+ * 判定逻辑（need 且 confidence 够门槛）不随模式变化。
  */
-export async function askDecisionGate(sdk, switches, text, prompt) {
+export async function askDecisionGate(sdk, switches, text, prompt, context = "") {
   const service = decisionGateServiceOf(switches);
   if (!service.configured) throw new Error("决策服务未配置");
   const body = typeof text === "string" ? text : "";
+  const history = typeof context === "string" ? context.trim() : "";
+  const withContext = Boolean(history);
+  const stateContent = withContext ? `${history}\n\n${body}` : body;
   const data = await postJson(
     sdk,
     channelEndpoint(service.url, "/v1/systemone"),
     {
       model: service.model,
-      state: { type: "text", content: body },
+      state: { type: "text", content: stateContent },
       questions: {
         q: {
           type: "choice",
           instructions: renderDecisionPrompt(prompt, body),
-          criteria: DECISION_GATE_CRITERIA,
+          criteria: withContext ? DECISION_GATE_CONTEXT_CRITERIA : DECISION_GATE_CRITERIA,
         },
       },
     },
@@ -1879,7 +1924,15 @@ export function createRecallHandler(sdk, options = {}) {
       }
     } else if (switches.recallGate === "decision") {
       const service = decisionGateServiceOf(switches);
-      const prompt = gateDecisionPromptOf(switches);
+      // 前文只在 turns 模式下取；取不到（会话第一句）就按 none 走，
+      // 不发一个只有题面、没有前文的请求，也不因此算失败。
+      const context =
+        gateContextOf(switches) === "turns"
+          ? recentDialogue(payload, gateContextTurnsOf(switches))
+          : "";
+      const prompt = context
+        ? gateContextPromptOf(switches)
+        : gateDecisionPromptOf(switches);
       if (!service.configured) {
         // 没配不是失败，是「没有判据」：照常召回，面板另给一句提示。不退回 llm。
         // 这一档在读取侧就已经归一化成 off 了，走到这里只是兜底。
@@ -1889,7 +1942,7 @@ export function createRecallHandler(sdk, options = {}) {
         gateFailure("decision prompt empty");
       } else {
         try {
-          const answer = await askDecisionGate(sdk, switches, lastText, prompt);
+          const answer = await askDecisionGate(sdk, switches, lastText, prompt, context);
           // 门槛只在这一档生效：配置项读在调用处，别的档根本不会碰到它。
           if (decisionGateSkips(answer, gateDecisionThresholdOf(switches))) {
             gateSkip = { by: "decision", reason: "decision-no-need" };

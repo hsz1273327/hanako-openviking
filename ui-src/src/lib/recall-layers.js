@@ -481,6 +481,70 @@ export function normalizeGateDecisionPrompt(value) {
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
 }
 
+/** 带前文模式那份题面：与 gateDecisionPrompt 同口径。 */
+export function normalizeGateContextPrompt(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+// 判断前文：与 src/ov/settings.js 的 GATE_CONTEXT_MODES 同值。
+export const GATE_CONTEXT_MODES = Object.freeze(["none", "turns"]);
+export const GATE_CONTEXT_LABELS = Object.freeze({
+  none: "不看前文",
+  turns: "带最近几轮对话",
+});
+
+/** 与 src/ov/settings.js 的 normalizeGateContext 同口径：非法值回 none。 */
+export function normalizeGateContext(value) {
+  return oneOf(value, GATE_CONTEXT_MODES, "none");
+}
+
+/** 「判断前文」下拉的选项：两项，文案与 manifest 的 enumLabels 逐字一致。 */
+export function gateContextOptions() {
+  return GATE_CONTEXT_MODES.map((value) => ({ value, label: GATE_CONTEXT_LABELS[value] }));
+}
+
+/**
+ * 同一个 textarea 此刻绑哪一份题面：llm 一份；decision 下按 gateContext 分两份。
+ * 组件按它切键，切回来时各份草稿都还在（panel-store 的 prompts 分开存）。
+ */
+export function recallPromptKey(recallGate, gateContext) {
+  if (recallGate === "llm") return "gate";
+  if (recallGate === "decision" && normalizeGateContext(gateContext) === "turns") return "context";
+  return "decision";
+}
+
+/** 题面 key -> 配置键（也是输入框 id / state.focus 的值）。 */
+export function recallPromptField(recallGate, gateContext) {
+  const key = recallPromptKey(recallGate, gateContext);
+  if (key === "gate") return "gatePrompt";
+  if (key === "context") return "gateContextPrompt";
+  return "gateDecisionPrompt";
+}
+
+/** 带前文的轮数：默认 / 边界 / 步长与 src/ov/settings.js 同值。 */
+export const GATE_CONTEXT_TURNS_DEFAULT = 4;
+export const GATE_CONTEXT_TURNS_MIN = 1;
+export const GATE_CONTEXT_TURNS_MAX = 12;
+export const GATE_CONTEXT_TURNS_STEP = 1;
+
+/**
+ * 与 src/ov/settings.js 的 normalizeGateContextTurns 同口径：
+ * 1–12 的整数，其余（空串 / 非数字 / 小数 / 越界 / null）一律回 4。
+ * 不夹边界：填错了就老实回默认，别静默变成「永远带 1 轮 / 12 轮」。
+ */
+export function normalizeGateContextTurns(value) {
+  let parsed;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && value.trim()) parsed = Number(value.trim());
+  else return GATE_CONTEXT_TURNS_DEFAULT;
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return GATE_CONTEXT_TURNS_DEFAULT;
+  if (parsed < GATE_CONTEXT_TURNS_MIN || parsed > GATE_CONTEXT_TURNS_MAX) {
+    return GATE_CONTEXT_TURNS_DEFAULT;
+  }
+  return parsed;
+}
+
 // 召回门槛的默认值 / 边界 / 步长，与 src/ov/settings.js 的 GATE_DECISION_THRESHOLD_* 同值。
 // 步长只影响数字框的加减手感，不是归一化要圆整到的格点。
 export const GATE_DECISION_THRESHOLD_DEFAULT = 0.45;
@@ -553,6 +617,13 @@ export const DEFAULT_GATE_DECISION_PROMPT =
   "只看这一句话、不看之前的对话，够不够回答它？";
 
 /**
+ * 带前文模式专用题面。与 src/ov/settings.js 的 DEFAULT_GATE_CONTEXT_PROMPT
+ * 逐字一致（浏览器侧读不到 App 的 Node 模块，只能各存一份，冒烟会比对）。
+ */
+export const DEFAULT_GATE_CONTEXT_PROMPT =
+  "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？";
+
+/**
  * 重排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。
  * HTML 里不嵌这段字：面板加载不了 Node 模块，只能在这里存一份，
  * 冒烟会断言两边相等，也会断言 HTML 里没有第二份。
@@ -603,6 +674,21 @@ export function decisionPromptStatus(text) {
   return "已修改";
 }
 
+/** 带前文模式题面的草稿：空配置时坐默认题面，动过之后不再拿默认去盖。 */
+export function contextPromptDraft(configValue, touched = false) {
+  const value = normalizeGateContextPrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_GATE_CONTEXT_PROMPT;
+}
+
+/** 带前文模式题面的三态小字。 */
+export function contextPromptStatus(text) {
+  const value = normalizeGateContextPrompt(text);
+  if (value === DEFAULT_GATE_CONTEXT_PROMPT) return "当前为默认提示词";
+  if (!value.trim()) return "已修改 · 提示词为空时不会拦截任何召回";
+  return "已修改";
+}
+
 /** 重排提示词框的草稿：配置为空时同样把默认模板整段填进去。 */
 export function rerankPromptDraft(configValue, touched = false) {
   const value = normalizeRerankPrompt(configValue);
@@ -637,10 +723,16 @@ export function paintGateConfig(out) {
   };
 }
 
-/** decision 那一块自己的字段：一份与 gatePrompt 完全分开的判据，加一个自己的召回门槛。 */
+/**
+ * decision 那一块自己的字段：两份分开存的题面（不看前文 / 带前文）、
+ * 判断前文的开关与轮数，加一个自己的召回门槛。
+ */
 export function paintDecisionConfig(out) {
   return {
     gateDecisionPrompt: normalizeGateDecisionPrompt(out?.gateDecisionPrompt),
+    gateContext: normalizeGateContext(out?.gateContext),
+    gateContextTurns: normalizeGateContextTurns(out?.gateContextTurns),
+    gateContextPrompt: normalizeGateContextPrompt(out?.gateContextPrompt),
     gateDecisionThreshold: normalizeGateDecisionThreshold(out?.gateDecisionThreshold),
   };
 }

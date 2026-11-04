@@ -135,6 +135,58 @@ export function contextQuery(
   return tail;
 }
 
+/**
+ * 判断前文用的对话：从 payload.messages 倒着取最近几轮，**不含当前这条用户消息**。
+ *
+ * 当前这条由调用方单独接在末尾（state.content = 前文 + 当前消息），所以这里只回
+ * 「前文」。一问一答各算半轮（一问一答正好一轮）；连续几条 user 消息各自算半轮，
+ * 不会被「没有 assistant 配对」整条丢掉。只收 user / assistant，别的角色跳过。
+ *
+ * 每条前面带角色前缀（用户：/ 助手：），已剥离既往注入。总长超过 maxChars 时
+ * 从最旧的一条开始截，最新的一条保持完整——与 contextQuery 同一个策略。
+ * 一条都没有（比如这就是会话第一句）返回空串，调用方据此退回不带前文的判断。
+ */
+export function recentDialogue(payload, turns = 4, maxChars = 1200) {
+  const messages = payload?.messages;
+  if (!Array.isArray(messages) || !Number.isFinite(Number(turns)) || Number(turns) <= 0) {
+    return "";
+  }
+  const current = lastUserIndex(messages);
+  if (current < 0) return "";
+
+  const limit = Number(turns);
+  const picked = [];
+  let used = 0;
+  for (let i = current - 1; i >= 0 && used < limit; i -= 1) {
+    const role = messages[i]?.role;
+    if (role !== "user" && role !== "human" && role !== "assistant") continue;
+    const text = stripInjected(contentText(readContent(messages[i]))).trim();
+    if (!text) continue;
+    const prefix = role === "assistant" ? "助手：" : "用户：";
+    picked.push(`${prefix}${text}`);
+    used += 0.5;
+  }
+  if (!picked.length) return "";
+
+  const ordered = picked.reverse();
+  const joined = ordered.join("\n");
+  if (charLength(joined) <= maxChars) return joined;
+
+  // 从最新一条往前拼；装不下的那条只保留尾部，然后停手。
+  let tail = ordered[ordered.length - 1];
+  for (let i = ordered.length - 2; i >= 0; i -= 1) {
+    const candidate = `${ordered[i]}\n${tail}`;
+    if (charLength(candidate) <= maxChars) {
+      tail = candidate;
+      continue;
+    }
+    const room = maxChars - charLength(tail) - 1;
+    if (room > 0) tail = `${clipStart(ordered[i], room)}\n${tail}`;
+    break;
+  }
+  return tail;
+}
+
 /** 按配置取查询文本。context 拼不出东西时退回 last 的单条行为。 */
 export function recallQuery(payload, mode = "last") {
   if (mode !== "context") return lastUserText(payload);

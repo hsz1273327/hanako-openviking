@@ -18,6 +18,27 @@ export const DEFAULT_GATE_DECISION_PROMPT =
   "只看这一句话、不看之前的对话，够不够回答它？";
 
 /**
+ * 带前文模式专用题面：模型能看到最近几轮对话，问的是「上面那几轮里有没有」。
+ *
+ * 与 gateDecisionPrompt 一样，这里给的是「没配过时读到什么」，不是「空值兜底」：
+ * 用户把这一格清空仍然是「没有判据」，不拿默认去盖。
+ */
+export const DEFAULT_GATE_CONTEXT_PROMPT =
+  "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？";
+
+/**
+ * 决策模型判断时看不看前文：none 只看最后一条，turns 带最近几轮对话。
+ * 不带前文是默认，行为与加这个配置之前完全一致。
+ */
+export const GATE_CONTEXT_MODES = Object.freeze(["none", "turns"]);
+
+/** 带前文时默认带几轮；边界与步长只用于面板，归一化不夹边界。 */
+export const GATE_CONTEXT_TURNS_DEFAULT = 4;
+export const GATE_CONTEXT_TURNS_MIN = 1;
+export const GATE_CONTEXT_TURNS_MAX = 12;
+export const GATE_CONTEXT_TURNS_STEP = 1;
+
+/**
  * 决策模型判断的召回门槛：choice 是 need 且 confidence 不低于这个数才算「需要召回」。
  *
  * 0.45 是从 16 条样例上拟合出来的，不是某个客观常数：换一个决策模型、换一批对话风格，
@@ -51,6 +72,9 @@ export const DEFAULTS = {
   queryMode: "last",
   gatePrompt: "",
   gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+  gateContext: "none",
+  gateContextTurns: GATE_CONTEXT_TURNS_DEFAULT,
+  gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
   rerank: "off",
@@ -165,6 +189,11 @@ export function normalizeQueryMode(raw) {
   return oneOf(raw, QUERY_MODES, DEFAULTS.queryMode);
 }
 
+/** 判断前文：只认 none / turns，其余（缺项、类型不对、脏值）一律回 none。 */
+export function normalizeGateContext(raw) {
+  return oneOf(raw, GATE_CONTEXT_MODES, DEFAULTS.gateContext);
+}
+
 export function normalizeRerank(raw) {
   return oneOf(raw, RERANK_MODES, DEFAULTS.rerank);
 }
@@ -179,6 +208,35 @@ export function normalizeGatePrompt(raw) {
 export function normalizeGateDecisionPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/** 带前文模式那套题面与 gateDecisionPrompt 同口径：同一份长度上限，空串 = 没有判据。 */
+export function normalizeGateContextPrompt(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/**
+ * 带前文的轮数：1–12 的整数，其余（空串 / 非数字 / 小数 / 越界 / null）一律回 4。
+ *
+ * 越界不夹边界，理由与 normalizeGateDecisionThreshold 相同：夹边界会把「填错了」
+ * 静默变成「永远带 1 轮 / 12 轮」，比直接回默认更难查。数字串接受，读出来是数字。
+ */
+export function normalizeGateContextTurns(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return GATE_CONTEXT_TURNS_DEFAULT;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return GATE_CONTEXT_TURNS_DEFAULT;
+  if (value < GATE_CONTEXT_TURNS_MIN || value > GATE_CONTEXT_TURNS_MAX) {
+    return GATE_CONTEXT_TURNS_DEFAULT;
+  }
+  return value;
+}
+
+/** 写回配置的形状：一律存归一化后的数字串（与门槛 / 超时同一口径）。 */
+export function serializeGateContextTurns(raw) {
+  return String(normalizeGateContextTurns(raw));
 }
 
 /**
@@ -513,6 +571,9 @@ export async function readSwitches(sdk) {
     queryMode: normalizeQueryMode(await read(sdk, "queryMode")),
     gatePrompt: normalizeGatePrompt(await read(sdk, "gatePrompt")),
     gateDecisionPrompt: normalizeGateDecisionPrompt(await read(sdk, "gateDecisionPrompt")),
+    gateContext: normalizeGateContext(await read(sdk, "gateContext")),
+    gateContextTurns: normalizeGateContextTurns(await read(sdk, "gateContextTurns")),
+    gateContextPrompt: normalizeGateContextPrompt(await read(sdk, "gateContextPrompt")),
     // 只在 decision 档生效；别的档读到了也不用（见 src/memory/recall.js 的调用处）。
     gateDecisionThreshold: normalizeGateDecisionThreshold(await read(sdk, "gateDecisionThreshold")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),

@@ -20,10 +20,12 @@
 //   7. peer 名单整单提交，写路径不回读列表，只按服务端存下的名单重算标记。
 
 import {
+  DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
+  GATE_CONTEXT_TURNS_DEFAULT,
   GATE_DECISION_THRESHOLD_DEFAULT,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_LABELS,
@@ -34,11 +36,16 @@ import {
   channelServiceMissing,
   channelTypeOptions,
   commitLayers,
+  contextPromptDraft,
+  contextPromptStatus,
   decisionPromptDraft,
   decisionPromptStatus,
   emptyRerankChannel,
   isCompleteRerankChannel,
   modelOptions,
+  normalizeGateContext,
+  normalizeGateContextPrompt,
+  normalizeGateContextTurns,
   normalizeGateDecisionPrompt,
   normalizeGateDecisionThreshold,
   normalizeGateFallback,
@@ -107,6 +114,12 @@ const PROMPTS = Object.freeze({
     field: "gateDecisionPrompt",
     default: DEFAULT_GATE_DECISION_PROMPT,
     draft: decisionPromptDraft,
+  }),
+  context: Object.freeze({
+    key: "context",
+    field: "gateContextPrompt",
+    default: DEFAULT_GATE_CONTEXT_PROMPT,
+    draft: contextPromptDraft,
   }),
   rerank: Object.freeze({
     key: "rerank",
@@ -181,6 +194,9 @@ export function createPanelStore(deps = {}) {
     form: {
       recallGate: "off",
       gateFallback: "recall",
+      // 决策档判断时看不看前文：初始值就是默认 none / 4 轮，首次 refresh 后以服务端投影为准。
+      gateContext: "none",
+      gateContextTurns: GATE_CONTEXT_TURNS_DEFAULT,
       // 决策档的召回门槛：初始值就是默认 0.45，首次 refresh 后以服务端投影为准。
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
@@ -191,9 +207,11 @@ export function createPanelStore(deps = {}) {
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
       decision: DEFAULT_GATE_DECISION_PROMPT,
+      context: DEFAULT_GATE_CONTEXT_PROMPT,
       rerank: DEFAULT_RERANK_PROMPT,
       gateTouched: false,
       decisionTouched: false,
+      contextTouched: false,
       rerankTouched: false,
     },
     // 打分服务的四个输入框（地址 / 模型 / 超时 / 密钥），键就是配置键（与手写面板的 DOM id 一致）。
@@ -306,6 +324,8 @@ export function createPanelStore(deps = {}) {
   const FORM_KEYS = [
     "recallGate",
     "gateFallback",
+    "gateContext",
+    "gateContextTurns",
     "gateDecisionThreshold",
     "queryMode",
     "rerank",
@@ -332,6 +352,9 @@ export function createPanelStore(deps = {}) {
       // 飞行期间又改了一笔，回滚时反而把新值留在框里。
       if (key === "gateDecisionThreshold") {
         return normalizeGateDecisionThreshold(live) !== normalizeGateDecisionThreshold(sent);
+      }
+      if (key === "gateContextTurns") {
+        return normalizeGateContextTurns(live) !== normalizeGateContextTurns(sent);
       }
       return live !== sent;
     };
@@ -441,6 +464,9 @@ export function createPanelStore(deps = {}) {
       recallGate: state.form.recallGate,
       // 判断失败时的兜底：脏值归一化后再发（服务端整单校验会直接 400）。
       gateFallback: normalizeGateFallback(state.form.gateFallback),
+      // 判断前文：枚举原样发；轮数归一化成整数后序列化成字符串（存库口径与门槛一致）。
+      gateContext: normalizeGateContext(state.form.gateContext),
+      gateContextTurns: String(normalizeGateContextTurns(state.form.gateContextTurns)),
       // 召回门槛：归一化后序列化成字符串再发，与超时那一组同口径（0–1 之外的值
       // 在这里就回 0.45，不把 -1 发上去）。
       gateDecisionThreshold: String(
@@ -450,6 +476,7 @@ export function createPanelStore(deps = {}) {
       // 两份判据分开存、分开提交：改一份不会动另一份，切档也不丢内容。
       gatePrompt: normalizeGatePrompt(state.prompts.gate),
       gateDecisionPrompt: normalizeGateDecisionPrompt(state.prompts.decision),
+      gateContextPrompt: normalizeGateContextPrompt(state.prompts.context),
       gateModel: state.form.gateModel,
       rerank: state.form.rerank,
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
@@ -484,11 +511,12 @@ export function createPanelStore(deps = {}) {
           before: state.layers,
           next,
           send: (body) => {
-            const { rerankChannels, gateDecisionThreshold, ...rest } = body;
+            const { rerankChannels, gateDecisionThreshold, gateContextTurns, ...rest } = body;
             return post("/recall-mode", {
               ...rest,
-              // commitLayers 的 normalize（paintRecallConfig）会把门槛收成数字给界面用，
+              // commitLayers 的 normalize（paintRecallConfig）会把门槛与轮数收成数字给界面用，
               // 发出去前再序列化一次：存库形状是数字串（与超时那一组同口径）。
+              gateContextTurns: String(normalizeGateContextTurns(gateContextTurns)),
               gateDecisionThreshold: String(
                 normalizeGateDecisionThreshold(gateDecisionThreshold),
               ),
@@ -512,10 +540,13 @@ export function createPanelStore(deps = {}) {
   const LAYER_KEYS = [
     "recallGate",
     "gateFallback",
+    "gateContext",
+    "gateContextTurns",
     "gateDecisionThreshold",
     "queryMode",
     "gatePrompt",
     "gateDecisionPrompt",
+    "gateContextPrompt",
     "gateModel",
     "rerank",
     "rerankPrompt",
@@ -540,6 +571,12 @@ export function createPanelStore(deps = {}) {
         return (
           normalizeGateDecisionThreshold(a?.[key]) ===
           normalizeGateDecisionThreshold(b?.[key])
+        );
+      }
+      if (key === "gateContextTurns") {
+        return (
+          normalizeGateContextTurns(a?.[key]) ===
+          normalizeGateContextTurns(b?.[key])
         );
       }
       return a?.[key] === b?.[key];
@@ -596,6 +633,21 @@ export function createPanelStore(deps = {}) {
       return undefined;
     }
     state.form.gateDecisionThreshold = normalizeGateDecisionThreshold(value);
+    return saveLayers();
+  }
+
+  /**
+   * 带前文的轮数：与召回门槛同一套清空语义。
+   * 清空（null）不提交，回填已确认值；其余值先归一化成 1–12 的整数再整单提交。
+   */
+  function setGateContextTurns(value) {
+    if (value === null || value === undefined) {
+      state.form.gateContextTurns = normalizeGateContextTurns(
+        state.layers.gateContextTurns,
+      );
+      return undefined;
+    }
+    state.form.gateContextTurns = normalizeGateContextTurns(value);
     return saveLayers();
   }
 
@@ -899,6 +951,11 @@ export function createPanelStore(deps = {}) {
     return decisionPromptStatus(state.prompts.decision);
   }
 
+  /** 带前文模式题面的状态小字：与另外几份同一套三态。 */
+  function contextPromptStatusOf() {
+    return contextPromptStatus(state.prompts.context);
+  }
+
   function rerankPromptStatusOf() {
     return rerankPromptStatus(state.prompts.rerank);
   }
@@ -913,7 +970,7 @@ export function createPanelStore(deps = {}) {
 
   /**
    * 恢复默认：只把文字填回框里，然后走正常提交，不绕过校验也不偷写配置。
-   * 三份各恢复各的默认值（语言模型 / 决策模型 / 重排），不会互相写。
+   * 四份各恢复各的默认值（语言模型 / 决策模型 / 带前文决策 / 重排），不会互相写。
    */
   function resetPrompt(which) {
     const spec = PROMPTS[which];
@@ -993,6 +1050,7 @@ export function createPanelStore(deps = {}) {
     patchControls,
     setForm,
     setDecisionThreshold,
+    setGateContextTurns,
     setControlsNumber,
     saveConnection,
     saveLayers,
@@ -1013,6 +1071,7 @@ export function createPanelStore(deps = {}) {
     resetPrompt,
     gatePromptStatusOf,
     decisionPromptStatusOf,
+    contextPromptStatusOf,
     rerankPromptStatusOf,
     enabled,
     peerRows,

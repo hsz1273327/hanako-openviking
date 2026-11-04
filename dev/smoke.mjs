@@ -36,6 +36,9 @@ import {
   normalizeQueryMode,
   normalizeGateFallback,
   normalizeGateModel,
+  normalizeGateContext,
+  normalizeGateContextPrompt,
+  normalizeGateContextTurns,
   normalizeGateDecisionPrompt,
   normalizeGateDecisionThreshold,
   normalizeGatePrompt,
@@ -46,6 +49,7 @@ import {
   normalizeServiceModel,
   normalizeServiceTimeout,
   normalizeServiceUrl,
+  serializeGateContextTurns,
   serializeGateDecisionThreshold,
   serializeServiceTimeout,
   servicePairError,
@@ -53,7 +57,13 @@ import {
   parseRerankChannel,
   parseRerankChannels,
   serializeRerankChannels,
+  DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
+  GATE_CONTEXT_MODES,
+  GATE_CONTEXT_TURNS_DEFAULT,
+  GATE_CONTEXT_TURNS_MIN,
+  GATE_CONTEXT_TURNS_MAX,
+  GATE_CONTEXT_TURNS_STEP,
   GATE_DECISION_THRESHOLD_DEFAULT,
   GATE_DECISION_THRESHOLD_MIN,
   GATE_DECISION_THRESHOLD_MAX,
@@ -78,6 +88,7 @@ import {
   stripInjected,
   lastUserText,
   contextQuery,
+  recentDialogue,
   recallQuery,
   injectMemory,
   estimateTokens,
@@ -138,9 +149,13 @@ import {
   GATE_MESSAGE_PLACEHOLDER,
   GATE_TIMEOUT_MS,
   GATE_MAX_TOKENS,
+  gateContextOf,
+  gateContextTurnsOf,
+  gateContextPromptOf,
   gateDecisionPromptOf,
   gateDecisionThresholdOf,
   DECISION_GATE_CRITERIA,
+  DECISION_GATE_CONTEXT_CRITERIA,
   DECISION_GATE_THRESHOLD,
   DECISION_GATE_TIMEOUT_MS,
   DECISION_GATE_TIMEOUT_MAX_MS,
@@ -203,6 +218,7 @@ import {
 } from "../ui-src/src/lib/check-summary.js";
 // 面板那排召回下拉的状态与提交：成功 / 失败两种收笔都由它定。
 import {
+  DEFAULT_GATE_CONTEXT_PROMPT as UI_DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT as UI_DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
@@ -223,18 +239,27 @@ import {
   SERVICE_URL_MAX as UI_SERVICE_URL_MAX,
   SERVICE_KEY_MASK_DOTS as UI_SERVICE_KEY_MASK_DOTS,
   channelPairNote as uiChannelPairNote,
+  contextPromptDraft,
+  contextPromptStatus,
   decisionPromptDraft,
   decisionPromptStatus,
   decisionServiceConfigured as uiDecisionServiceConfigured,
   decisionServiceView,
+  normalizeGateContext as uiNormalizeGateContext,
+  normalizeGateContextTurns as uiNormalizeGateContextTurns,
   normalizeGateDecisionPrompt as uiNormalizeGateDecisionPrompt,
   normalizeGateDecisionThreshold as uiNormalizeGateDecisionThreshold,
   normalizeGateFallback as uiNormalizeGateFallback,
+  GATE_CONTEXT_TURNS_DEFAULT as UI_GATE_CONTEXT_TURNS_DEFAULT,
+  GATE_CONTEXT_TURNS_MIN as UI_GATE_CONTEXT_TURNS_MIN,
+  GATE_CONTEXT_TURNS_MAX as UI_GATE_CONTEXT_TURNS_MAX,
+  GATE_CONTEXT_TURNS_STEP as UI_GATE_CONTEXT_TURNS_STEP,
   GATE_DECISION_THRESHOLD_DEFAULT as UI_GATE_DECISION_THRESHOLD_DEFAULT,
   GATE_DECISION_THRESHOLD_MIN as UI_GATE_DECISION_THRESHOLD_MIN,
   GATE_DECISION_THRESHOLD_MAX as UI_GATE_DECISION_THRESHOLD_MAX,
   GATE_DECISION_THRESHOLD_STEP as UI_GATE_DECISION_THRESHOLD_STEP,
   GATE_DECISION_THRESHOLD_HINT as UI_GATE_DECISION_THRESHOLD_HINT,
+  gateContextOptions,
   gateFallbackOptions,
   gateHasFailurePath,
   paintGateFallbackConfig,
@@ -266,6 +291,8 @@ import {
   promptDraft,
   promptStatus,
   recallGateOptions,
+  recallPromptField,
+  recallPromptKey,
   rerankPromptDraft,
   rerankPromptStatus,
   rerankChannelsText,
@@ -2029,7 +2056,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       UI_SYSTEMONE_TIMEOUT_MAX,
       [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
       UI_SYSTEMONE_MAX_CANDIDATES,
-    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, Object.keys(RERANK_CHANNEL_LABELS)], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_GATE_DECISION_PROMPT, UI_DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
+    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, Object.keys(RERANK_CHANNEL_LABELS)], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_GATE_DECISION_PROMPT, UI_DEFAULT_GATE_CONTEXT_PROMPT, UI_DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
     [[
       RERANK_CHANNELS_MAX,
       {
@@ -2040,7 +2067,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       SYSTEMONE_TIMEOUT_MAX_MS,
       [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
       SYSTEMONE_MAX_CANDIDATES,
-    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [["rerank", "systemone", "model"], ["rerank", "systemone", "model"]], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
+    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [["rerank", "systemone", "model"], ["rerank", "systemone", "model"]], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
   );
 
   // 决策那份默认题面就是那句完整问法：两个常量逐字一致，而且不是「空值兜底」的那份字。
@@ -2064,10 +2091,74 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
 
+  // 判断前文：枚举两端同值、轮数边界两端同值、默认题面逐字一致；manifest 声明齐全。
+  eq(
+    "判断前文两端同值：none / turns 两个枚举、轮数默认 4 边界 1–12 步长 1、脏值都回 none / 4；默认题面两端逐字一致且不是不带前文那一份",
+    [
+      GATE_CONTEXT_MODES,
+      gateContextOptions().map((option) => [option.value, option.label]),
+      [GATE_CONTEXT_TURNS_DEFAULT, UI_GATE_CONTEXT_TURNS_DEFAULT],
+      [GATE_CONTEXT_TURNS_MIN, UI_GATE_CONTEXT_TURNS_MIN],
+      [GATE_CONTEXT_TURNS_MAX, UI_GATE_CONTEXT_TURNS_MAX],
+      [GATE_CONTEXT_TURNS_STEP, UI_GATE_CONTEXT_TURNS_STEP],
+      ["turns", "none", "bogus", "", null, 1].map(normalizeGateContext),
+      ["turns", "none", "bogus", "", null, 1].map(uiNormalizeGateContext),
+      [0, 13, "abc", null, undefined, "", 1.5, -1, 2, 12, "0", "13"].map(normalizeGateContextTurns),
+      [0, 13, "abc", null, undefined, "", 1.5, -1, 2, 12, "0", "13"].map(uiNormalizeGateContextTurns),
+      [DEFAULT_GATE_CONTEXT_PROMPT, UI_DEFAULT_GATE_CONTEXT_PROMPT],
+      DEFAULT_GATE_CONTEXT_PROMPT === DEFAULT_GATE_DECISION_PROMPT,
+      [0, 13, "abc", null, undefined, "", 1.5, -1, 2, 12, "0", "13"].map(serializeGateContextTurns),
+    ],
+    [
+      ["none", "turns"],
+      [["none", "不看前文"], ["turns", "带最近几轮对话"]],
+      [4, 4],
+      [1, 1],
+      [12, 12],
+      [1, 1],
+      ["turns", "none", "none", "none", "none", "none"],
+      ["turns", "none", "none", "none", "none", "none"],
+      [4, 4, 4, 4, 4, 4, 4, 4, 2, 12, 4, 4],
+      [4, 4, 4, 4, 4, 4, 4, 4, 2, 12, 4, 4],
+      [DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT],
+      false,
+      ["4", "4", "4", "4", "4", "4", "4", "4", "2", "12", "4", "4"],
+    ],
+  );
+
   // manifest 是配置的唯一声明面：密钥要标 sensitive，新增键不能只活在代码里。
   const props = JSON.parse(
     fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
   ).contributes.settings.schema.properties;
+
+  eq(
+    "带前文题的草稿与三态：空配置坐默认题面、动过不再填、自定义照显、清空提醒不拦截 / manifest 声明 enum、默认值、类型",
+    [
+      contextPromptDraft(""),
+      contextPromptDraft("", true),
+      contextPromptDraft("带前文自定义"),
+      contextPromptStatus(DEFAULT_GATE_CONTEXT_PROMPT),
+      contextPromptStatus("带前文自定义"),
+      contextPromptStatus("").includes("不会拦截任何召回"),
+      [props.gateContext?.enum, props.gateContext?.ui?.enumLabels, props.gateContext?.default],
+      [props.gateContextTurns?.type, props.gateContextTurns?.default],
+      [props.gateContextPrompt?.type, props.gateContextPrompt?.default],
+      [DEFAULTS.gateContext, DEFAULTS.gateContextTurns, DEFAULTS.gateContextPrompt],
+    ],
+    [
+      UI_DEFAULT_GATE_CONTEXT_PROMPT,
+      "",
+      "带前文自定义",
+      "当前为默认提示词",
+      "已修改",
+      true,
+      [["none", "turns"], ["不看前文", "带最近几轮对话"], "none"],
+      ["string", "4"],
+      ["string", DEFAULT_GATE_CONTEXT_PROMPT],
+      ["none", 4, DEFAULT_GATE_CONTEXT_PROMPT],
+    ],
+  );
+
   eq(
     "两个服务密钥在 manifest 里标了 sensitive（不当普通字符串存）",
     [props.rerankServiceKey?.sensitive, props.systemoneServiceKey?.sensitive],
@@ -2574,7 +2665,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       state.conn.apiKeyPlaceholder,
       state.conn.peerPrefix,
       [state.form.recallGate, state.form.queryMode, state.form.rerank],
-    ], [state.prompts.gate, state.prompts.decision, state.prompts.rerank], [
+    ], [state.prompts.gate, state.prompts.decision, state.prompts.context, state.prompts.rerank], [
       state.draft.rerankServiceUrl,
       state.draft.rerankServiceModel,
       state.draft.rerankServiceTimeoutMs,
@@ -2588,7 +2679,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "已填写（留空表示不改）",
       "lab",
       ["off", "last", "off"],
-    ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_RERANK_PROMPT], ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "sk-a••••••••7890", ""], ["孤儿通道"], ["", "p/m"]],
+    ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT], ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "sk-a••••••••7890", ""], ["孤儿通道"], ["", "p/m"]],
   );
   check("目录可用时不显示原因", ui.store.modelHint() === "");
   eq(
@@ -2897,6 +2988,107 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
     // 复位，后面的断言按默认草稿走。
     await ui.resetPrompt("gate");
+  }
+
+  // ---- 判断前文：下拉 / 轮数 / 两份题面，同一单、同一套即时提交与回滚 ----
+  {
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq(
+      "首屏判断前文读回默认 none / 4 轮 / 带前文题面坐默认全文",
+      [state.form.gateContext, state.form.gateContextTurns, state.prompts.context],
+      ["none", 4, DEFAULT_GATE_CONTEXT_PROMPT],
+    );
+    eq(
+      "同一个 textarea 按 gateContext 切绑不同题面：decision+none 绑不带前文那份、decision+turns 绑带前文那份、llm 绑语言模型那份",
+      [
+        [recallPromptKey("decision", "none"), recallPromptField("decision", "none")],
+        [recallPromptKey("decision", "turns"), recallPromptField("decision", "turns")],
+        [recallPromptKey("llm", "turns"), recallPromptField("llm", "turns")],
+        [recallPromptKey("decision", "bogus"), recallPromptField("decision", "bogus")],
+      ],
+      [
+        ["decision", "gateDecisionPrompt"],
+        ["context", "gateContextPrompt"],
+        ["gate", "gatePrompt"],
+        ["decision", "gateDecisionPrompt"],
+      ],
+    );
+
+    await ui.setForm("gateContext", "turns");
+    const turnsBody = saves().at(-1).body;
+    eq(
+      "切到「带最近几轮对话」走同一单：payload 带 gateContext / 轮数字符串 / 带前文题面",
+      [
+        turnsBody.gateContext,
+        turnsBody.gateContextTurns,
+        typeof turnsBody.gateContextTurns,
+        turnsBody.gateContextPrompt,
+        state.form.gateContext,
+      ],
+      ["turns", "4", "string", DEFAULT_GATE_CONTEXT_PROMPT, "turns"],
+    );
+
+    await ui.setPrompt("decision", "不带前文的题面");
+    await ui.setPrompt("context", "带前文的题面");
+    eq(
+      "两份题面分开存、分开提交：改一份不动另一份，两份都在同一单里",
+      [
+        state.prompts.decision,
+        state.prompts.context,
+        saves().at(-1).body.gateDecisionPrompt,
+        saves().at(-1).body.gateContextPrompt,
+      ],
+      ["不带前文的题面", "带前文的题面", "不带前文的题面", "带前文的题面"],
+    );
+
+    await ui.setGateContextTurns(8);
+    eq(
+      "轮数走自己的提交口：控件是数字 8，payload 是字符串 \"8\"",
+      [state.form.gateContextTurns, saves().at(-1).body.gateContextTurns, typeof saves().at(-1).body.gateContextTurns],
+      [8, "8", "string"],
+    );
+    await ui.setGateContextTurns(0);
+    eq(
+      "越界轮数在面板这一层就归一化回 4 再提交（不夹到 1）",
+      [state.form.gateContextTurns, saves().at(-1).body.gateContextTurns],
+      [4, "4"],
+    );
+    await ui.setGateContextTurns(6);
+
+    rejectNextPost = "gateContextTurns 必须是数字、字符串或 null";
+    await ui.setGateContextTurns(7);
+    eq(
+      "轮数被拒后回滚到上一次确认的值，提示位显示服务端原文",
+      [state.form.gateContextTurns, state.note.text, state.note.bad],
+      [6, "gateContextTurns 必须是数字、字符串或 null", true],
+    );
+    const beforeClear = saves().length;
+    await ui.setGateContextTurns(null);
+    eq(
+      "清空轮数不提交（POST 计数不增），框回填成已确认值",
+      [saves().length - beforeClear, state.form.gateContextTurns, state.layers.gateContextTurns],
+      [0, 6, 6],
+    );
+
+    // 切回「不看前文」再切回来：两份题面的草稿都不丢。
+    await ui.setForm("gateContext", "none");
+    await ui.setForm("gateContext", "turns");
+    eq(
+      "切 gateContext 来回切，两份题面草稿都还在（textarea 按 gateContext 绑不同的那一份）",
+      [state.prompts.decision, state.prompts.context],
+      ["不带前文的题面", "带前文的题面"],
+    );
+
+    await ui.resetPrompt("context");
+    eq(
+      "恢复默认只恢复带前文那一份（不带前文那份原样）",
+      [state.prompts.context, ui.contextPromptStatus(), state.prompts.decision],
+      [DEFAULT_GATE_CONTEXT_PROMPT, "当前为默认提示词", "不带前文的题面"],
+    );
+
+    // 复位，后面按默认草稿走。
+    await ui.setForm("gateContext", "none");
+    await ui.resetPrompt("decision");
   }
 
   // ---- 打分服务：地址与模型成对（行为第 5 条） ----
@@ -3355,6 +3547,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gatePrompt: "",
     gateModel: "",
     gateDecisionPrompt: "",
+    gateContext: "none",
+    gateContextTurns: 4,
+    gateContextPrompt: "",
     gateDecisionThreshold: 0.45,
     gateFallback: "recall",
     rerank: "off",
@@ -4122,6 +4317,66 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["", "", "只有一句", "最后一句", "最后一句"],
   );
 
+  // ---- 判断前文：成对取最近几轮、带角色前缀、不含当前这条用户消息 ----
+  {
+    const dialogue = {
+      messages: [
+        { role: "user", content: "第一问" },
+        { role: "assistant", content: "第一答" },
+        { role: "user", content: "第二问" },
+        { role: "assistant", content: "第二答" },
+        { role: "user", content: "修吧" },
+      ],
+    };
+    eq(
+      "recentDialogue 成对取最近几轮（一问一答各半轮）/ 当前用户消息不重复带 / 角色前缀与旧到新顺序",
+      [recentDialogue(dialogue, 1), recentDialogue(dialogue, 2), recentDialogue(dialogue, 4)],
+      [
+        "用户：第二问\n助手：第二答",
+        "用户：第一问\n助手：第一答\n用户：第二问\n助手：第二答",
+        "用户：第一问\n助手：第一答\n用户：第二问\n助手：第二答",
+      ],
+    );
+    eq(
+      "recentDialogue 连续 user 消息各算半轮、不丢 / 只有当前一句时为空 / 一条 assistant 也没有时为空",
+      [
+        recentDialogue({
+          messages: [
+            { role: "user", content: "先说一句" },
+            { role: "user", content: "再补一句" },
+            { role: "user", content: "最后一句" },
+          ],
+        }, 1),
+        recentDialogue({ messages: [{ role: "user", content: "只有这一句" }] }),
+        recentDialogue({ messages: [{ role: "assistant", content: "没有用户" }] }),
+      ],
+      ["用户：先说一句\n用户：再补一句", "", ""],
+    );
+    const injectedDialogue = recentDialogue({
+      messages: [
+        { role: "user", content: `${block}\n\n旧问题` },
+        { role: "assistant", content: `${block}\n\n旧回答` },
+        { role: "user", content: "新问题" },
+      ],
+    });
+    eq(
+      "recentDialogue 也剥掉既往注入块",
+      injectedDialogue,
+      "用户：旧问题\n助手：旧回答",
+    );
+    const longDialogue = recentDialogue({
+      messages: [
+        { role: "user", content: `起点${"旧".repeat(398)}` },
+        { role: "assistant", content: "最新回答" },
+        { role: "user", content: "最新问题" },
+      ],
+    }, 4, 30);
+    eq("recentDialogue 超长时总长收到 maxChars、最新一条完整保留", [
+      Array.from(longDialogue).length,
+      longDialogue.endsWith("助手：最新回答"),
+    ], [30, true]);
+  }
+
   const injected = injectMemory(payloadString, block);
   check(
     "injectMemory：返回新对象、不改原 payload、条数不变、记忆块在用户消息前、原话仍在末尾、system 未动",
@@ -4499,6 +4754,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["off", "last", "off", "", DEFAULT_GATE_DECISION_PROMPT, ""],
   );
 
+  eq(
+    "GET 缺省时判断前文也是默认值（none / 轮数 \"4\" 字符串 / 带前文题面是默认问法）",
+    [
+      defaults.body.gateContext,
+      defaults.body.gateContextTurns,
+      typeof defaults.body.gateContextTurns,
+      defaults.body.gateContextPrompt,
+    ],
+    ["none", "4", "string", DEFAULT_GATE_CONTEXT_PROMPT],
+  );
+
   store.recallGate = "bogus";
   store.queryMode = 3;
   const dirty = await get();
@@ -4759,6 +5025,102 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [clearedDecisionPrompt.status, store.gateDecisionPrompt, clearedDecisionPrompt.body.gateDecisionPrompt, store.gatePrompt],
     [200, "", "", "语言模型那份改回来"],
   );
+
+  // ---- 判断前文：枚举 / 轮数 / 题面三项，GET 投影 + POST 整单校验 ----
+  {
+    store.gateContext = "bogus";
+    store.gateContextTurns = 13;
+    store.gateContextPrompt = "";
+    const dirtyContext = await get();
+    delete store.gateContextPrompt;
+    const missingPrompt = await get();
+    eq(
+      "GET 把脏 gateContext 收敛成 none、把越界轮数收敛成 \"4\"；空题面保留空串，缺项才投影默认题面",
+      [
+        dirtyContext.body.gateContext,
+        dirtyContext.body.gateContextTurns,
+        dirtyContext.body.gateContextPrompt,
+        missingPrompt.body.gateContextPrompt,
+      ],
+      ["none", "4", "", DEFAULT_GATE_CONTEXT_PROMPT],
+    );
+
+    writes.length = 0;
+    const contextSaved = await post({
+      gateContext: "turns",
+      gateContextTurns: 12,
+      gateContextPrompt: "带前文那份题面",
+    });
+    eq(
+      "gateContext / gateContextTurns / gateContextPrompt 能同单落库：轮数存字符串 \"12\"、applied 三个键都在",
+      [
+        contextSaved.status,
+        store.gateContext,
+        store.gateContextTurns,
+        typeof store.gateContextTurns,
+        store.gateContextPrompt,
+        ["gateContext", "gateContextTurns", "gateContextPrompt"].every((key) =>
+          contextSaved.body.applied.includes(key),
+        ),
+      ],
+      [200, "turns", "12", "string", "带前文那份题面", true],
+    );
+
+    writes.length = 0;
+    const badContext = await post({ gateContext: "sideways" });
+    eq(
+      "gateContext 不在 none / turns 里时整单被拒 400，零写入",
+      [badContext.status, store.gateContext, writes.length],
+      [400, "turns", 0],
+    );
+
+    const turnRows = [];
+    for (const raw of [0, 13, "abc", null, "", 1.5, 1, 12, "6"]) {
+      const response = await post({ gateContextTurns: raw });
+      turnRows.push([raw, response.status, store.gateContextTurns, typeof store.gateContextTurns]);
+    }
+    eq(
+      "轮数边界：0 / 13 / abc / null / 空串 / 小数都回 \"4\"；1、12、\"6\" 保留；越界不夹边界，落库是字符串",
+      turnRows,
+      [
+        [0, 200, "4", "string"],
+        [13, 200, "4", "string"],
+        ["abc", 200, "4", "string"],
+        [null, 200, "4", "string"],
+        ["", 200, "4", "string"],
+        [1.5, 200, "4", "string"],
+        [1, 200, "1", "string"],
+        [12, 200, "12", "string"],
+        ["6", 200, "6", "string"],
+      ],
+    );
+
+    writes.length = 0;
+    const badTurnsType = await post({ gateContextTurns: { v: 1 } });
+    const longContextPrompt = await post({
+      gateContextPrompt: "字".repeat(GATE_PROMPT_MAX + 1),
+    });
+    const badContextPrompt = await post({ gateContextPrompt: 1 });
+    eq(
+      "轮数类型不对 / 题面超长 / 题面不是字符串都 400，零写入",
+      [
+        badTurnsType.status,
+        longContextPrompt.status,
+        badContextPrompt.status,
+        writes.length,
+        store.gateContextTurns,
+        store.gateContextPrompt,
+      ],
+      [400, 400, 400, 0, "6", "带前文那份题面"],
+    );
+
+    await post({ gateContext: "none", gateContextTurns: 4, gateContextPrompt: "" });
+    eq(
+      "题面可以清空（空 = 没有判据，照常召回），开关与轮数各自独立",
+      [store.gateContext, store.gateContextTurns, store.gateContextPrompt],
+      ["none", "4", ""],
+    );
+  }
 
   // ---- 服务端投影与运行时 / 面板同一判据：存着 decision 但服务没配 → off ----
   {
@@ -6495,6 +6857,142 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
+  // ---- 判断前文：none 只看当前消息；turns 前后成对带上，当前消息在最下面 ----
+  {
+    const payload = {
+      messages: [
+        { role: "user", content: "探针是干嘛的" },
+        { role: "assistant", content: "探针把钩子事实记进日志。" },
+        { role: "user", content: "修吧" },
+      ],
+    };
+    const noneRequest = decisionFetch({ choice: "need", confidence: 0.8 });
+    await createRecallHandler(
+      recallSdk({ values, fetchImpl: noneRequest.fetchImpl, dataDir: dir }),
+    )({
+      payload,
+      session: { sessionId: "decision-context-none" },
+    });
+    const noneBody = JSON.parse(noneRequest.systemone()[0]?.init?.body || "{}");
+    eq(
+      "gateContext=none：state.content 仍然只有当前消息（不悄悄带上前文）/ 题面与 criteria 都是不带前文那一套",
+      [
+        noneBody.state?.content,
+        noneBody.questions?.q?.instructions,
+        JSON.stringify(noneBody.questions?.q?.criteria),
+        JSON.stringify(DECISION_GATE_CRITERIA),
+      ],
+      ["修吧", DEFAULT_GATE_DECISION_PROMPT, JSON.stringify(DECISION_GATE_CRITERIA), JSON.stringify(DECISION_GATE_CRITERIA)],
+    );
+
+    const turnsRequest = decisionFetch({ choice: "need", confidence: 0.8 });
+    await createRecallHandler(
+      recallSdk({
+        values: { ...values, gateContext: "turns", gateContextTurns: "4", gateContextPrompt: "上面的对话里有没有？" },
+        fetchImpl: turnsRequest.fetchImpl,
+        dataDir: dir,
+      }),
+    )({
+      payload,
+      session: { sessionId: "decision-context-turns" },
+    });
+    const turnsBody = JSON.parse(turnsRequest.systemone()[0]?.init?.body || "{}");
+    const turnsContent = String(turnsBody.state?.content || "");
+    eq(
+      "gateContext=turns：state.content 前文在前、当前消息在最下面 / 题面换成 gateContextPrompt / criteria 换成带前文那一套",
+      [
+        turnsContent.split("\n\n"),
+        turnsBody.questions?.q?.instructions,
+        JSON.stringify(turnsBody.questions?.q?.criteria),
+        Object.keys(turnsBody.questions?.q?.criteria || {}),
+      ],
+      [
+        ["用户：探针是干嘛的\n助手：探针把钩子事实记进日志。", "修吧"],
+        "上面的对话里有没有？",
+        JSON.stringify(DECISION_GATE_CONTEXT_CRITERIA),
+        ["need", "standalone"],
+      ],
+    );
+    check(
+      "两套 criteria 不一样，但选项名都是 need / standalone（判定逻辑只认这两个键）",
+      JSON.stringify(DECISION_GATE_CONTEXT_CRITERIA) !== JSON.stringify(DECISION_GATE_CRITERIA) &&
+        DECISION_GATE_CONTEXT_CRITERIA.need.includes("上面的对话里没有") &&
+        DECISION_GATE_CONTEXT_CRITERIA.standalone.includes("上面的对话里已经有了") &&
+        DECISION_GATE_CONTEXT_CRITERIA.need !== DECISION_GATE_CRITERIA.need &&
+        DECISION_GATE_CONTEXT_CRITERIA.standalone !== DECISION_GATE_CRITERIA.standalone,
+    );
+
+    const fallbackRequest = decisionFetch({ choice: "need", confidence: 0.8 });
+    const fallbackResult = await createRecallHandler(
+      recallSdk({
+        values: {
+          ...values,
+          gateContext: "turns",
+          gateContextPrompt: "上面的对话里有没有？",
+        },
+        fetchImpl: fallbackRequest.fetchImpl,
+        dataDir: dir,
+      }),
+    )({
+      payload: { messages: [{ role: "user", content: "这是会话第一句" }] },
+      session: { sessionId: "decision-context-empty" },
+    });
+    const fallbackBody = JSON.parse(fallbackRequest.systemone()[0]?.init?.body || "{}");
+    eq(
+      "turns 但前文取不到（会话第一句）：退回不带前文的题面与 criteria，照常判断、不算失败",
+      [
+        fallbackBody.state?.content,
+        fallbackBody.questions?.q?.instructions,
+        JSON.stringify(fallbackBody.questions?.q?.criteria),
+        Boolean(fallbackResult?.payload),
+        fallbackRequest.systemone().length,
+        fallbackRequest.calls.length,
+      ],
+      [
+        "这是会话第一句",
+        DEFAULT_GATE_DECISION_PROMPT,
+        JSON.stringify(DECISION_GATE_CRITERIA),
+        true,
+        1,
+        2,
+      ],
+    );
+
+    const rows = [];
+    for (const mode of ["none", "turns"]) {
+      for (const [label, choice, confidence, expectedSkip] of [
+        ["need-hit", "need", 0.8, false],
+        ["need-low", "need", 0.3, true],
+        ["standalone", "standalone", 0.9, true],
+      ]) {
+        const request = decisionFetch({ choice, confidence });
+        const result = await createRecallHandler(
+          recallSdk({
+            values: { ...values, gateContext: mode },
+            fetchImpl: request.fetchImpl,
+            dataDir: dir,
+          }),
+        )({
+          payload,
+          session: { sessionId: `decision-context-logic-${mode}-${label}` },
+        });
+        rows.push([mode, label, result === undefined, expectedSkip]);
+      }
+    }
+    eq(
+      "判定逻辑没变：none / turns 两种模式下 need+够门槛都召回、need 低于门槛都跳过、standalone 都跳过",
+      rows,
+      [
+        ["none", "need-hit", false, false],
+        ["none", "need-low", true, true],
+        ["none", "standalone", true, true],
+        ["turns", "need-hit", false, false],
+        ["turns", "need-low", true, true],
+        ["turns", "standalone", true, true],
+      ],
+    );
+  }
+
   // ---- 判定的四条行为：choice 与 confidence 两维合起来决定跳不跳 ----
   // 需要召回 ⇔ choice === "need" 且 confidence >= 0.45；其余一律跳过召回（任务书的口径）。
   // 方向与 llm 档同源：need（有指代 / 省略）= 得靠上文 → 召回；
@@ -6606,6 +7104,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       gateDecisionPromptOf({ gateDecisionPrompt: "  自定义  " }),
     ],
     ["", "", "自定义"],
+  );
+  eq(
+    "gateContextOf / gateContextTurnsOf / gateContextPromptOf：缺项与脏值回默认 / 轮数越界回 4 / 题面去首尾空白但空串仍是空",
+    [
+      [gateContextOf({}), gateContextOf({ gateContext: "turns" }), gateContextOf({ gateContext: "bogus" })],
+      [gateContextTurnsOf({}), gateContextTurnsOf({ gateContextTurns: "12" }), gateContextTurnsOf({ gateContextTurns: 13 })],
+      [gateContextPromptOf({}), gateContextPromptOf({ gateContextPrompt: "  \n " }), gateContextPromptOf({ gateContextPrompt: "  自定义  " })],
+    ],
+    [
+      ["none", "turns", "none"],
+      [4, 12, 4],
+      ["", "", "自定义"],
+    ],
   );
 
   // ---- need + 0.2：低于阈值 -> 跳过召回 ----

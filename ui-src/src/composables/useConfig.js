@@ -61,6 +61,7 @@ export function useConfig() {
     flip: (...args) => store.flip(...args),
     setForm: (...args) => store.setForm(...args),
     setDecisionThreshold: (...args) => store.setDecisionThreshold(...args),
+    setGateContextTurns: (...args) => store.setGateContextTurns(...args),
     setControlsNumber: (...args) => store.setControlsNumber(...args),
     saveConnection: (...args) => store.saveConnection(...args),
     saveLayers: (...args) => store.saveLayers(...args),
@@ -81,6 +82,7 @@ export function useConfig() {
     resetPrompt: (...args) => store.resetPrompt(...args),
     gatePromptStatus: () => store.gatePromptStatusOf(),
     decisionPromptStatus: () => store.decisionPromptStatusOf(),
+    contextPromptStatus: () => store.contextPromptStatusOf(),
     rerankPromptStatus: () => store.rerankPromptStatusOf(),
     applyControls: (...args) => store.applyControls(...args),
   };

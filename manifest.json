@@ -97,6 +97,26 @@
             "description": "决策模型判断（decision 档）使用的题面，最长 2000 字符。判定标准由内置的两条 criteria 描述决定，这一格只决定怎么问。用 {{message}} 表示当前这条用户消息，写了就地替换；没写就只发这句题面（消息本身在 state 里）。留空表示不拦截任何召回。与语言模型判断那份分开存、互不影响。",
             "default": "只看这一句话、不看之前的对话，够不够回答它？"
           },
+          "gateContext": {
+            "type": "string",
+            "title": "判断前文",
+            "description": "决策模型判断（decision 档）时看不看前文：none 只看最后一条用户消息；turns 带上最近几轮问答一起判断。只在 decision 档生效，非法值归一化成 none。",
+            "default": "none",
+            "enum": ["none", "turns"],
+            "ui": { "enumLabels": ["不看前文", "带最近几轮对话"] }
+          },
+          "gateContextTurns": {
+            "type": "string",
+            "title": "带前文轮数",
+            "description": "gateContext=turns 时带最近几轮对话，1 到 12 的整数，默认 4。越界或非整数归一化回 4。",
+            "default": "4"
+          },
+          "gateContextPrompt": {
+            "type": "string",
+            "title": "带前文判断提示词",
+            "description": "gateContext=turns 时决策模型使用的题面，最长 2000 字符。判定标准由带前文模式的两条内置 criteria 描述决定，这一格只决定怎么问。留空表示不拦截任何召回。与不带前文那份分开存、互不影响。",
+            "default": "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？"
+          },
           "gateDecisionThreshold": {
             "type": "string",
             "title": "决策召回门槛",

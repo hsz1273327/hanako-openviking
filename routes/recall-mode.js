@@ -8,7 +8,9 @@
 // 写入前先整单校验：同一次提交里只要有一个值不合法，一个字段都不写。
 
 import {
+  DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
+  GATE_CONTEXT_MODES,
   GATE_PROMPT_MAX,
   QUERY_MODES,
   RECALL_GATE_FALLBACKS,
@@ -19,9 +21,12 @@ import {
   RERANK_PROMPT_MAX,
   SERVICE_KINDS,
   SERVICE_MODEL_MAX,
-  normalizeGateModel,
+  normalizeGateContext,
+  normalizeGateContextPrompt,
+  normalizeGateContextTurns,
   normalizeGateDecisionPrompt,
   normalizeGateFallback,
+  normalizeGateModel,
   normalizeGatePrompt,
   normalizeQueryMode,
   normalizeRerank,
@@ -35,6 +40,7 @@ import {
   parseRerankChannels,
   readSwitches,
   resolveRecallGate,
+  serializeGateContextTurns,
   serializeGateDecisionThreshold,
   serializeServiceTimeout,
   servicePairError,
@@ -51,6 +57,7 @@ import { sessionKeyOf } from "../src/state/session.js";
 const SPECS = Object.freeze({
   recallGate: RECALL_GATES,
   gateFallback: RECALL_GATE_FALLBACKS,
+  gateContext: GATE_CONTEXT_MODES,
   queryMode: QUERY_MODES,
   rerank: RERANK_MODES,
 });
@@ -164,6 +171,12 @@ async function current(ctx) {
     gateDecisionPrompt: normalizeGateDecisionPrompt(
       (await ctx.config.get("gateDecisionPrompt")) ?? DEFAULT_GATE_DECISION_PROMPT,
     ),
+    // 判断前文与带前文模式那份题面：缺项时投影默认值，用户明确清空仍是空串。
+    gateContext: normalizeGateContext(await ctx.config.get("gateContext")),
+    gateContextTurns: serializeGateContextTurns(await ctx.config.get("gateContextTurns")),
+    gateContextPrompt: normalizeGateContextPrompt(
+      (await ctx.config.get("gateContextPrompt")) ?? DEFAULT_GATE_CONTEXT_PROMPT,
+    ),
     // 召回门槛：脏值 / 缺项一律画成 0.45（与 readSwitches 同口径）。只在 decision 档用它。
     // 投影字符串，与超时那一组同口径（读侧要数字，写侧存串）。
     gateDecisionThreshold: serializeGateDecisionThreshold(
@@ -258,6 +271,31 @@ export default function registerRecallModeRoutes(app, ctx) {
         );
       }
       changes.push(["gateDecisionPrompt", body.gateDecisionPrompt]);
+    }
+
+    if (has(body, "gateContextPrompt")) {
+      if (typeof body.gateContextPrompt !== "string") {
+        return c.json({ ok: false, error: "gateContextPrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.gateContextPrompt).length > GATE_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `gateContextPrompt 最多 ${GATE_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["gateContextPrompt", body.gateContextPrompt]);
+    }
+
+    if (has(body, "gateContextTurns")) {
+      const raw = body.gateContextTurns;
+      // 与门槛同一取舍：类型不对才拒；形状对但越界 / 不是整数的归一化回 4 再落库。
+      if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+        return c.json(
+          { ok: false, error: "gateContextTurns 必须是数字、字符串或 null" },
+          400,
+        );
+      }
+      changes.push(["gateContextTurns", serializeGateContextTurns(raw)]);
     }
 
     if (has(body, "gateDecisionThreshold")) {
