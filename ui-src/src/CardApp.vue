@@ -12,7 +12,7 @@
 // 形态：侧边栏是宿主 warm-paper 亮色（--sidebar-bg #F4F0EA），卡片不画自己的底色，
 // 只保留透明容器 + 行布局；开关、按钮、分段全部用 naive-ui。
 // 主色在本页局部换成宿主 accent #537D96，不动共享 theme.js（面板仍是品牌绿）。
-import { computed, onBeforeUnmount, onMounted, reactive } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import {
   NConfigProvider,
   NRadioButton,
@@ -20,6 +20,7 @@ import {
   NSwitch,
   zhCN,
 } from "naive-ui";
+import { hana } from "./sdk.js";
 import { appReady, currentSession, jsonGet, jsonPost, onActiveSessionChanged } from "./api.js";
 import { lightThemeOverrides } from "./theme.js";
 import {
@@ -255,6 +256,22 @@ function onVisibilityChange() {
 
 let offActive = null;
 
+// 宿主按 iframe 初始高度决定卡片占多高，Vue 是异步渲染的：数据回来之后卡片会长一截，
+// 不主动报一次高度就会被裁掉下半部分（曾经只显示前两行）。
+// 用 ResizeObserver 盯根节点，内容怎么变都跟得上；宿主端读的是 payload.height。
+const rootEl = ref(null);
+let resizeObserver = null;
+
+function reportHeight() {
+  const el = rootEl.value;
+  if (!el) return;
+  try {
+    hana.ui.resize({ height: Math.ceil(el.getBoundingClientRect().height) });
+  } catch {
+    /* 宿主不支持这个能力时静默：卡片还能用，只是高度按初始值 */
+  }
+}
+
 onMounted(() => {
   appReady();
   document.addEventListener("visibilitychange", onVisibilityChange);
@@ -265,19 +282,29 @@ onMounted(() => {
     refresh();
   });
   start();
+
+  if (typeof ResizeObserver === "function" && rootEl.value) {
+    resizeObserver = new ResizeObserver(() => reportHeight());
+    resizeObserver.observe(rootEl.value);
+  }
+  reportHeight();
 });
 
 onBeforeUnmount(() => {
   stop();
   document.removeEventListener("visibilitychange", onVisibilityChange);
   if (offActive) offActive();
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
 });
 </script>
 
 <template>
   <!-- zhCN 与面板页一致：不传就落回 enUS，空控件会显示英文默认文案。 -->
   <NConfigProvider abstract :locale="zhCN" :theme-overrides="cardThemeOverrides">
-    <div class="card" :data-session="state.sessionKey ? 'on' : 'off'">
+    <div ref="rootEl" class="card" :data-session="state.sessionKey ? 'on' : 'off'">
       <header class="head">
         <span class="dot" :class="state.dotTone" aria-hidden="true"></span>
         <span class="title" :title="state.titleTitle">{{ state.title }}</span>
