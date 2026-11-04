@@ -284,6 +284,13 @@ function eq(label, actual, expected) {
   check(label, JSON.stringify(actual) === JSON.stringify(expected), `got ${JSON.stringify(actual)}`);
 }
 
+// 响应里少了字段时，冒烟要红一条断言，不是摔一个 TypeError 把整轮带走。
+// 只收敛「取不到的容器」这一层：数组给空数组、字符串给空串，原样值不动。
+// 期望值本身就是空的时候（`eq(..., [])`）不要套它，否则「字段缺失」会被洗成「刚好符合」；
+// 负向断言（期望 false）同理，缺字段必须仍然红，那种地方用 `?.` 让值变 undefined。
+const asList = (value) => (Array.isArray(value) ? value : []);
+const asText = (value) => (typeof value === "string" ? value : "");
+
 // ---- ui-src 源码读取：只用于两条 a11y / 切页零副作用的契约 ----
 const UI_SRC_DIR = path.join(import.meta.dirname, "../ui-src/src");
 // 去掉注释再断言：解释性注释里会出现组件名、placeholder 这类词，
@@ -1219,7 +1226,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const mixedGet = await invokeGet();
   eq(
     "大小写按中枢原样名匹配（POST 写入原样、回显原样、GET 认出 Hermes 而不认 hermes） / POST 重复项按大小写精确去重",
-    [[mixed.status, caseWrites.at(-1), mixed.body.excluded, mixedGet.body.peers.map((p) => p.excluded)], (await invokePost({ excluded: ["Hermes", "hermes", "Hermes"] })).body.excluded],
+    [[mixed.status, caseWrites.at(-1), mixed.body.excluded, asList(mixedGet.body.peers).map((p) => p.excluded)], (await invokePost({ excluded: ["Hermes", "hermes", "Hermes"] })).body.excluded],
     [[200, ["excludedPeers", "Hermes"], ["Hermes"], [true, false]], ["Hermes", "hermes"]],
   );
 
@@ -1232,7 +1239,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ctxWith({ enabled: true, serverUrl: "http://h:1", apiKey: "k" }, noPrefixFetch.fetchImpl),
   );
   const noPrefix = await invokeGet();
-  eq("空前缀按 openhanako- 认本机", noPrefix.body.peers[0].self, true);
+  eq("空前缀按 openhanako- 认本机", asList(noPrefix.body.peers)[0]?.self, true);
 
   // ---- 传输失败：不抛，错误原文进 body ----
   registerPeersRoutes(
@@ -1251,7 +1258,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check(
     "传输失败不抛：HTTP 200 + ok:false + 错误原文",
     threw === null && failed.status === 200 && failed.body.ok === false &&
-      failed.body.error.includes("ETIMEDOUT"),
+      asText(failed.body.error).includes("ETIMEDOUT"),
     `${threw} / ${failed.status} / ${failed.body.error}`,
   );
 
@@ -1310,7 +1317,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const counted = await invokeGet();
   eq(
     "count 只数 .md 文件（3 目录 + 4 md + 1 txt → 4 / 0），没到上限 catalogCapped 为 false / count 读的是各 peer 的 memories 树",
-    [[counted.body.peers.map((p) => p.count), counted.body.peers.map((p) => p.countCapped)], seen.filter((uri) => uri.endsWith("/memories")).sort()],
+    [[asList(counted.body.peers).map((p) => p.count), asList(counted.body.peers).map((p) => p.countCapped)], seen.filter((uri) => uri.endsWith("/memories")).sort()],
     [[[4, 0], [false, false]], memoriesUris],
   );
   const treeUrl = new URL(seenUrls.find((url) => url.includes("/api/v1/fs/tree")));
@@ -1348,7 +1355,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const baseline = await invokeGet();
   eq(
     "6 个类别目录的树 count 是 5（只数 .md） / 6 个类别目录的树 countCapped 为 false",
-    [baseline.body.peers[0].count, baseline.body.peers[0].countCapped],
+    [asList(baseline.body.peers)[0]?.count, asList(baseline.body.peers)[0]?.countCapped],
     [5, false],
   );
 
@@ -1379,7 +1386,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const capped = await invokeGet();
   eq(
     "节点数恰好到 node_limit 时 countCapped 为 true / 没到上限的 peer 仍为 false",
-    [capped.body.peers[0].countCapped, capped.body.peers[1].countCapped],
+    [asList(capped.body.peers)[0]?.countCapped, asList(capped.body.peers)[1]?.countCapped],
     [true, false],
   );
 
@@ -1400,7 +1407,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const partly = await invokeGet();
   eq(
     "单个读失败不拖垮整单：好的照常给数字、坏的给 null、capped 都是 false",
-    [partly.body.ok, partly.body.peers.map((p) => p.count), partly.body.peers.map((p) => p.countCapped)],
+    [partly.body.ok, asList(partly.body.peers).map((p) => p.count), asList(partly.body.peers).map((p) => p.countCapped)],
     [true, [1, null], [false, false]],
   );
 
@@ -1418,7 +1425,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const odd = await invokeGet();
   eq(
     "树形状不认识时 count 是 null（不猜成 0） / 树形状不认识时整单仍 ok",
-    [odd.body.peers[0].count, odd.body.ok],
+    [asList(odd.body.peers).length > 0 ? odd.body.peers[0].count : "peers 缺失", odd.body.ok],
     [null, true],
   );
 
@@ -1442,7 +1449,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ),
   );
   const parallel = await invokeGet();
-  eq("两个 peer 的记忆是并行读的", parallel.body.peers.map((peer) => peer.count), [1, 1]);
+  eq("两个 peer 的记忆是并行读的", asList(parallel.body.peers).map((peer) => peer.count), [1, 1]);
 
   // 整体超时：memories 永不落（连 AbortSignal 都不理），到点全部 null、capped false。
   const hangFetch = async (url) => {
@@ -1460,7 +1467,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const timedOut = await invokeGet();
   eq(
     "整体超时：count 全 null、capped 全 false、整单仍 ok",
-    [timedOut.body.peers.map((peer) => peer.count), timedOut.body.peers.map((p) => p.countCapped), timedOut.body.ok],
+    [asList(timedOut.body.peers).map((peer) => peer.count), asList(timedOut.body.peers).map((p) => p.countCapped), timedOut.body.ok],
     [[null, null], [false, false], true],
   );
 
@@ -2103,8 +2110,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 }
 // ================= 一屏高度链（样式只留这一节） =================
 {
-  // 这里只守「整页不滚」这件事，不锁类名、不锁像素、不锁断点字面量：
-  // 换一种写法只要行为一样就该通过。四条各说一件事。
+  // 这四条是用户点名的契约（整页不自滚 / 内容区吃满 / 矮屏降级 / hidden 不占位），
+  // 所以它们确实锁了挂载层与内容区的具体选择器（html,body / #panel-app / .page /
+  // .tab-panel）和 640 这个断点字面量——这些选择器与阈值就是契约本身，不是审美。
+  // 换实现时它们会红，那是对的：改这条高度链要人来确认。
+  // 样式侧其余一切（间距 / 字号 / 列宽 / 组件选型）都不在这里，也不该进冒烟。
   const css = panelCss();
   const pageRule = ruleBody(css, ".page");
   const panelRule = ruleBody(css, ".tab-panel");
@@ -3998,7 +4008,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check(
     "未变化的脏前缀不阻断整单：serverUrl 照常落库、脏前缀原样留着且不被写回、applied 不声称改了前缀",
     keepDirty.status === 200 && store.serverUrl === "http://h:7" && store.peerPrefix === "主力机" &&
-      !writes.some(([key]) => key === "peerPrefix") && !keepDirty.body.applied.includes("peerPrefix"),
+      !writes.some(([key]) => key === "peerPrefix") && keepDirty.body.applied?.includes("peerPrefix") === false,
     JSON.stringify(writes),
   );
 
@@ -4201,7 +4211,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("applied 列出服务字段",
     ["rerankServiceUrl", "rerankServiceModel", "systemoneServiceUrl", "systemoneServiceModel"]
-      .every((key) => servicesOk.body.applied.includes(key)));
+      .every((key) => asList(servicesOk.body.applied).includes(key)));
 
   // 服务字段的六种坏输入：全部 400 + 零写入，且不会静默清空旧值。
   writes.length = 0;
@@ -4240,11 +4250,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       channelsOk.status,
       typeof store.rerankChannels,
       [JSON.parse(store.rerankChannels).length, JSON.parse(store.rerankChannels)[0].url],
-      channelsOk.body.rerankChannels.length,
+      asList(channelsOk.body.rerankChannels).length,
     ],
     [200, "string", [2, "http://h:1"], 2],
   );
-  check("applied 列出 rerankChannels", channelsOk.body.applied.includes("rerankChannels"));
+  check("applied 列出 rerankChannels", asList(channelsOk.body.applied).includes("rerankChannels"));
 
   // 通道 JSON 的三种坏形状：坏 JSON / 不是字符串 / 不是数组。
   writes.length = 0;
@@ -4368,8 +4378,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check(
     "applied 列出超时字段",
-    timeoutOk.body.applied.includes("rerankServiceTimeoutMs") &&
-      timeoutOk.body.applied.includes("systemoneServiceTimeoutMs"),
+    asList(timeoutOk.body.applied).includes("rerankServiceTimeoutMs") &&
+      asList(timeoutOk.body.applied).includes("systemoneServiceTimeoutMs"),
   );
 
   writes.length = 0;
@@ -4440,8 +4450,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [[200, "sk-abcdef1234567890", "sk-abc123"], [true, "sk-a••••••••7890", undefined, "••••••••c123"]],
   );
   check("applied 列出密钥字段",
-    keySet.body.applied.includes("rerankServiceKey") &&
-      keySet.body.applied.includes("systemoneServiceKey"));
+    asList(keySet.body.applied).includes("rerankServiceKey") &&
+      asList(keySet.body.applied).includes("systemoneServiceKey"));
   // 上面的 eq 只看「值是 undefined」；这里再钉一遍「连这个键都没有」——
   // 将来谁把 current() 改成展开整份配置，值可能是 undefined 而键还在。
   check(
@@ -4457,8 +4467,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "缺省密钥字段不报错：不进 applied、一个都不写、旧密钥还在",
     [
       keyAbsent.status,
-      keyAbsent.body.applied.includes("rerankServiceKey") ||
-        keyAbsent.body.applied.includes("systemoneServiceKey"),
+      keyAbsent.body.applied?.includes("rerankServiceKey") ||
+        keyAbsent.body.applied?.includes("systemoneServiceKey"),
       writes.some(([key]) => key === "rerankServiceKey" || key === "systemoneServiceKey"),
       [store.rerankServiceKey, store.systemoneServiceKey],
     ],
@@ -4503,7 +4513,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check(
     "带换行的密钥：整单不被打断、密钥整条丢弃保留原值、同一单其它字段照常落库",
     keyNewline.status === 200 && store.rerankServiceKey === "sk-keep-123456" &&
-      keyNewline.body.applied.includes("queryMode"),
+      asList(keyNewline.body.applied).includes("queryMode"),
     `${keyNewline.status} / ${store.rerankServiceKey}`,
   );
 
@@ -4586,7 +4596,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const tested = await post({ session });
   eq(
     "测试端点成功 / 测试端点回候选数 / 测试端点回每路分数 / 测试端点回标准化分 / 测试端点回合并分 / 测试端点回保留索引（标准化后的末位不丢） / 测试端点不写配置 / 测试端点走当前配置的 URL",
-    [tested.body.ok, tested.body.candidates, tested.body.channels[0].scores, tested.body.channels[0].normalized, tested.body.merged, tested.body.kept, store.rerankChannels.startsWith("["), calls[0].url],
+    [tested.body.ok, tested.body.candidates, asList(tested.body.channels)[0]?.scores, asList(tested.body.channels)[0]?.normalized, tested.body.merged, tested.body.kept, store.rerankChannels.startsWith("["), calls[0].url],
     [true, 2, [0.8, 0.1], [1, 0], [1, 0], [0, 1], true, "http://127.0.0.1:9/v1/rerank"],
   );
 
@@ -4730,8 +4740,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       calls[0].url,
       calls[0].body.model,
       calls[0].body.state,
-      Object.keys(calls[0].body.questions),
-      calls[0].body.questions.q.type,
+      Object.keys(calls[0].body.questions ?? {}),
+      calls[0].body.questions?.q?.type,
       systemoneOk.body.model,
     ],
     [true, "http://127.0.0.1:8097/v1/systemone", "kev-4b", { type: "text", content: "连通性测试" }, ["q"], "noul", null],
@@ -6279,8 +6289,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         calls.length,
         calls[0].url,
         calls[0].init.method,
-        [calls[0].body.model, calls[0].body.query, calls[0].body.documents.length],
-        Array.from(calls[0].body.documents[0]).length,
+        [calls[0].body.model, calls[0].body.query, asList(calls[0].body.documents).length],
+        Array.from(asText(asList(calls[0].body.documents)[0])).length,
       ], outcome.channels[0].scores, outcome.channels[0].scoreScale],
       [[1, "http://127.0.0.1:9999/v1/rerank", "POST", ["bge-reranker", "用户问题", 3], RERANK_DOCUMENT_CHARS], [0.9, 0.25, 0], "probability"],
     );
@@ -6622,8 +6632,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         calls[0].url,
         calls[0].body.model,
         calls[0].body.state,
-        Object.keys(calls[0].body.questions),
-      ], calls[0].body.questions.r1, calls[0].body.questions.r2.instructions, [outcome.channels[0].scores, outcome.merged, calls[0].init.timeoutMs]],
+        Object.keys(calls[0].body.questions ?? {}),
+      ], calls[0].body.questions?.r1, calls[0].body.questions?.r2?.instructions, [outcome.channels[0].scores, outcome.merged, calls[0].init.timeoutMs]],
       [[1, "http://127.0.0.1:8080/v1/systemone", "small", "用户问题：用户问题\n候选列表：\n1. 甲\n2. 乙", ["r1", "r2"]], { type: "noul", instructions: "第 1 条候选能帮助回答用户的问题吗" }, systemoneInstructions(2), [[0.6, 0.9], [0, 1], 3500]],
     );
     resetRuntimeTransport();
@@ -6728,14 +6738,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     eq(
       "systemone 只问前 5 条",
-      Object.keys(calls[0].body.questions).length,
+      Object.keys(calls[0].body.questions ?? {}).length,
       SYSTEMONE_MAX_CANDIDATES,
     );
     check(
       "systemone state 只列前 5 条",
-      calls[0].body.state.includes(`${SYSTEMONE_MAX_CANDIDATES}. 候选${SYSTEMONE_MAX_CANDIDATES}`) &&
-        !calls[0].body.state.includes(`6. 候选6`),
-      calls[0].body.state.split("\n").slice(-1)[0],
+      asText(calls[0].body.state).includes(`${SYSTEMONE_MAX_CANDIDATES}. 候选${SYSTEMONE_MAX_CANDIDATES}`) &&
+        !asText(calls[0].body.state).includes(`6. 候选6`),
+      asText(calls[0].body.state).split("\n").slice(-1)[0],
     );
     eq(
       "systemone 超出的候选记为 null / systemone 候选上限是 5",
@@ -7171,14 +7181,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const before = JSON.stringify(payload);
 
   const first = await handler({ payload, session });
+  const firstMessages = asList(first?.payload?.messages);
+  const firstTail = asText(firstMessages[2]?.content);
   check(
     "召回成功：条数不变、最后一条用户消息前面挂记忆块且原话仍在末尾、助手消息与原 payload 都不动",
     Boolean(first?.payload) &&
-      first.payload.messages.length === 3 &&
-      first.payload.messages[2].content.startsWith("<openviking-memory>") &&
-      first.payload.messages[2].content.endsWith("我记得是周三？") &&
-      first.payload.messages[2].content.includes("周三要交稿。") &&
-      first.payload.messages[1].content === "我查一下" &&
+      firstMessages.length === 3 &&
+      firstTail.startsWith("<openviking-memory>") &&
+      firstTail.endsWith("我记得是周三？") &&
+      firstTail.includes("周三要交稿。") &&
+      asText(firstMessages[1]?.content) === "我查一下" &&
       JSON.stringify(payload) === before,
     JSON.stringify(first?.payload?.messages?.[2]?.content).slice(0, 160),
   );
@@ -7488,12 +7500,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     payload: { messages: [{ role: "user", content: "rendered 优先" }] },
     session: { sessionId: "shape-rendered" },
   });
+  const renderedText = asText(asList(renderedResult?.payload?.messages)[0]?.content);
   check(
     "rendered 形状：注入成功、正文进块、且优先于 digest 与 entries",
     Boolean(renderedResult?.payload) &&
-      renderedResult.payload.messages[0].content.includes(renderedXml) &&
-      !renderedResult.payload.messages[0].content.includes("摘要不该赢") &&
-      !renderedResult.payload.messages[0].content.includes("条目不该赢"),
+      renderedText.includes(renderedXml) &&
+      !renderedText.includes("摘要不该赢") &&
+      !renderedText.includes("条目不该赢"),
   );
 
   const digestFetch = mockFetch({
@@ -7509,11 +7522,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     payload: { messages: [{ role: "user", content: "digest 兜底" }] },
     session: { sessionId: "shape-digest" },
   });
+  const digestText = asText(asList(digestResult?.payload?.messages)[0]?.content);
   check(
     "digest 兜底：空 rendered 让位给 digest，且不再看 entries",
     Boolean(digestResult?.payload) &&
-      digestResult.payload.messages[0].content.includes("只有摘要") &&
-      !digestResult.payload.messages[0].content.includes("条目也不该赢"),
+      digestText.includes("只有摘要") &&
+      !digestText.includes("条目也不该赢"),
   );
 
   const entriesFetch = mockFetch({
@@ -7534,10 +7548,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     payload: { messages: [{ role: "user", content: "entries 兜底" }] },
     session: { sessionId: "shape-entries" },
   });
+  const entriesText = asText(asList(entriesResult?.payload?.messages)[0]?.content);
   check(
     "entries 兜底：注入成功，用空行拼起来且跳过空项",
     Boolean(entriesResult?.payload) &&
-      entriesResult.payload.messages[0].content.includes("第一条\n\n第二条"),
+      entriesText.includes("第一条\n\n第二条"),
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
