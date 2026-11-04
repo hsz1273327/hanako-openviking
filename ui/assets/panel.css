@@ -301,22 +301,32 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* NText 默认 14px；面板整体是 12px 档，不随组件默认值为了“正常”而变胖。 */
 .hint-body { font-size: 12px; line-height: 1.35; }
 
-/* ---------- 召回管理（记忆页） ---------- */
+/* ---------- 记忆页（召回 / 重排 / 候选池） ---------- */
 
-/* 召回管理是记忆页里唯一吃满剩余高度的一块：下拉与展开区按内容定高，
+/* 召回与重排按内容定高，不吃余量（各自一张卡，页面的 12px 间距就是它们的分隔）：
+   shrink 也写 0，免得矮屏时被 .tab-panel 压扁、把控件挤出卡片边界。
+   放不下时交给 .tab-panel 自己滚。 */
+.recall-card,
+.rerank-card { flex: 0 0 auto; }
+
+/* 候选池是记忆页里唯一吃满剩余高度的一块：上面的卡按内容定高，
    剩下的全部给 peer 名单，名单在自己的 NScrollbar 里滚。
-   n-card 的正文要跟着做 flex 列，否则名单拿不到「剩下的高度」这个确定值。 */
-.recall {
+   n-card 的正文要跟着做 flex 列，否则名单拿不到「剩下的高度」这个确定值。
+   min-height 给一个下限（卡头 + 正文内边距 + 四行名单）：两级都展开时
+   上面两张卡加起来已经超过一屏，flex 会把这块唯一的可收缩项压成 0 ——
+   卡还在 DOM 里，但高度是 0，名单等于彻底消失。压到下限就停手，
+   放不下的部分交给 .tab-panel 自己滚。 */
+.peers-card {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 120px;
   overflow-x: hidden;
   overflow-y: auto;
 }
-.recall > .n-card-header { flex: none; }
-.recall > .n-card-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.recall > .n-card-content > * { flex: none; }
+.peers-card > .n-card-header { flex: none; }
+.peers-card > .n-card-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.peers-card > .n-card-content > * { flex: none; }
 
 .peer-count { font-size: 10.5px; opacity: 0.45; font-variant-numeric: tabular-nums; }
 
@@ -336,9 +346,6 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .prompt-head .field-label { margin: 0; }
 .prompt-status { flex: 1; min-width: 0; font-size: 11px; opacity: 0.55; text-align: right; }
 .prompt-head .n-button { flex: none; }
-
-/* 下拉与名单之间的细线：两件事管的都是召回，但一个定「怎么查」、一个定「谁能进」。 */
-.recall-sep { flex: none; height: 1px; margin: 10px 0 8px; background: rgba(128, 128, 128, 0.16); }
 
 /* ---------- 精排通道 ---------- */
 .channel-field { min-width: 0; }
@@ -380,9 +387,9 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 */
 .channel-pair-note { font-size: 10.5px; line-height: 1.4; opacity: 0.55; margin: 4px 0 0; }
 
-/* ---------- peer 名单（召回管理栏内） ---------- */
+/* ---------- peer 名单（候选池卡内） ---------- */
 
-/* 名单吃满召回管理剩余的高度：条目少时不拉伸，条目多了在 NScrollbar 里自己滚。
+/* 名单吃满候选池卡剩余的高度：条目少时不拉伸，条目多了在 NScrollbar 里自己滚。
    n-list 自带白底（亮色主题），这里必须让它透明，否则会在卡片里贴一块白。 */
 .peer-list {
   display: flex;
@@ -392,7 +399,7 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   font-size: 10.5px;
   line-height: 1.5;
 }
-.recall > .n-card-content > .peer-list { flex: 1 1 auto; }
+.peers-card > .n-card-content > .peer-list { flex: 1 1 auto; }
 .peer-list.empty { opacity: 0.45; }
 .peer-empty { margin: 0; }
 .peer-scroll .n-list { background: transparent; }
@@ -491,9 +498,14 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* 说明行在出错时短暂变红，和 .save-hint.bad 同一档颜色。 */
 .skill-route-hint.bad { color: #c2554b; opacity: 0.9; }
 
-/* ---------- 记忆页顶部按会话说明 ---------- */
+/* ---------- 记忆页顶部按会话说明 + 页面级提示位 ---------- */
 .scoped-note { flex: none; margin: 0 2px; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
 .scoped-note b { font-weight: 600; opacity: 0.9; }
+
+/* 提示位是整页的（写入失败时这一页也要看得见），所以它在卡片外面、页面底部。
+   裸 <p> 的默认上下边距在 flex 列里会多出一截空档，这里收掉。 */
+#panel-memory > .save-hint { flex: none; margin: 0 2px; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
+#panel-memory > .save-hint.bad { color: #c2554b; opacity: 0.9; }
 
 /* ---------- 全局页：只有前置卡可以让步 ---------- */
 /* 中枢 / 身份现在是同一块 .hub-stack（上下两张卡），按内容定高、不吃余量；
@@ -541,10 +553,10 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   #panel-app { height: auto; }
   .page { height: auto; overflow: visible; }
   .tab-panel { flex: 0 0 auto; overflow: visible; }
-  .recall,
-  .recall > .n-card-content { flex: 0 0 auto; min-height: 0; overflow: visible; }
+  .peers-card,
+  .peers-card > .n-card-content { flex: 0 0 auto; min-height: 0; overflow: visible; }
   .peer-list,
-  .recall > .n-card-content > .peer-list { flex: 0 0 auto; }
+  .peers-card > .n-card-content > .peer-list { flex: 0 0 auto; }
   .peer-scroll .n-scrollbar-container { max-height: 296px; }
   .channel-scroll .n-scrollbar-container { max-height: 220px; }
   /* 日志页在这个高度下父级已经没有确定高度（.tab-panel 退回 auto），

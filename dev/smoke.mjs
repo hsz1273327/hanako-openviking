@@ -2533,6 +2533,49 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [["context", "rules"], ["context", "rules"]],
     );
   }
+  // ---- 拆卡之后仍然是整单（召回卡 / 重排卡两张，但请求只有一单） ----
+  {
+    // 先把两个键摆到**非默认值**，免得受前面几段留下的状态影响。
+    // 为什么必须是非默认值：整单里少了这个键时，normalize 会拿默认值补上，
+    // 如果此刻的值正好就是默认值，「补上的默认值」与「此刻的值」相同，断言就看不出来。
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    await ui.setForm("recallGate", "off");
+    await ui.setForm("queryMode", "context");
+    const before = saves().length;
+    // 只改召回卡里的那个下拉：整单里必须同时有 queryMode，而且带的是此刻的值。
+    await ui.setForm("recallGate", "llm");
+    const body = saves().at(-1).body;
+    eq(
+      "改召回判断时那一单里同时带 queryMode（当前值）",
+      [saves().length - before, body.recallGate, body.queryMode, state.form.queryMode],
+      [1, "llm", "context", "context"],
+    );
+  }
+  {
+    // 只改重排卡里的「结果重排」：请求里仍然要带着召回卡那两个键，值都是此刻的（非默认）。
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    await ui.setForm("recallGate", "rules");
+    const before = saves().length;
+    await ui.setForm("rerank", "llm");
+    const body = saves().at(-1).body;
+    eq(
+      "改重排开关时那一单里同时有 recallGate 与 queryMode",
+      [saves().length - before, body.rerank, body.recallGate, body.queryMode, state.form.recallGate, state.form.queryMode],
+      [1, "llm", "rules", "context", "rules", "context"],
+    );
+    // 复位：后面几段按「重排关着」的草稿走。
+    await ui.setForm("rerank", "off");
+  }
+  {
+    // 拆的是视图，不是提交：两张卡都只调 store 的动作，谁都不自己发请求。
+    const cards = ["components/RecallCard.vue", "components/RerankCard.vue"].map((name) =>
+      uiCode(name),
+    );
+    const offenders = ["post(", "fetch(", "createPanelStore"].filter((needle) =>
+      cards.some((code) => code.includes(needle)),
+    );
+    eq("RecallCard / RerankCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
+  }
 
   // ---- 提示词：恢复默认只填框 + 正常提交（行为第 4 条） ----
   {
