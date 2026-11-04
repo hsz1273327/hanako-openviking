@@ -15,14 +15,16 @@
 //     label for= 的关联用 NFormItem 的 label-props 交给它自己的 <label>；
 //   - 事实行 = NDescriptions + NDescriptionsItem（值节点保留原来的 b#id）；
 //   - 检查项 = NText（摘要一行）+ NList / NListItem（只有问题项）；
-//   - 分隔线 = NDivider，说明小字 = NText。
-// 栅格仍交给 n-grid：两栏 cols="1 700:2"，超时 / 预算两格 :cols="2"。
+//   - 说明小字 = NText。
+// 字段与事实行之间**没有分隔线**：NDivider 自带 24px 上下外边距，
+// 是那段 49px 空白的唯一来源，删掉节点比压外边距干净。
+// 栅格仍交给 n-grid：两栏 cols="1 700:5"，中枢 span 3 / 身份 span 2（= 3:2），
+// 超时 / 预算两格 :cols="2"。
 import { computed } from "vue";
 import {
   NCard,
   NDescriptions,
   NDescriptionsItem,
-  NDivider,
   NForm,
   NFormItem,
   NGrid,
@@ -32,7 +34,8 @@ import {
   NList,
   NListItem,
   NText,
-} from "naive-ui";import { TONE_BAD, TONE_MUTED, TONE_OK, statusTone } from "../lib/check-tone.js";
+} from "naive-ui";
+import { TONE_BAD, TONE_MUTED, TONE_OK, statusTone } from "../lib/check-tone.js";
 import { useConfig } from "../composables/useConfig.js";
 import { useStatus } from "../composables/useStatus.js";
 
@@ -100,8 +103,12 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
 </script>
 
 <template>
-  <NGrid class="cols" cols="1 700:2" responsive="screen" :x-gap="12" :y-gap="12">
-    <NGridItem>
+  <NGrid class="cols" cols="1 700:5" responsive="screen" :x-gap="12" :y-gap="12">
+    <!-- 中枢内容多（两个字段 + 三个事实 + 检查项），所以 5 份列里占 3 份。
+         不用 grid-template-columns 手写：naive 生成 repeat(5, minmax(0,1fr))，
+         span 3 + span 2 就是 3:2，也不必拿 !important 盖行内样式。
+         两栏不等高是预期的：NCard 不跟着行高长，不补 height:100%。 -->
+    <NGridItem span="1 700:3">
       <NCard size="small" title="中枢" :bordered="false" header-style="padding: 4px 16px" content-style="padding: 16px">
         <NForm class="fields" label-placement="top" size="small" :show-feedback="false">
           <NFormItem label="地址" :label-props="{ for: 'serverUrl' }">
@@ -132,9 +139,8 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
           </NFormItem>
         </NForm>
 
-        <NDivider class="sep" />
-
-        <!-- 事实行：三个短值，窄屏也放得下三列。
+        <!-- 事实行：三个短值，窄屏也放得下三列。紧跟在字段后面，不靠 margin-top:auto
+             把它推到底（那会重演被分隔线顶出去的那 49px 空白）。
              label-placement="top" 是显式写的：naive 的默认值目前恰好也是 top，
              但“标签在上、值在下”是这块的排版契约，不能赌默认值不变。 -->
         <NDescriptions
@@ -187,7 +193,7 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
       </NCard>
     </NGridItem>
 
-    <NGridItem>
+    <NGridItem span="1 700:2">
       <NCard size="small" title="身份" :bordered="false" header-style="padding: 4px 16px" content-style="padding: 16px">
         <NForm class="fields" label-placement="top" size="small" :show-feedback="false">
           <NFormItem label="门牌前缀" :label-props="{ for: 'peerPrefix' }">

@@ -148,7 +148,17 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* 卡片壳交给 n-card：这里只把「关着」这一档换成灰底，别的一律不动。
    data-off 仍在根节点上（MasterCard.vue），所以这条选择器照旧成立。 */
 .master[data-off="true"] { background: rgba(128, 128, 128, 0.035); }
-.master[data-off="true"] .n-card-header__main { opacity: 0.6; }
+/* 卡头默认字重是卡片标题那一档（600）。标题自己用 NText strong 留着，这一层拉回正文档 400。
+   选择器必须带 id：naive 的这条是 `.n-card > .n-card-header .n-card-header__main`
+   （三个类），`.master .n-card-header__main` 只有两个类，同属性下压不过它。 */
+#masterCard .n-card-header__main { font-weight: 400; }
+/* 但标题自己仍是卡片标题那一档（600）。NText 的 strong 在 naive 里是 500，
+   紧挨着中枢 / 身份 / 前置那几张卡头的 600，这一张看上去会细一档。 */
+.master .master-title { font-weight: 600; }
+/* 关闸时变暗的只有标题：.n-card-header__main 现在同时裹着说明那句，
+   而关闸时那句是 warn 档（NText type="error"），跟着一起降透明度会把唯一的红字压灰。
+   所以档位落在标题自己的 .master-title 上，说明的颜色交回 NText 的 type / depth。 */
+.master[data-off="true"] .master-title { opacity: 0.6; }
 
 /* ---------- 字段：只剩 naive 管不到的三个尺寸 ---------- */
 
@@ -162,6 +172,13 @@ body { background-color: rgba(0, 0, 0, 0.02); }
    于是那个下边距就成了空转的大间隙。这里改回间距节奏里的 8px。 */
 .fields .n-form-item { margin-bottom: 8px; }
 .fields .n-form-item:last-child { margin-bottom: 0; }
+/* 栅格里的两格不必再单独免除 8px：它们是各自 NGridItem 的最后一个子节点，
+   :last-child 那条已经命中（误加一条 .fields .n-grid .n-form-item 是死规则，已删）。 */
+
+/* 身份卡的超时 / 预算两个数字框各自吃满半格。naive 的 NInputNumber 默认宽 174px
+   （六位数字的自然宽），放进半格里会右侧空出一段，看上去像两个框不在同一个栅格。
+   与 .service-card .n-input-number 同一个理由、同一种写法。 */
+.cols .n-input-number { width: 100%; min-width: 0; }
 /* NFormItem 不指定字重，裸 <b> 会跟着浏览器的 bolder 一路变粗（实测 900）。
    事实行的值没有语义上的“强调”，回到旧的 560。 */
 .facts b { font-weight: 560; }
@@ -224,9 +241,11 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* ---------- 中枢 / 身份：事实行交给 NDescriptions ---------- */
 
-/* 三列表格与分隔线都由 NDescriptions / NDivider 画，这里只剩两处组件管不到的：
-   表格与上面字段的竖向距离，以及描述表自己的内边距归零（它自带 8px 会把卡撑高）。 */
-.facts { margin: 0; }
+/* 三列表格由 NDescriptions 画，这里只剩两处组件管不到的：
+   表格与上面字段的竖向距离（8px，就是字段之间那档节奏 —— 表格自带 th 内边距 0，
+   4px 会让标签贴到输入框下沿；分隔线删了之后也不能用 margin-top:auto 把它推到底），
+   以及描述表自己的内边距归零（它自带 8px 会把卡撑高）。 */
+.facts { margin: 8px 0 0; }
 .facts .n-descriptions-table { margin: 0; }
 
 .checks-block { margin-top: 4px; }

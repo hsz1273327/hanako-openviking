@@ -6,10 +6,15 @@
 //   - 说明那句话由 lib/panel-view.js 的 statusView 给（开 / 关两种文案）；
 //   - 关着时 .master[data-off="true"] 换成灰底（CSS 手写，不在这里写样式）。
 //
-// 形态全部交给 naive-ui：卡片壳是 n-card（title="总闸" 是卡头），
-// 开关行是 NSpace + NText + NSwitch（一句说明在左、开关在右），
-// 说明文字是 n-text（warn 档走 type="error"）。
+// 形态全部交给 naive-ui：卡片壳是 n-card，标题与说明同处卡头（#header），
+// 开关在 #header-extra，说明文字是 n-text（warn 档走 type="error"）。
 // 不再手写 .toggle / .toggle-copy / .master-hint 那一套。
+//
+// 整张卡**只有卡头没有正文**：「总闸 + 一句说明 + 一个开关」本来就是一行的事。
+// 改前标题独占一行、正文再吃 16px 上下内边距，整卡 90px 里 56px 是纯留白。
+// 不给默认 slot，n-card 就不渲染 .n-card-content（见 naive 的 Card.mjs）。
+// 也刻意不传 title="总闸"：naive 里 title 属性优先级高于 #header 槽，
+// 两个都写会把 #header 整个盖掉（标题又回到一行）。
 import { computed } from "vue";
 import { NCard, NSpace, NSwitch, NText } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
@@ -28,24 +33,26 @@ const hintType = computed(() => (view.value.masterHintWarn ? "error" : undefined
     id="masterCard"
     class="master"
     size="small"
-    title="总闸"
     :bordered="false"
     header-style="padding: 4px 16px"
-    content-style="padding: 16px"
     :data-off="state.controls.enabled ? 'false' : 'true'"
   >
-    <!-- 开关不可被会话覆盖，所以它不随任何页面状态禁用，只随写入结果回滚。
-         用 NThing 会多出一个空的 header 区（没给 title 也不省），白占 29px，
-         而这一行本来就是「一句说明 + 右边一个开关」，NSpace + NText 就够。 -->
-    <NSpace align="center" justify="space-between" :size="8" :wrap="false">
-      <NText id="masterHint" class="hint-body" :depth="hintDepth" :type="hintType">
-        {{ view.masterHint }}
-      </NText>
+    <!-- 卡头左侧：标题 + 一句说明（baseline 对齐，字号同一档）。
+         开关不可被会话覆盖，所以它不随任何页面状态禁用，只随写入结果回滚。 -->
+    <template #header>
+      <NSpace align="baseline" :size="8" :wrap="false">
+        <NText strong class="hint-body master-title">总闸</NText>
+        <NText id="masterHint" class="hint-body" :depth="hintDepth" :type="hintType">
+          {{ view.masterHint }}
+        </NText>
+      </NSpace>
+    </template>
+    <template #header-extra>
       <NSwitch
         aria-label="总闸"
         :value="state.controls.enabled"
         @update:value="(next) => flip('enabled', next)"
       />
-    </NSpace>
+    </template>
   </NCard>
 </template>

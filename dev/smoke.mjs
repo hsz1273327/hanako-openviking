@@ -1146,15 +1146,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["<GlobalPanel", "<MemoryPanel", "<SkillPanel", "<LogsPanel"].every((needle) => app.includes(needle)));
 
   // ---- 中枢 / 身份两栏：NGrid 两列 > 两张 NCard ----
+  // cols 用 5 份：中枢 span 3 / 身份 span 2。naive 只吃整数份数，没有分数列。
   check(
-    "HubIdentity 是两栏 NGrid（1 700:2，跟旧 760px 断点对齐）",
-    /<NGrid class="cols" cols="1 700:2" responsive="screen"/.test(hub),
+    "HubIdentity 是两栏 NGrid（1 700:5）",
+    /<NGrid class="cols" cols="1 700:5" responsive="screen"/.test(hub),
     hub.slice(0, 200),
   );
+  check("两栏 3:2 由 span 表达（中枢 3 / 身份 2）",
+    hub.includes('span="1 700:3"') && hub.includes('span="1 700:2"') &&
+      hub.indexOf('span="1 700:3"') < hub.indexOf('span="1 700:2"') &&
+      hub.indexOf('title="中枢"') > hub.indexOf('span="1 700:3"') &&
+      hub.indexOf('title="身份"') > hub.indexOf('span="1 700:2"'),
+    hub.slice(0, 240));
   check("两栏栅格用 screen 断点（不是 self，避免首帧单列闪烁）",
     /<NGrid class="cols"[^>]*responsive="screen"/.test(hub));
   eq("两栏里恰好两张卡", (hub.match(/<NCard\b/g) || []).length, 2);
-  eq("两栏各自一格 NGridItem", (hub.match(/<NGridItem>/g) || []).length >= 2, true);
+  eq("两栏各自一格 NGridItem（外层两个 + 身份卡内两个半格）",
+    (hub.match(/<NGridItem\b/g) || []).length, 4);
   check("两栏标题是「中枢」「身份」", hub.includes('title="中枢"') && hub.includes('title="身份"'));
   check(
     "中枢在前、身份在后",
@@ -1187,6 +1195,50 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["timeoutMs", "budgetTokens"].every((needle) => hub.indexOf(`id: '${needle}'`) > pairGridIdx));
   check("手写的成对栅格规则已从 panel.css 删掉",
     /\.field\.pair\s*\{/.test(css) === false && /\.fact\.wide\s*\{/.test(css) === false);
+
+  // ---- 事实行没有分隔线，紧跟在 NForm 后面 ----
+  check("中枢里没有分隔线（NDivider 的自带外边距就是那 49px 空白）",
+    /<NDivider\b/.test(hub) === false && hub.includes("NDivider") === false &&
+      /<\/NForm>\s*<NDescriptions/.test(hub),
+    hub.slice(hub.indexOf("</NForm>"), hub.indexOf("</NForm>") + 260));
+  check("事实行不靠 margin-top:auto 推到底",
+    /margin-top\s*:\s*auto/.test(ruleBody(css, ".facts") || "") === false,
+    ruleBody(css, ".facts") || "");
+  check("身份卡两个数字框吃满半格（.cols .n-input-number 宽 100%）",
+    /width\s*:\s*100%/.test(ruleBody(css, ".cols .n-input-number") || ""),
+    ruleBody(css, ".cols .n-input-number") || "");
+  check("两栏不靠 height:100% / align-items:stretch 强制等高",
+    /height\s*:\s*100%/.test(ruleBody(css, ".cols") || "") === false &&
+      /align-items\s*:\s*stretch/.test(ruleBody(css, ".cols") || "") === false);
+  check("关闸变淡落在标题上（.master-title），不连带说明那句的红字",
+    /\.master\[data-off="true"\] \.master-title \{[\s\S]{0,40}opacity\s*:\s*0\.6/.test(css) &&
+      /\.master\[data-off="true"\] \.n-card-header__main \{[\s\S]{0,40}opacity/.test(css) === false);
+  // naive 的这条选择器是 `.n-card > .n-card-header .n-card-header__main`（三个类），
+  // 两个类的 .master .n-card-header__main 同属性下压不过它，所以必须带 id。
+  check("卡头里的说明不被标题字重带粗（#masterCard .n-card-header__main 回 400）",
+    /font-weight\s*:\s*400/.test(ruleBody(css, "#masterCard .n-card-header__main") || ""));
+  // NText strong 在 naive 里是 500（--n-strong-font-weight），而其它卡头的标题是 600。
+  // 同一页上两张卡的标题不该差一档，所以这一条钉在 600。
+  check("总闸标题字重跟其它卡头一致（600，不是 NText strong 的 500）",
+    /font-weight\s*:\s*600/.test(ruleBody(css, ".master .master-title") || ""),
+    ruleBody(css, ".master .master-title") || "(规则不存在)");
+  check("总闸 / 身份这几个卡里没有负 margin 或 translateY 硬拉",
+    /margin\s*:[^;]*-\d/.test([master, hub].join("\n")) === false &&
+      /translateY\(\s*-/.test([master, hub].join("\n")) === false &&
+      /margin\s*:[^;}]*?-\d/.test(css) === false &&
+      /translateY\(\s*-/.test(css) === false);
+
+  // ---- 总闸：只有卡头，没有正文 ----
+  check("总闸卡只有卡头（#header + #header-extra，没有默认 slot）",
+    /<template #header>[\s\S]{0,400}id="masterHint"[\s\S]{0,300}?<\/template>/.test(master) &&
+      /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(master) &&
+      /<\/template>\s*<template #header-extra>/.test(master) &&
+      /<template #header-extra>[\s\S]{0,300}<\/template>\s*<\/NCard>/.test(master),
+    master.slice(master.indexOf("<template")));
+  check("总闸不再传 title 属性（title 会盖掉 #header 槽）",
+    /<NCard\b[^>]*\btitle=/.test(master) === false && master.includes("总闸"), master.slice(0, 1200));
+  check("总闸卡没有 content-style（没正文就不给内边距）",
+    master.includes("content-style") === false, master);
 
   // ---- 事实行交给 NDescriptions（三列、label 在上、无边框） ----
   // 以前这里是「NGrid cols="1 520:3" + 三个 .fact」，靠手写 CSS 做 label 在上。
@@ -3462,8 +3514,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /#panel-global > \.prelude \.services \{[\s\S]{0,80}flex\s*:\s*1 1 auto/.test(css));
   // 这三块现在是组件的根节点：n-card / n-grid 的根元素都接 attrs，
   // 所以 #panel-global > .master 这类选择器仍然落在同一个位置。
-  check("总闸组件根节点是 n-card.master（title=总闸）",
-    /<NCard\b[\s\S]{0,240}class="master"/.test(master) && master.includes('title="总闸"'));
+  check("总闸组件根节点是 n-card.master（标题在 #header 里）",
+    /<NCard\b[\s\S]{0,240}class="master"/.test(master) &&
+      /<template #header>[\s\S]{0,240}总闸/.test(master) &&
+      master.includes('title="总闸"') === false);
   check("前置组件根节点是 n-card.prelude（id=prelude）",
     /<NCard\b[\s\S]{0,240}id="prelude"/.test(prelude) && prelude.includes('title="前置"'));
   check("两栏组件根节点是 n-grid.cols", /<NGrid class="cols"/.test(hub));
@@ -9331,9 +9385,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("hidden 兜底仍在（flex / grid 不能把 hidden 顶掉）",
     /display\s*:\s*none\s*!important/.test(ruleBody(css, ".page [hidden]") || ""));
 
-  // ---- 卡片全是 NCard，title 一个都不能少 ----
+  // ---- 卡片全是 NCard，标题一个都不能少 ----
+  // 总闸是唯一的例外：它的标题走 #header 槽而不是 title 属性（title 与槽同时写时
+  // naive 只取 title，标题就又独占一行了）。所以它的断言查 #header。
   const titledCards = [
-    ["总闸", /<NCard\b[\s\S]{0,240}title="总闸"/, master],
+    ["总闸", /<template #header>[\s\S]{0,240}总闸/, master],
     ["中枢", /<NCard\b[\s\S]{0,240}title="中枢"/, hub],
     ["身份", /<NCard\b[\s\S]{0,240}title="身份"/, hub],
     ["前置", /<NCard\b[\s\S]{0,240}title="前置"/, prelude],
@@ -9372,10 +9428,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /<template #header-extra>[\s\S]{0,160}id="logChips"/.test(logsPanel),
       /<template #header-extra>[\s\S]{0,200}<NSwitch/.test(skillRoute),
       /<template #header-extra>[\s\S]{0,260}?:id="row\.testId"/.test(prelude)].every(Boolean));
-  // 总闸那一行不是卡头附件：标题就是卡头「总闸」，说明与开关是正文里的一行（NSpace）。
-  check("总闸那一行是 NSpace + NText + NSwitch（说明在左、开关在右）",
-    /<NSpace[\s\S]{0,200}id="masterHint"/.test(master) &&
-      /<NSwitch[\s\S]{0,200}aria-label="总闸"/.test(master));
+  // 总闸那一行就是卡头：标题 + 说明在 #header（NSpace baseline），开关在 #header-extra。
+  // 改前标题占卡头、说明与开关占正文，整卡 90px 里 56px 是那行正文的留白。
+  check("总闸那一行在卡头（#header 里 NText 说明 + #header-extra 里 NSwitch）",
+    /<template #header>[\s\S]{0,200}<NSpace[\s\S]{0,200}id="masterHint"/.test(master) &&
+      /<template #header-extra>[\s\S]{0,200}<NSwitch[\s\S]{0,200}aria-label="总闸"/.test(master) &&
+      /<NSpace[\s\S]{0,200}class="hint-body master-title"[\s\S]{0,120}总闸/.test(master));
   check("NCard 不降到 tiny（压内边距，不压字号）",
     /size="tiny"/.test([master, hub, prelude, recall, channels, logsPanel, skillRoute].join("\n")) === false &&
       [master, prelude, recall, logsPanel, skillRoute].every((source) => source.includes('size="small"')));
@@ -9386,7 +9444,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 栅格：NGrid 用 screen 断点 + 数字断点，不写自定义列宽 ----
   const grids = [
-    ["中枢 / 身份两栏", hub, 'cols="1 700:2"'],
+    ["中枢 / 身份两栏", hub, 'cols="1 700:5"'],
     ["召回三个主下拉", recall, 'cols="1 700:3"'],
     ["两个展开区", recall, 'cols="1 700:2"'],
     ["通道四格", channels, 'cols="1 520:2 700:4"'],
