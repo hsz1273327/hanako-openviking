@@ -11,6 +11,7 @@ import {
   DEFAULT_GATE_DECISION_PROMPT,
   GATE_PROMPT_MAX,
   QUERY_MODES,
+  RECALL_GATE_FALLBACKS,
   RECALL_GATES,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_URL_MAX,
@@ -20,6 +21,7 @@ import {
   SERVICE_MODEL_MAX,
   normalizeGateModel,
   normalizeGateDecisionPrompt,
+  normalizeGateFallback,
   normalizeGatePrompt,
   normalizeQueryMode,
   normalizeRerank,
@@ -33,6 +35,7 @@ import {
   parseRerankChannels,
   readSwitches,
   resolveRecallGate,
+  serializeGateDecisionThreshold,
   serializeServiceTimeout,
   servicePairError,
   serviceTimeoutOrDefault,
@@ -47,6 +50,7 @@ import { sessionKeyOf } from "../src/state/session.js";
 
 const SPECS = Object.freeze({
   recallGate: RECALL_GATES,
+  gateFallback: RECALL_GATE_FALLBACKS,
   queryMode: QUERY_MODES,
   rerank: RERANK_MODES,
 });
@@ -150,12 +154,20 @@ async function current(ctx) {
       systemoneServiceUrl,
       systemoneServiceModel,
     }),
+    // 判断失败时的兜底：脏值 / 缺项一律归一化回 recall。与档位无关地读出来，
+    // 切到 off / rules 再切回来时用户填的那条还在。
+    gateFallback: normalizeGateFallback(await ctx.config.get("gateFallback")),
     queryMode: normalizeQueryMode(await ctx.config.get("queryMode")),
     gatePrompt: normalizeGatePrompt(await ctx.config.get("gatePrompt")),
     // 这一项的默认值不是空串：没配过时投影出那句默认题面（读侧与 readSwitches 同口径）。
     // 用户明确清空（存了空串）仍然是空串——空就是「没有判据」，不拿默认去盖。
     gateDecisionPrompt: normalizeGateDecisionPrompt(
       (await ctx.config.get("gateDecisionPrompt")) ?? DEFAULT_GATE_DECISION_PROMPT,
+    ),
+    // 召回门槛：脏值 / 缺项一律画成 0.45（与 readSwitches 同口径）。只在 decision 档用它。
+    // 投影字符串，与超时那一组同口径（读侧要数字，写侧存串）。
+    gateDecisionThreshold: serializeGateDecisionThreshold(
+      await ctx.config.get("gateDecisionThreshold"),
     ),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
     rerank: normalizeRerank(await ctx.config.get("rerank")),
@@ -246,6 +258,19 @@ export default function registerRecallModeRoutes(app, ctx) {
         );
       }
       changes.push(["gateDecisionPrompt", body.gateDecisionPrompt]);
+    }
+
+    if (has(body, "gateDecisionThreshold")) {
+      const raw = body.gateDecisionThreshold;
+      // 类型不对才拒；形状对但越界 / 不是数字的归一化回 0.45 再落库，
+      // 与超时那一组同一取舍：一个数字填错不该打断整单，也不该把 -1 留在配置里。
+      if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+        return c.json(
+          { ok: false, error: "gateDecisionThreshold 必须是数字、字符串或 null" },
+          400,
+        );
+      }
+      changes.push(["gateDecisionThreshold", serializeGateDecisionThreshold(raw)]);
     }
 
     if (has(body, "gateModel")) {

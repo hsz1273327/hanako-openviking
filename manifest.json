@@ -77,6 +77,14 @@
             "enum": ["off", "rules", "llm", "decision"],
             "ui": { "enumLabels": ["关闭", "规则判断", "语言模型判断", "决策模型判断"] }
           },
+          "gateFallback": {
+            "type": "string",
+            "title": "判断失败时",
+            "description": "只对「语言模型判断」与「决策模型判断」两档生效：模型判断失败（网络错、超时、返回结构不认识、提示词为空）时怎么办。recall 照常召回（默认，不过滤）；rules 退到规则判断跑一遍，规则说跳过才跳过。另两档不依赖外部服务，不受这个设置影响。非法值归一化成 recall。",
+            "default": "recall",
+            "enum": ["recall", "rules"],
+            "ui": { "enumLabels": ["照常召回（不过滤）", "退到规则判断"] }
+          },
           "gatePrompt": {
             "type": "string",
             "title": "判断提示词",
@@ -88,6 +96,12 @@
             "title": "决策判断提示词",
             "description": "决策模型判断（decision 档）使用的题面，最长 2000 字符。判定标准由内置的两条 criteria 描述决定，这一格只决定怎么问。用 {{message}} 表示当前这条用户消息，写了就地替换；没写就只发这句题面（消息本身在 state 里）。留空表示不拦截任何召回。与语言模型判断那份分开存、互不影响。",
             "default": "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？"
+          },
+          "gateDecisionThreshold": {
+            "type": "string",
+            "title": "决策召回门槛",
+            "description": "决策模型判断（decision 档）的置信度门槛，0 到 1，默认 0.45。need 且 confidence ≥ 门槛才召回。调高更少查，调低更多查。只在 decision 档生效，非法值归一化回 0.45。",
+            "default": "0.45"
           },
           "gateModel": {
             "type": "string",

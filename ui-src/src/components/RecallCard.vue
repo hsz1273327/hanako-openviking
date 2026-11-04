@@ -6,8 +6,8 @@
 // 召回判断四档（关闭 / 规则判断 / 语言模型判断 / 决策模型判断），展开区间不一样：
 //   off / rules —— 什么都不展开；
 //   llm         —— 展开提示词（gatePrompt）与判断模型（宿主生成式模型）；
-//   decision    —— 展开提示词（gateDecisionPrompt）与一行决策服务状态，
-//                  判断模型下拉隐藏（模型由服务配置决定）。
+//   decision    —— 展开提示词（gateDecisionPrompt）、召回门槛（gateDecisionThreshold）
+//                  与一行决策服务状态，判断模型下拉隐藏（模型由服务配置决定）。
 // 两份提示词是同一位置、同一套三态与「恢复默认」，但绑的键不同：分开存、分开提交，
 // 改一份不动另一份，切档也不丢内容。
 //
@@ -33,12 +33,19 @@
 //     （span.field-label）+ 控件自带 aria-label，文字逐字一致。
 // NSelect 的 id 仍走 :input-props：裸 id 会落到外层 <div class="n-select">，别让 id 与标签错位。
 import { computed } from "vue";
-import { NButton, NCard, NGrid, NGridItem, NInput, NSelect } from "naive-ui";
+import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSelect } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import {
+  GATE_DECISION_THRESHOLD_DEFAULT,
+  GATE_DECISION_THRESHOLD_HINT,
+  GATE_DECISION_THRESHOLD_MAX,
+  GATE_DECISION_THRESHOLD_MIN,
+  GATE_DECISION_THRESHOLD_STEP,
   decisionServiceConfigured,
   decisionServiceView,
+  gateFallbackOptions,
+  gateHasFailurePath,
   recallGateOptions,
 } from "../lib/recall-layers.js";
 
@@ -46,6 +53,7 @@ const {
   state,
   enabled,
   setForm,
+  setDecisionThreshold,
   setPrompt,
   touchPrompt,
   resetPrompt,
@@ -80,6 +88,10 @@ const decisionService = computed(() => decisionServiceView(state.layers));
 
 // 判断模型下拉的选项：默认（宿主辅助模型）+ 目录；目录读不到也保留默认项。
 const gateModelOptions = computed(() => options(state.form.gateModel));
+
+// 「判断失败时」只在会去问外部服务的两档出现：off / rules 自己就是判据，没有失败路径。
+const fallbackOptions = Object.freeze(gateFallbackOptions());
+const fallbackOpen = computed(() => gateHasFailurePath(state.form.recallGate));
 
 const QUERY_MODE_OPTIONS = Object.freeze([
   { label: "最后一句", value: "last" },
@@ -122,7 +134,23 @@ function onPromptChange(value) {
             :value="state.form.recallGate"
             @update:value="(value) => onSelect('recallGate', value)"
           />
-          <span class="field-hint">规则判断只认 ≤8 字、无问号、无疑问词、无指代词的指令；语言模型判断或决策模型判断失败、超时会照常召回。</span>
+          <span class="field-hint">规则判断只认 ≤8 字、无问号、无疑问词、无指代词的指令；两档模型判断失败、超时按下面的「判断失败时」处理。</span>
+        </div>
+      </NGridItem>
+      <!-- 判断失败时怎么兜底：只对 llm / decision 两档显示（另两档不依赖外部服务）。
+           跟其它下拉一样改了就整单提交，失败由 store 回滚。 -->
+      <NGridItem v-if="fallbackOpen">
+        <div class="field">
+          <span class="field-label">判断失败时</span>
+          <NSelect
+            size="small"
+            aria-label="判断失败时"
+            :options="fallbackOptions"
+            :input-props="{ id: 'gateFallback' }"
+            :value="state.form.gateFallback"
+            @update:value="(value) => onSelect('gateFallback', value)"
+          />
+          <span class="field-hint">网络错、超时、返回结构不认识、提示词为空都算失败：照常召回不过滤，或退到规则判断（≤8 字且无问号、无疑问词、无指代词才跳过）。</span>
         </div>
       </NGridItem>
       <NGridItem>
@@ -168,10 +196,34 @@ function onPromptChange(value) {
               @change="onPromptChange"
             />
             <!-- 两份用法不一样：语言模型是「生成一句话再解析」，决策模型是「在两条内置描述之间选一个」。
-                 占位符写法在模板里要 v-pre，否则会被当成插值。 -->
-            <span v-if="!decisionOpen" class="field-hint" v-pre>用 {{message}} 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
-            <span v-else id="decisionPromptHint" class="field-hint" v-pre>这一格是题面，不是让模型生成文本：判定标准由内置的两条描述决定（有指代或省略 / 自己把话说完整），模型只在两者之间选一个并给出置信度。选「有指代或省略」且置信度 ≥ 0.45 时照常召回，选「自己把话说完整」时跳过召回。
-              用 {{message}} 表示当前这条用户消息；没写它时这句就是纯题面（消息本身在 state 里，不会重复发）。</span>
+                 占位符不能靠 v-pre 躲：v-pre 会连 v-if 一起跳过，两个 span 会同时渲染。
+                 用 HTML 实体写双花括号，编译期不当插值，渲染出来仍是 {{message}}。 -->
+            <span v-if="!decisionOpen" class="field-hint">用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
+            <span v-else id="decisionPromptHint" class="field-hint">这一格是题面，不是让模型生成文本：判定标准由内置的两条描述决定（有指代或省略 / 自己把话说完整），模型只在两者之间选一个并给出置信度。选「有指代或省略」且置信度不低于下面的召回门槛（默认 0.45）时照常召回，选「自己把话说完整」时跳过召回。
+              用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它时这句就是纯题面（消息本身在 state 里，不会重复发）。</span>
+          </div>
+        </NGridItem>
+
+        <!-- 召回门槛只属于 decision 档：need 且置信度够得着才召回。
+             与提示词同一个展开区，位置在题面之后、模型下拉之前；
+             失焦 / 回车才提交，清空不提交、回填已确认值（store.setDecisionThreshold）。 -->
+        <NGridItem v-if="decisionOpen">
+          <div class="field">
+            <label for="gateDecisionThreshold">召回门槛</label>
+            <NInputNumber
+              size="small"
+              style="width: 100%"
+              :show-button="false"
+              :update-value-on-input="false"
+              :min="GATE_DECISION_THRESHOLD_MIN"
+              :max="GATE_DECISION_THRESHOLD_MAX"
+              :step="GATE_DECISION_THRESHOLD_STEP"
+              :placeholder="String(GATE_DECISION_THRESHOLD_DEFAULT)"
+              :input-props="{ id: 'gateDecisionThreshold' }"
+              :value="state.form.gateDecisionThreshold"
+              @update:value="(value) => setDecisionThreshold(value)"
+            />
+            <span id="gateDecisionThresholdHint" class="field-hint">{{ GATE_DECISION_THRESHOLD_HINT }}</span>
           </div>
         </NGridItem>
 
@@ -194,8 +246,8 @@ function onPromptChange(value) {
       </NGrid>
     </div>
 
-    <!-- 只有 recallGate=decision 时才展开：模型由服务配置决定，所以这里没有输入框，
-         只有一行状态（服务没配时这一档根本选不到，存量会归一化成 off）。 -->
+    <!-- 只有 recallGate=decision 时才展开：模型由服务配置决定，所以这里没有模型输入框。
+         这里只剩决策服务状态行（服务没配时这一档根本选不到，存量会归一化成 off）。 -->
     <div id="decisionService" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!decisionOpen">
       <div class="field">
         <span class="field-hint">{{ decisionService.text }}</span>

@@ -37,6 +37,41 @@ export function recallGateOptions(configured) {
   return options;
 }
 
+/**
+ * 判断失败时的兜底：recall 照常召回（默认）/ rules 退到规则判断。
+ *
+ * 与 src/ov/settings.js 的 RECALL_GATE_FALLBACKS 同值；只对 llm / decision 两档有意义。
+ */
+export const RECALL_GATE_FALLBACKS = Object.freeze(["recall", "rules"]);
+
+/** 兜底的两条中文说法，与 manifest.json 的 enumLabels 逐字一致。 */
+export const RECALL_GATE_FALLBACK_LABELS = Object.freeze({
+  recall: "照常召回（不过滤）",
+  rules: "退到规则判断",
+});
+
+/** 「判断失败时」下拉的选项（只有两个，不看服务是否配好）。 */
+export function gateFallbackOptions() {
+  return RECALL_GATE_FALLBACKS.map((value) => ({
+    value,
+    label: RECALL_GATE_FALLBACK_LABELS[value],
+  }));
+}
+
+/** 与 src/ov/settings.js 的 normalizeGateFallback 同口径：非法值回 recall。 */
+export function normalizeGateFallback(value) {
+  return oneOf(value, RECALL_GATE_FALLBACKS, "recall");
+}
+
+/**
+ * 这一档有没有失败路径：只有 llm / decision 会去问外部服务。
+ *
+ * off / rules 自己就是判据，没有「失败」这回事，面板上也不该出现这一项。
+ */
+export function gateHasFailurePath(gate) {
+  return gate === "llm" || gate === "decision";
+}
+
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
@@ -446,6 +481,35 @@ export function normalizeGateDecisionPrompt(value) {
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
 }
 
+// 召回门槛的默认值 / 边界 / 步长，与 src/ov/settings.js 的 GATE_DECISION_THRESHOLD_* 同值。
+// 步长只影响数字框的加减手感，不是归一化要圆整到的格点。
+export const GATE_DECISION_THRESHOLD_DEFAULT = 0.45;
+export const GATE_DECISION_THRESHOLD_MIN = 0;
+export const GATE_DECISION_THRESHOLD_MAX = 1;
+export const GATE_DECISION_THRESHOLD_STEP = 0.05;
+
+/**
+ * 与 src/ov/settings.js 的 normalizeGateDecisionThreshold 同口径：
+ * 0–1 之间（含两端）给数字，空串 / 非数字 / 越界一律回 0.45。
+ * 越界值不夹到边界：夹成 0 或 1 会把「填错了」变成「永远查 / 永远不查」。
+ */
+export function normalizeGateDecisionThreshold(value) {
+  let parsed;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && value.trim()) parsed = Number(value.trim());
+  else return GATE_DECISION_THRESHOLD_DEFAULT;
+  if (!Number.isFinite(parsed)) return GATE_DECISION_THRESHOLD_DEFAULT;
+  if (parsed < GATE_DECISION_THRESHOLD_MIN || parsed > GATE_DECISION_THRESHOLD_MAX) {
+    return GATE_DECISION_THRESHOLD_DEFAULT;
+  }
+  return parsed;
+}
+
+/**
+ * 数字框旁边那句小字。方向必须写出来：「调高」听起来像「查得更狠」，实际是更少查。
+ */
+export const GATE_DECISION_THRESHOLD_HINT = "0.45 为默认；调高更少查，调低更多查";
+
 /** 与 src/ov/settings.js 的 normalizeRerank 同口径：不认识的、类型不对的一律回 off。 */
 export function normalizeRerank(value) {
   return oneOf(value, RERANK_MODES, "off");
@@ -573,11 +637,17 @@ export function paintGateConfig(out) {
   };
 }
 
-/** decision 那一块自己的字段：一份与 gatePrompt 完全分开的判据。 */
+/** decision 那一块自己的字段：一份与 gatePrompt 完全分开的判据，加一个自己的召回门槛。 */
 export function paintDecisionConfig(out) {
   return {
     gateDecisionPrompt: normalizeGateDecisionPrompt(out?.gateDecisionPrompt),
+    gateDecisionThreshold: normalizeGateDecisionThreshold(out?.gateDecisionThreshold),
   };
+}
+
+/** 兜底那一格：服务端投影的脏值 / 缺项一律画成 recall。 */
+export function paintGateFallbackConfig(out) {
+  return { gateFallback: normalizeGateFallback(out?.gateFallback) };
 }
 
 /** 重排通道的界面归一化：只收敛形状，不丢用户正在编辑的行。 */
@@ -704,6 +774,7 @@ export function paintRecallConfig(out) {
     ...paintLayers(out),
     ...paintGateConfig(out),
     ...paintDecisionConfig(out),
+    ...paintGateFallbackConfig(out),
     ...paintRerankConfig(out),
     ...paintScoringConfig(out),
   };

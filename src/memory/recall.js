@@ -16,6 +16,9 @@ import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
+  GATE_DECISION_THRESHOLD_DEFAULT,
+  normalizeGateDecisionThreshold,
+  normalizeGateFallback,
   normalizeServiceTimeout,
   parseRerankChannels,
   readConnection,
@@ -106,6 +109,16 @@ export function isShortOperationCommand(text, limit = GATE_MAX_CHARS) {
 export function shouldSkipRecall(text, gate = "off") {
   if (gate !== "rules") return false;
   return isShortOperationCommand(text);
+}
+
+/**
+ * 判断失败时的兜底：recall（照常召回，默认）或 rules（退到规则判断）。
+ *
+ * 只有 llm / decision 两档有失败路径，但这里不按档位过滤：调用方只在两档的失败
+ * 分支里用它，所以 off / rules 拿到什么都没人看。取值仍走一遍归一化，脏值回 recall。
+ */
+export function gateFallbackOf(switches) {
+  return normalizeGateFallback(switches?.gateFallback);
 }
 
 /**
@@ -658,7 +671,8 @@ function noulScoreOf(value) {
  * decision 让决策模型（/v1/systemone）做一道选择题——这句话自己说完整了，
  * 还是得靠上文才知道在说什么。题型是 type=choice + criteria 两条内置描述，
  * 服务端回 choice 与 confidence，不生成文本。所以它不吃 gatePrompt / gateModel，
- * 用的是「打分服务」那组配置（systemoneService*）加自己的题面 gateDecisionPrompt。
+ * 用的是「打分服务」那组配置（systemoneService*）、自己的题面 gateDecisionPrompt，
+ * 以及自己的召回门槛 gateDecisionThreshold（confidence 要够得着才召回）。
  *
  * 为什么不是 noul：noul 等于让模型对一句话泛泛打一个相似度，实测真实对话 17 条
  * 分数全挤在 0.20–0.42，该召回的十条一条没判出来。choice + criteria 把判定标准
@@ -689,8 +703,23 @@ export const DECISION_GATE_CRITERIA = Object.freeze({
   standalone: "这句话自己把话说完整了。它给出了具体对象、具体诉求或具体判断，即使完全没有上下文，也能直接照着做或直接回答。问句里主语和对象都写全了的（例如「主进程的 node 能不能用」），算这一边。",
 });
 
-/** 选了 need 且置信度不低于这个数才算需要召回；低于它就是不需要。 */
-export const DECISION_GATE_THRESHOLD = 0.45;
+/**
+ * 默认召回门槛（need 且置信度不低于它才算需要召回）。
+ *
+ * 与配置默认值（src/ov/settings.js 的 DEFAULTS.gateDecisionThreshold）同一个数：调用方不给门槛
+ * 时用它，所以「没配过」与「配了 0.45」是同一个行为。
+ */
+export const DECISION_GATE_THRESHOLD = GATE_DECISION_THRESHOLD_DEFAULT;
+
+/**
+ * 这一轮生效的召回门槛：配置项 gateDecisionThreshold（0–1，默认 0.45）。
+ *
+ * 归一化（非法值回 0.45）在读取侧已经做过一次，这里再走同一条函数，
+ * 是为了让直接拿裸配置调用的地方（测试 / 将来的其它入口）也吃同一份边界。
+ */
+export function gateDecisionThresholdOf(switches) {
+  return normalizeGateDecisionThreshold(switches?.gateDecisionThreshold);
+}
 
 /**
  * 没配超时时的默认值：这一档一次只问一个问题（单题一次前向），
@@ -794,20 +823,23 @@ export async function askDecisionGate(sdk, switches, text, prompt) {
 /**
  * 答案 -> 这一轮跳不跳召回。
  *
- * 需要召回 ⟺ choice === "need" 且 confidence >= 0.45；其余一律跳过召回。
+ * 需要召回 ⟺ choice === "need" 且 confidence >= 门槛；其余一律跳过召回。
  * 方向与 llm 档同源：need（有指代 / 省略）= 得靠上文，所以召回；
  * standalone（自己把话说完整）= 不靠上文，所以跳过。置信度用服务端算好的那一个，
- * 不拿 probabilities 重算；need 但置信度不够（< 0.45）按「不算需要召回」处理。
+ * 不拿 probabilities 重算；need 但置信度不够（< 门槛）按「不算需要召回」处理。
+ *
+ * 门槛由调用方按配置给（gateDecisionThresholdOf），不给就用默认 0.45。
+ * 比的是 >=：等于门槛算「够」，所以跳过要求严格小于——差一个等号就是差一整条行为。
  * 形状不对的答案（没 choice / choice 不认识 / confidence 不是数）不该走到这里
  * （askDecisionGate 已经拦过），真到了也按「召回」处理——判断失败不能变成漏召回。
  */
-export function decisionGateSkips(answer) {
+export function decisionGateSkips(answer, threshold = DECISION_GATE_THRESHOLD) {
   if (!answer || typeof answer !== "object") return false;
   if (answer.choice !== "need" && answer.choice !== "standalone") return false;
   const confidence = Number(answer.confidence);
   if (!Number.isFinite(confidence)) return false;
   if (answer.choice === "standalone") return true;
-  return confidence < DECISION_GATE_THRESHOLD;
+  return confidence < normalizeGateDecisionThreshold(threshold);
 }
 
 /**
@@ -1807,13 +1839,34 @@ export function createRecallHandler(sdk, options = {}) {
     // 一旦有历史就必然超 8 字，rules 会被整个抵消掉。
     // 召回判断：rules 只看极短纯操作指令；llm 让宿主的生成式模型回答（语言模型判断）；
     // decision 让决策模型（/v1/systemone）在 need / standalone 之间选一个（决策模型判断）。
-    // 任何一档失败 / 超时 / 没配置一律按「召回」走——判断失败不能变成漏召回。
+    //
+    // 判断失败（网络错 / 超时 / 返回结构不认识 / 题面为空）时按 gateFallback 兜底：
+    //   recall（默认）——照常召回，判断失败不能变成漏召回；
+    //   rules        ——退到规则判断跑一遍，规则说跳过才跳过。
+    // 兜底日志一律带 fallback=<走的那条>，看得出这一轮是模型判的、规则判的，还是干脆没判。
     let gateSkip = null;
+    const fallback = gateFallbackOf(switches);
+    const gateFailure = (label, detail = "") => {
+      const rulesSkip = fallback === "rules" && shouldSkipRecall(lastText, "rules");
+      if (rulesSkip) gateSkip = { by: "rules", reason: "short-operation-command" };
+      // 走哪条兜底说在前面，规则判了什么跟在后面：看日志就能分出
+      // 「问了模型但没做成」和「干脆没问」两件事，也能看出退到规则后规则怎么判的。
+      const tail =
+        fallback === "rules"
+          ? `fallback=rules, ${rulesSkip ? "skip" : "recall"}`
+          : "recall anyway, fallback=recall";
+      log(
+        sdk,
+        "info",
+        `gate: ${label}, ${tail} (session=${sessionId})${detail ? ` ${detail}` : ""}`,
+      );
+    };
+
     if (switches.recallGate === "llm") {
       const prompt = gatePromptOf(switches);
       if (!prompt) {
-        // 空提示词不是“用默认”：没有判据就不拦，模型根本不问。
-        log(sdk, "info", `gate: llm prompt empty, recall anyway (session=${sessionId})`);
+        // 空提示词不是“用默认”：没有判据就不问，按兜底走。
+        gateFailure("llm prompt empty");
       } else {
         try {
           const answer = await askGateModel(sdk, switches, lastText);
@@ -1821,11 +1874,7 @@ export function createRecallHandler(sdk, options = {}) {
             gateSkip = { by: "llm", reason: "llm-no-need" };
           }
         } catch (error) {
-          log(
-            sdk,
-            "info",
-            `gate: llm failed, recall anyway (session=${sessionId}) ${reasonOf(error)}`,
-          );
+          gateFailure("llm failed", reasonOf(error));
         }
       }
     } else if (switches.recallGate === "decision") {
@@ -1833,22 +1882,20 @@ export function createRecallHandler(sdk, options = {}) {
       const prompt = gateDecisionPromptOf(switches);
       if (!service.configured) {
         // 没配不是失败，是「没有判据」：照常召回，面板另给一句提示。不退回 llm。
+        // 这一档在读取侧就已经归一化成 off 了，走到这里只是兜底。
         log(sdk, "info", `gate: decision unconfigured, recall anyway (session=${sessionId})`);
       } else if (!prompt) {
-        // 空判据不是「用默认问法」：没有判据就不拦，一次请求都不发。
-        log(sdk, "info", `gate: decision prompt empty, recall anyway (session=${sessionId})`);
+        // 空判据不是「用默认问法」：没有判据就不问，按兜底走。
+        gateFailure("decision prompt empty");
       } else {
         try {
           const answer = await askDecisionGate(sdk, switches, lastText, prompt);
-          if (decisionGateSkips(answer)) {
+          // 门槛只在这一档生效：配置项读在调用处，别的档根本不会碰到它。
+          if (decisionGateSkips(answer, gateDecisionThresholdOf(switches))) {
             gateSkip = { by: "decision", reason: "decision-no-need" };
           }
         } catch (error) {
-          log(
-            sdk,
-            "info",
-            `gate: decision failed, recall anyway (session=${sessionId}) ${reasonOf(error)}`,
-          );
+          gateFailure("decision failed", reasonOf(error));
         }
       }
     } else if (shouldSkipRecall(lastText, switches.recallGate)) {

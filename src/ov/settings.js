@@ -17,6 +17,20 @@
 export const DEFAULT_GATE_DECISION_PROMPT =
   "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
 
+/**
+ * 决策模型判断的召回门槛：choice 是 need 且 confidence 不低于这个数才算「需要召回」。
+ *
+ * 0.45 是从 16 条样例上拟合出来的，不是某个客观常数：换一个决策模型、换一批对话风格，
+ * 最优阈值就会变。而且两个方向的错代价不同——漏召回用户立刻觉得「你怎么不记得」，
+ * 误召回只是多查一次，所以这个取舍交给用户，代码不再替他定。
+ */
+export const GATE_DECISION_THRESHOLD_DEFAULT = 0.45;
+
+/** 门槛的边界与输入步长。步长只影响面板上的加减手感，不是归一化要圆整到的格点。 */
+export const GATE_DECISION_THRESHOLD_MIN = 0;
+export const GATE_DECISION_THRESHOLD_MAX = 1;
+export const GATE_DECISION_THRESHOLD_STEP = 0.05;
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -33,9 +47,11 @@ export const DEFAULTS = {
   probe: false,
   excludedPeers: "",
   recallGate: "off",
+  gateFallback: "recall",
   queryMode: "last",
   gatePrompt: "",
   gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+  gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
   rerank: "off",
   rerankPrompt: "",
@@ -62,6 +78,16 @@ export const DEFAULTS = {
  * 第四档要有决策服务才有意义，所以归一化时按服务是否配好回退，见 resolveRecallGate。
  */
 export const RECALL_GATES = Object.freeze(["off", "rules", "llm", "decision"]);
+
+/**
+ * 判断失败时的兜底（只对 llm / decision 两档有意义）：
+ *   recall 照常召回（默认，保守；判断失败不能变成漏召回）
+ *   rules  退到规则判断跑一遍，规则说跳过才跳过
+ *
+ * off / rules 自己就是判据，不依赖外部服务，没有失败路径，这一项对它们不生效。
+ * 判据本身没有变（≤8 字、无问号、无疑问词、无指代词），变的只是「什么时候用它」。
+ */
+export const RECALL_GATE_FALLBACKS = Object.freeze(["recall", "rules"]);
 
 /** 召回查询：last 只用最后一句，context 拼最近几条用户文本。 */
 export const QUERY_MODES = Object.freeze(["last", "context"]);
@@ -130,6 +156,11 @@ export function normalizeRecallGate(raw) {
   return oneOf(raw, RECALL_GATES, DEFAULTS.recallGate);
 }
 
+/** 非法值（含缺省、类型不对）一律归一化回 recall：宁可多召回，也不静默少召回。 */
+export function normalizeGateFallback(raw) {
+  return oneOf(raw, RECALL_GATE_FALLBACKS, DEFAULTS.gateFallback);
+}
+
 export function normalizeQueryMode(raw) {
   return oneOf(raw, QUERY_MODES, DEFAULTS.queryMode);
 }
@@ -148,6 +179,30 @@ export function normalizeGatePrompt(raw) {
 export function normalizeGateDecisionPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/**
+ * 召回门槛的归一化：0–1 之间（含两端）给数字，其余一律回 0.45。
+ *
+ * 越界的值不夹到边界上：夹成 0 或 1 会让「我填错了」静默变成「永远查 / 永远不查」
+ * 两个极端之一，比直接回默认更难查。空串也回默认——Number("") 是 0，那不是用户的意思。
+ * 数字串接受（配置里可能被人手写成 "0.6"），读出来统一是数字。
+ */
+export function normalizeGateDecisionThreshold(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return GATE_DECISION_THRESHOLD_DEFAULT;
+  if (!Number.isFinite(value)) return GATE_DECISION_THRESHOLD_DEFAULT;
+  if (value < GATE_DECISION_THRESHOLD_MIN || value > GATE_DECISION_THRESHOLD_MAX) {
+    return GATE_DECISION_THRESHOLD_DEFAULT;
+  }
+  return value;
+}
+
+/** 写回配置的形状：一律存归一化后的数字串（与 serviceTimeout 同一口径，非法值存 "0.45"，不留脏值）。 */
+export function serializeGateDecisionThreshold(raw) {
+  return String(normalizeGateDecisionThreshold(raw));
 }
 
 /** 重排提示词与判断提示词同口径：空串表示“用内置默认模板”。 */
@@ -454,9 +509,12 @@ export async function readSwitches(sdk) {
       systemoneServiceUrl,
       systemoneServiceModel,
     }),
+    gateFallback: normalizeGateFallback(await read(sdk, "gateFallback")),
     queryMode: normalizeQueryMode(await read(sdk, "queryMode")),
     gatePrompt: normalizeGatePrompt(await read(sdk, "gatePrompt")),
     gateDecisionPrompt: normalizeGateDecisionPrompt(await read(sdk, "gateDecisionPrompt")),
+    // 只在 decision 档生效；别的档读到了也不用（见 src/memory/recall.js 的调用处）。
+    gateDecisionThreshold: normalizeGateDecisionThreshold(await read(sdk, "gateDecisionThreshold")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
     rerank: normalizeRerank(await read(sdk, "rerank")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),

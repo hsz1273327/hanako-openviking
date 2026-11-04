@@ -24,6 +24,7 @@ import {
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
+  GATE_DECISION_THRESHOLD_DEFAULT,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_LABELS,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS,
@@ -39,6 +40,8 @@ import {
   isCompleteRerankChannel,
   modelOptions,
   normalizeGateDecisionPrompt,
+  normalizeGateDecisionThreshold,
+  normalizeGateFallback,
   normalizeGatePrompt,
   normalizeRerankChannels,
   normalizeRerankPrompt,
@@ -177,6 +180,9 @@ export function createPanelStore(deps = {}) {
     // 控件此刻的值（下拉 / 提示词 / 打分服务草稿）。改了立刻提交。
     form: {
       recallGate: "off",
+      gateFallback: "recall",
+      // 决策档的召回门槛：初始值就是默认 0.45，首次 refresh 后以服务端投影为准。
+      gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
       rerank: "off",
       gateModel: "",
@@ -297,7 +303,15 @@ export function createPanelStore(deps = {}) {
     state.models.error = ok ? "" : String(payload?.error || "读不到模型目录");
   }
 
-  const FORM_KEYS = ["recallGate", "queryMode", "rerank", "gateModel", "rerankModel"];
+  const FORM_KEYS = [
+    "recallGate",
+    "gateFallback",
+    "gateDecisionThreshold",
+    "queryMode",
+    "rerank",
+    "gateModel",
+    "rerankModel",
+  ];
 
   /**
    * 服务端投影 → 控件值。
@@ -311,8 +325,16 @@ export function createPanelStore(deps = {}) {
    */
   function applyLayers(next, inline = null) {
     const pending = state.channels.filter((channel) => !isCompleteRerankChannel(channel));
-    const changedInFlight = (key, live) =>
-      Boolean(inline) && live !== (inline[key] === undefined ? "" : inline[key]);
+    const changedInFlight = (key, live) => {
+      if (!inline) return false;
+      const sent = inline[key] === undefined ? "" : inline[key];
+      // 门槛发出去的是数字串、界面上是数字：不归一化就会把“同一个值”看成
+      // 飞行期间又改了一笔，回滚时反而把新值留在框里。
+      if (key === "gateDecisionThreshold") {
+        return normalizeGateDecisionThreshold(live) !== normalizeGateDecisionThreshold(sent);
+      }
+      return live !== sent;
+    };
 
     state.layers = paintRecallConfig(next);
 
@@ -417,6 +439,13 @@ export function createPanelStore(deps = {}) {
     }
     return {
       recallGate: state.form.recallGate,
+      // 判断失败时的兜底：脏值归一化后再发（服务端整单校验会直接 400）。
+      gateFallback: normalizeGateFallback(state.form.gateFallback),
+      // 召回门槛：归一化后序列化成字符串再发，与超时那一组同口径（0–1 之外的值
+      // 在这里就回 0.45，不把 -1 发上去）。
+      gateDecisionThreshold: String(
+        normalizeGateDecisionThreshold(state.form.gateDecisionThreshold),
+      ),
       queryMode: state.form.queryMode,
       // 两份判据分开存、分开提交：改一份不会动另一份，切档也不丢内容。
       gatePrompt: normalizeGatePrompt(state.prompts.gate),
@@ -455,9 +484,14 @@ export function createPanelStore(deps = {}) {
           before: state.layers,
           next,
           send: (body) => {
-            const { rerankChannels, ...rest } = body;
+            const { rerankChannels, gateDecisionThreshold, ...rest } = body;
             return post("/recall-mode", {
               ...rest,
+              // commitLayers 的 normalize（paintRecallConfig）会把门槛收成数字给界面用，
+              // 发出去前再序列化一次：存库形状是数字串（与超时那一组同口径）。
+              gateDecisionThreshold: String(
+                normalizeGateDecisionThreshold(gateDecisionThreshold),
+              ),
               rerankChannels: rerankChannelsText(rerankChannels),
             });
           },
@@ -477,6 +511,8 @@ export function createPanelStore(deps = {}) {
 
   const LAYER_KEYS = [
     "recallGate",
+    "gateFallback",
+    "gateDecisionThreshold",
     "queryMode",
     "gatePrompt",
     "gateDecisionPrompt",
@@ -494,11 +530,20 @@ export function createPanelStore(deps = {}) {
   ];
 
   function sameLayers(a, b) {
-    return LAYER_KEYS.every((key) =>
-      key === "rerankChannels"
-        ? rerankChannelsText(a?.[key]) === rerankChannelsText(b?.[key])
-        : a?.[key] === b?.[key],
-    );
+    return LAYER_KEYS.every((key) => {
+      if (key === "rerankChannels") {
+        return rerankChannelsText(a?.[key]) === rerankChannelsText(b?.[key]);
+      }
+      // 门槛存的是数字串、界面上是数字：两边都归一化再比，否则 "0.8" !== 0.8
+      // 会让一单永远看起来“有变化”，保存死循环。
+      if (key === "gateDecisionThreshold") {
+        return (
+          normalizeGateDecisionThreshold(a?.[key]) ===
+          normalizeGateDecisionThreshold(b?.[key])
+        );
+      }
+      return a?.[key] === b?.[key];
+    });
   }
 
   async function saveConnection() {
@@ -531,9 +576,26 @@ export function createPanelStore(deps = {}) {
     }
   }
 
-  /** 下拉 / 模型选择：改了就整单提交（没有保存按钮）。 */
+  /** 下拉 / 模型选择 / 数字格：改了就整单提交（没有保存按钮）。 */
   function setForm(key, value) {
     state.form[key] = value;
+    return saveLayers();
+  }
+
+  /**
+   * 召回门槛：数字格自己的提交口（清空语义与其它格不一样）。
+   *
+   * 清空（null）不提交：把框回填成已确认的值，并发请求也没意义。
+   * 其余值先归一化成 0–1 的数字（非法值回 0.45），再走整单提交。
+   */
+  function setDecisionThreshold(value) {
+    if (value === null || value === undefined) {
+      state.form.gateDecisionThreshold = normalizeGateDecisionThreshold(
+        state.layers.gateDecisionThreshold,
+      );
+      return undefined;
+    }
+    state.form.gateDecisionThreshold = normalizeGateDecisionThreshold(value);
     return saveLayers();
   }
 
@@ -930,6 +992,7 @@ export function createPanelStore(deps = {}) {
     flip,
     patchControls,
     setForm,
+    setDecisionThreshold,
     setControlsNumber,
     saveConnection,
     saveLayers,

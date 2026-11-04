@@ -60,6 +60,7 @@ export function useConfig() {
     refresh: (...args) => store.refresh(...args),
     flip: (...args) => store.flip(...args),
     setForm: (...args) => store.setForm(...args),
+    setDecisionThreshold: (...args) => store.setDecisionThreshold(...args),
     setControlsNumber: (...args) => store.setControlsNumber(...args),
     saveConnection: (...args) => store.saveConnection(...args),
     saveLayers: (...args) => store.saveLayers(...args),

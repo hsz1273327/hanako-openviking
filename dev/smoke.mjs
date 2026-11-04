@@ -34,8 +34,10 @@ import {
   parseExcludedPeers,
   normalizeRecallGate,
   normalizeQueryMode,
+  normalizeGateFallback,
   normalizeGateModel,
   normalizeGateDecisionPrompt,
+  normalizeGateDecisionThreshold,
   normalizeGatePrompt,
   normalizeRerank,
   normalizeRerankModel,
@@ -44,6 +46,7 @@ import {
   normalizeServiceModel,
   normalizeServiceTimeout,
   normalizeServiceUrl,
+  serializeGateDecisionThreshold,
   serializeServiceTimeout,
   servicePairError,
   serviceTimeoutOrDefault,
@@ -51,10 +54,15 @@ import {
   parseRerankChannels,
   serializeRerankChannels,
   DEFAULT_GATE_DECISION_PROMPT,
+  GATE_DECISION_THRESHOLD_DEFAULT,
+  GATE_DECISION_THRESHOLD_MIN,
+  GATE_DECISION_THRESHOLD_MAX,
+  GATE_DECISION_THRESHOLD_STEP,
   decisionServiceConfigured,
   resolveRecallGate,
   GATE_PROMPT_MAX,
   RERANK_CHANNELS_MAX,
+  RECALL_GATE_FALLBACKS,
   RERANK_CHANNEL_TYPES,
   RERANK_CHANNEL_URL_MAX,
   RERANK_MODES,
@@ -90,6 +98,7 @@ import {
   resetShapeWarning,
   shouldSkipRecall,
   gateAnswerRecalls,
+  gateFallbackOf,
   gateModelOf,
   gatePromptOf,
   parseModelRef,
@@ -130,6 +139,7 @@ import {
   GATE_TIMEOUT_MS,
   GATE_MAX_TOKENS,
   gateDecisionPromptOf,
+  gateDecisionThresholdOf,
   DECISION_GATE_CRITERIA,
   DECISION_GATE_THRESHOLD,
   DECISION_GATE_TIMEOUT_MS,
@@ -199,6 +209,8 @@ import {
   DEFAULT_RERANK_PROMPT as UI_DEFAULT_RERANK_PROMPT,
   RERANK_CHANNEL_LABELS,
   RECALL_GATE_LABELS as UI_RECALL_GATE_LABELS,
+  RECALL_GATE_FALLBACKS as UI_RECALL_GATE_FALLBACKS,
+  RECALL_GATE_FALLBACK_LABELS as UI_RECALL_GATE_FALLBACK_LABELS,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SCORING_SERVICES,
@@ -216,6 +228,16 @@ import {
   decisionServiceConfigured as uiDecisionServiceConfigured,
   decisionServiceView,
   normalizeGateDecisionPrompt as uiNormalizeGateDecisionPrompt,
+  normalizeGateDecisionThreshold as uiNormalizeGateDecisionThreshold,
+  normalizeGateFallback as uiNormalizeGateFallback,
+  GATE_DECISION_THRESHOLD_DEFAULT as UI_GATE_DECISION_THRESHOLD_DEFAULT,
+  GATE_DECISION_THRESHOLD_MIN as UI_GATE_DECISION_THRESHOLD_MIN,
+  GATE_DECISION_THRESHOLD_MAX as UI_GATE_DECISION_THRESHOLD_MAX,
+  GATE_DECISION_THRESHOLD_STEP as UI_GATE_DECISION_THRESHOLD_STEP,
+  GATE_DECISION_THRESHOLD_HINT as UI_GATE_DECISION_THRESHOLD_HINT,
+  gateFallbackOptions,
+  gateHasFailurePath,
+  paintGateFallbackConfig,
   paintDecisionConfig,
   normalizeServiceKey as uiNormalizeServiceKey,
   normalizeServiceTimeout as uiNormalizeServiceTimeout,
@@ -2071,6 +2093,62 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     Object.keys(DEFAULTS).every((key) => props[key] !== undefined),
     Object.keys(DEFAULTS).filter((key) => props[key] === undefined).join(", "),
   );
+  eq(
+    "判断失败时的兜底：manifest 声明 enum recall / rules 且默认 recall、文案与面板逐字一致；后端与面板两份枚举同值、默认都是 recall、非法值都归一化回 recall",
+    [
+      props.gateFallback?.enum,
+      props.gateFallback?.ui?.enumLabels,
+      props.gateFallback?.default,
+      [RECALL_GATE_FALLBACKS, UI_RECALL_GATE_FALLBACKS],
+      DEFAULTS.gateFallback,
+      ["bogus", "", null, 1, "RECALL", "rules"].map(normalizeGateFallback),
+      ["bogus", "", null, 1, "RECALL", "rules"].map(uiNormalizeGateFallback),
+    ],
+    [
+      ["recall", "rules"],
+      Object.values(UI_RECALL_GATE_FALLBACK_LABELS),
+      "recall",
+      [["recall", "rules"], ["recall", "rules"]],
+      "recall",
+      ["recall", "recall", "recall", "recall", "recall", "rules"],
+      ["recall", "recall", "recall", "recall", "recall", "rules"],
+    ],
+  );
+
+  // 召回门槛：默认值 / 边界 / 步长 / 归一化两端同值；manifest 里声明成字符串并默认 "0.45"。
+  eq(
+    "召回门槛两端同值：默认 0.45 / 边界 0–1 / 步长 0.05 / 非法值都回 0.45；manifest 声明为 string、默认 \"0.45\"",
+    [
+      [GATE_DECISION_THRESHOLD_DEFAULT, UI_GATE_DECISION_THRESHOLD_DEFAULT],
+      [GATE_DECISION_THRESHOLD_MIN, UI_GATE_DECISION_THRESHOLD_MIN],
+      [GATE_DECISION_THRESHOLD_MAX, UI_GATE_DECISION_THRESHOLD_MAX],
+      [GATE_DECISION_THRESHOLD_STEP, UI_GATE_DECISION_THRESHOLD_STEP],
+      ["abc", -1, 2, "", null, undefined].map(normalizeGateDecisionThreshold),
+      ["abc", -1, 2, "", null, undefined].map(uiNormalizeGateDecisionThreshold),
+      [props.gateDecisionThreshold?.type, props.gateDecisionThreshold?.default],
+      DEFAULTS.gateDecisionThreshold,
+    ],
+    [
+      [0.45, 0.45],
+      [0, 0],
+      [1, 1],
+      [0.05, 0.05],
+      [0.45, 0.45, 0.45, 0.45, 0.45, 0.45],
+      [0.45, 0.45, 0.45, 0.45, 0.45, 0.45],
+      ["string", "0.45"],
+      0.45,
+    ],
+  );
+  eq(
+    "写回配置的形状：一律存归一化后的数字串（abc / -1 / 2 / 空串 / null / undefined 都存 \"0.45\"，0 与 1 与数字串照存）",
+    ["abc", -1, 2, "", null, undefined, "0.6", 0, 1, 0.8].map(serializeGateDecisionThreshold),
+    ["0.45", "0.45", "0.45", "0.45", "0.45", "0.45", "0.6", "0", "1", "0.8"],
+  );
+  eq(
+    "门槛小字把方向说清（调高更少查、调低更多查），且引用了默认值 0.45",
+    [UI_GATE_DECISION_THRESHOLD_HINT.includes("调高更少查"), UI_GATE_DECISION_THRESHOLD_HINT.includes("调低更多查"), UI_GATE_DECISION_THRESHOLD_HINT.includes("0.45")],
+    [true, true, true],
+  );
 }
 // ================= 页签状态：记忆与键盘 =================
 {
@@ -2640,6 +2718,91 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("RecallCard / RerankCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
   }
 
+  // ---- 「判断失败时」：与召回判断同一单、同一套即时提交与失败回滚 ----
+  {
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq(
+      "首屏「判断失败时」读回默认 recall（服务端投影缺项也画成 recall）",
+      state.form.gateFallback,
+      "recall",
+    );
+    await ui.setForm("recallGate", "llm");
+    const before = saves().length;
+    await ui.setForm("gateFallback", "rules");
+    const body = saves().at(-1).body;
+    eq(
+      "改「判断失败时」走同一单（recallGate 非默认值一起带走），成功后控件停在新值",
+      [saves().length - before, body.recallGate, body.gateFallback, state.form.gateFallback],
+      [1, "llm", "rules", "rules"],
+    );
+    rejectNextPost = "gateFallback 只能是 recall / rules";
+    await ui.setForm("gateFallback", "recall");
+    eq(
+      "被拒后回滚到上一次确认的值，提示位显示服务端原文",
+      [state.form.gateFallback, state.note.text, state.note.bad],
+      ["rules", "gateFallback 只能是 recall / rules", true],
+    );
+  }
+
+  // ---- 「召回门槛」：只影响 decision 档的那个数字格，同一单、同一套即时提交与回滚 ----
+  {
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq(
+      "首屏召回门槛读回默认 0.45（服务端投影缺项也画成 0.45）",
+      state.form.gateDecisionThreshold,
+      0.45,
+    );
+    await ui.setForm("recallGate", "llm");
+    const before = saves().length;
+    await ui.setDecisionThreshold(0.8);
+    const body = saves().at(-1).body;
+    eq(
+      "改召回门槛走同一单（整单：recallGate / queryMode 一起带走），payload 里是字符串 \"0.8\"，成功后控件停在新值",
+      [
+        saves().length - before,
+        body.recallGate,
+        body.queryMode,
+        body.gateDecisionThreshold,
+        typeof body.gateDecisionThreshold,
+        state.form.gateDecisionThreshold,
+      ],
+      [1, "llm", "context", "0.8", "string", 0.8],
+    );
+    // 非数字：面板这一层就归一化回 0.45 再提交（状态与 payload 都是 0.45 的字符串）。
+    await ui.setDecisionThreshold("abc");
+    eq(
+      "非数字归一化回 0.45 再提交（状态是数字 0.45，payload 是 \"0.45\"）",
+      [
+        state.form.gateDecisionThreshold,
+        saves().at(-1).body.gateDecisionThreshold,
+        typeof saves().at(-1).body.gateDecisionThreshold,
+      ],
+      [0.45, "0.45", "string"],
+    );
+    await ui.setDecisionThreshold(0.8);
+    rejectNextPost = "gateDecisionThreshold 必须是数字、字符串或 null";
+    await ui.setDecisionThreshold(0.6);
+    eq(
+      "被拒后回滚到上一次确认的值，提示位显示服务端原文",
+      [state.form.gateDecisionThreshold, state.note.text, state.note.bad],
+      [0.8, "gateDecisionThreshold 必须是数字、字符串或 null", true],
+    );
+    // 清空（NInputNumber 给 null）：不发请求，框回填成已确认的值。
+    const beforeClear = saves().length;
+    await ui.setDecisionThreshold(null);
+    eq(
+      "清空不提交（POST 计数不增），框回填成已确认值",
+      [
+        saves().length - beforeClear,
+        state.form.gateDecisionThreshold,
+        state.layers.gateDecisionThreshold,
+      ],
+      [0, 0.8, 0.8],
+    );
+    // 复位：后面的提示词顺手带走这一项，不应因此变脏。
+    await ui.setDecisionThreshold(0.45);
+  }
+
   // ---- 提示词：恢复默认只填框 + 正常提交（行为第 4 条） ----
   {
     state.prompts.gate = "我的提示词";
@@ -3123,6 +3286,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [["off", "rules", "llm"], ["off", "rules", "llm", "decision"], 3, 3],
   );
 
+  // ---- 「判断失败时」：只对会去问外部服务的两档出现，两个选项固定 ----
+  eq(
+    "「判断失败时」只在 llm / decision 两档出现（off / rules 没有失败路径）/ 两个选项（外发值与文案）/ 投影脏值回 recall",
+    [
+      ["off", "rules", "llm", "decision"].map(gateHasFailurePath),
+      gateFallbackOptions().map((option) => [option.value, option.label]),
+      [
+        paintGateFallbackConfig({ gateFallback: "rules" }).gateFallback,
+        paintGateFallbackConfig({ gateFallback: "bogus" }).gateFallback,
+        paintGateFallbackConfig({}).gateFallback,
+      ],
+    ],
+    [
+      [false, false, true, true],
+      [["recall", "照常召回（不过滤）"], ["rules", "退到规则判断"]],
+      ["rules", "recall", "recall"],
+    ],
+  );
+
   // ---- 决策提示词自己的草稿与三态（与 gatePrompt 同一套，只是另一格） ----
   eq(
     "决策提示词草稿（空配置坐默认问法、动过不再填、自定义照显、超长按码点截断） / 三态小字（默认 / 已修改 / 空＝照常召回）",
@@ -3137,6 +3319,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       paintDecisionConfig({ gateDecisionPrompt: "字".repeat(GATE_PROMPT_MAX + 10) })
         .gateDecisionPrompt.length,
       paintDecisionConfig({}).gateDecisionPrompt,
+      [
+        paintDecisionConfig({}).gateDecisionThreshold,
+        paintDecisionConfig({ gateDecisionThreshold: "0.7" }).gateDecisionThreshold,
+        paintDecisionConfig({ gateDecisionThreshold: 2 }).gateDecisionThreshold,
+      ],
     ],
     [
       UI_DEFAULT_GATE_DECISION_PROMPT,
@@ -3148,6 +3335,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       true,
       GATE_PROMPT_MAX,
       "",
+      [0.45, 0.7, 0.45],
     ],
   );
 
@@ -3167,6 +3355,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gatePrompt: "",
     gateModel: "",
     gateDecisionPrompt: "",
+    gateDecisionThreshold: 0.45,
+    gateFallback: "recall",
     rerank: "off",
     rerankPrompt: "",
     rerankModel: "",
@@ -4313,6 +4503,107 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   store.queryMode = 3;
   const dirty = await get();
   eq("GET 把存量非法值收敛成默认值", [dirty.body.recallGate, dirty.body.queryMode], ["off", "last"]);
+
+  // ---- 判断失败时的兜底：一个独立的字符串枚举，GET 投影 + POST 整单校验 ----
+  eq("GET 没配过 gateFallback 时投影成 recall", defaults.body.gateFallback, "recall");
+  store.gateFallback = "bogus";
+  const dirtyFallback = await get();
+  eq(
+    "GET 把存量非法 gateFallback 收敛成 recall",
+    dirtyFallback.body.gateFallback,
+    "recall",
+  );
+  writes.length = 0;
+  const fallbackSaved = await post({ gateFallback: "rules" });
+  eq(
+    "gateFallback=rules 能落库并回显 / applied 里带它",
+    [
+      fallbackSaved.status,
+      store.gateFallback,
+      fallbackSaved.body.gateFallback,
+      fallbackSaved.body.applied.includes("gateFallback"),
+      writes.length,
+    ],
+    [200, "rules", "rules", true, 1],
+  );
+  writes.length = 0;
+  const badFallback = await post({ gateFallback: "off" });
+  eq(
+    "gateFallback 不在枚举里（off）时整单被拒 400，零写入",
+    [badFallback.status, store.gateFallback, writes.length],
+    [400, "rules", 0],
+  );
+
+  // ---- 召回门槛：一个字符串项，GET 投影 + POST 归一化后落库（存数字串，与超时同口径）----
+  eq(
+    "GET 没配过 gateDecisionThreshold 时投影成 \"0.45\"（字符串）",
+    defaults.body.gateDecisionThreshold,
+    "0.45",
+  );
+  const projectedThresholds = [];
+  for (const stored of ["0.8", -1, "abc", "", null]) {
+    store.gateDecisionThreshold = stored;
+    projectedThresholds.push((await get()).body.gateDecisionThreshold);
+  }
+  eq(
+    "GET 投影统一是字符串：存 \"0.8\" 得 \"0.8\"，脏值（-1 / abc / 空串 / null）一律 \"0.45\"",
+    projectedThresholds,
+    ["0.8", "0.45", "0.45", "0.45", "0.45"],
+  );
+  writes.length = 0;
+  const thresholdSaved = await post({ gateDecisionThreshold: 0.8 });
+  eq(
+    "gateDecisionThreshold=0.8（数字）能落库并回显 / applied 里带它 / 存的是字符串 \"0.8\"",
+    [
+      thresholdSaved.status,
+      store.gateDecisionThreshold,
+      typeof store.gateDecisionThreshold,
+      thresholdSaved.body.gateDecisionThreshold,
+      thresholdSaved.body.applied.includes("gateDecisionThreshold"),
+      writes.length,
+    ],
+    [200, "0.8", "string", "0.8", true, 1],
+  );
+  const thresholdFromString = await post({ gateDecisionThreshold: "0.6" });
+  eq(
+    "数字串也接，落库统一是字符串 \"0.6\"",
+    [thresholdFromString.status, store.gateDecisionThreshold, typeof store.gateDecisionThreshold],
+    [200, "0.6", "string"],
+  );
+  const thresholdBadValues = [];
+  for (const raw of ["abc", -1, 2, "", null]) {
+    const response = await post({ gateDecisionThreshold: raw });
+    thresholdBadValues.push([raw, response.status, store.gateDecisionThreshold]);
+  }
+  eq(
+    "非法值（abc / -1 / 2 / 空串 / null）不报错，归一化回 0.45 再落库（字符串，不夹到 0 或 1）",
+    thresholdBadValues,
+    [
+      ["abc", 200, "0.45"],
+      [-1, 200, "0.45"],
+      [2, 200, "0.45"],
+      ["", 200, "0.45"],
+      [null, 200, "0.45"],
+    ],
+  );
+  writes.length = 0;
+  const badThreshold = await post({ gateDecisionThreshold: { v: 1 } });
+  eq(
+    "类型不对（对象）整单被拒 400，零写入，旧值不动",
+    [badThreshold.status, writes.length, store.gateDecisionThreshold],
+    [400, 0, "0.45"],
+  );
+  await post({ gateDecisionThreshold: "0.7" });
+  const noKeyThreshold = await post({ queryMode: "last" });
+  eq(
+    "提交里不带这个键时已有值不动（applied 里也不列它）",
+    [
+      store.gateDecisionThreshold,
+      noKeyThreshold.body.gateDecisionThreshold,
+      noKeyThreshold.body.applied.includes("gateDecisionThreshold"),
+    ],
+    ["0.7", "0.7", false],
+  );
 
   const saved = await post({ recallGate: "rules", queryMode: "context" });
   eq(
@@ -6371,6 +6662,161 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [0.45, false, false, true, true, false, false, false, DECISION_GATE_TIMEOUT_MS, DECISION_GATE_TIMEOUT_MAX_MS, 300],
   );
 
+  // ---- 召回门槛可配：默认 0.45、范围 0–1、只在 decision 档生效 ----
+  // 0.45 是从 16 条样例上拟合出来的，不是客观常数：换个决策模型、换批对话风格最优值会变。
+  // 而且两个方向的错代价不同（漏召回比误召回更伤），取舍交给用户，不要写死在代码里。
+  eq(
+    "召回门槛读数：默认 0.45（DEFAULTS / readSwitches 缺项 / gateDecisionThresholdOf 缺项）/ 显式值读得回来 / 0 与 1 都是合法边界 / 非法值（abc、-1、2、空串、null、NaN、对象、数组）一律归一化回 0.45",
+    [
+      DEFAULTS.gateDecisionThreshold,
+      (await readSwitches(sdkWith())).gateDecisionThreshold,
+      gateDecisionThresholdOf({}),
+      gateDecisionThresholdOf({ gateDecisionThreshold: "0.8" }),
+      [0, 1, 0.05, 0.95].map((raw) => gateDecisionThresholdOf({ gateDecisionThreshold: raw })),
+      ["abc", -1, 2, "", "  ", null, Number.NaN, {}, []].map((raw) =>
+        gateDecisionThresholdOf({ gateDecisionThreshold: raw }),
+      ),
+    ],
+    [
+      0.45,
+      0.45,
+      0.45,
+      0.8,
+      [0, 1, 0.05, 0.95],
+      [0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45],
+    ],
+  );
+  eq(
+    "decisionGateSkips 第二个参数就是门槛：0.8 时 need+0.6 跳过、0.2 时召回、0.6 时召回（≥ 含等号）/ 0.6 时 need+0.59 跳过 / 不给门槛仍用默认 0.45 / standalone 与形状坏的答案不看门槛 / 门槛填坏按归一化后的 0.45 算",
+    [
+      decisionGateSkips({ choice: "need", confidence: 0.6 }, 0.8),
+      decisionGateSkips({ choice: "need", confidence: 0.6 }, 0.2),
+      decisionGateSkips({ choice: "need", confidence: 0.6 }, 0.6),
+      decisionGateSkips({ choice: "need", confidence: 0.59 }, 0.6),
+      decisionGateSkips({ choice: "need", confidence: 0.6 }),
+      decisionGateSkips({ choice: "standalone", confidence: 0.6 }, 0),
+      decisionGateSkips({ choice: "standalone", confidence: 0.6 }, 1),
+      decisionGateSkips({ choice: "need", confidence: 0.6 }, "abc"),
+      decisionGateSkips({ choice: "need", confidence: 0.6 }, 2),
+    ],
+    [true, false, false, true, false, true, true, false, false],
+  );
+
+  // ---- 三个门槛值 × 同一个答案（need + 0.6）：跳不跳跟着门槛走 ----
+  {
+    const rows = [];
+    for (const threshold of [0.8, 0.2, 0.6]) {
+      const request = decisionFetch({ choice: "need", confidence: 0.6 });
+      const probes = [];
+      const handler = createRecallHandler(
+        recallSdk({
+          values: { ...values, gateDecisionThreshold: threshold },
+          fetchImpl: request.fetchImpl,
+          dataDir: dir,
+        }),
+        { probe: async (event, invocation) => probes.push({ event, invocation }) },
+      );
+      const result = await handler({
+        payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+        session: { sessionId: `decision-threshold-${threshold}` },
+      });
+      rows.push([
+        threshold,
+        Boolean(result?.payload),
+        request.calls.length,
+        request.systemone().length,
+        probes[0]?.invocation.reason ?? "",
+      ]);
+    }
+    eq(
+      "decision 门槛 0.8：need+0.6 跳过（置信度不够，只发判断不发召回，探针带 decision-no-need）/ 0.2：同一答案召回 / 0.6：也召回（>= 含等号）",
+      rows,
+      [
+        [0.8, false, 1, 1, "decision-no-need"],
+        [0.2, true, 2, 1, ""],
+        [0.6, true, 2, 1, ""],
+      ],
+    );
+  }
+
+  // ---- 门槛只在 decision 档生效：llm / rules / off 的判决不受它影响 ----
+  {
+    const llmRows = [];
+    for (const threshold of [0, 1]) {
+      for (const [answer, tag] of [["不需要", "no"], ["需要", "yes"]]) {
+        const mock = mockFetch({ body: recallBody });
+        const fake = modelSdk({ utility: () => ({ text: answer }) });
+        const handler = createRecallHandler(
+          recallSdk({
+            values: {
+              ...values,
+              recallGate: "llm",
+              gatePrompt: DEFAULT_GATE_PROMPT,
+              gateDecisionThreshold: threshold,
+            },
+            fetchImpl: mock.fetchImpl,
+            dataDir: dir,
+            models: fake.models,
+          }),
+        );
+        const result = await handler({
+          payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+          session: { sessionId: `threshold-llm-${threshold}-${tag}` },
+        });
+        llmRows.push([threshold, tag, Boolean(result?.payload)]);
+      }
+    }
+    eq(
+      "门槛只影响 decision 档：llm 在门槛 0 与 1 下判决完全一样（模型说不需要就跳过、说需要就召回）",
+      llmRows,
+      [
+        [0, "no", false],
+        [0, "yes", true],
+        [1, "no", false],
+        [1, "yes", true],
+      ],
+    );
+
+    const rows = [];
+    for (const gate of ["rules", "off"]) {
+      for (const threshold of [0, 1]) {
+        const mock = mockFetch({ body: recallBody });
+        const handler = createRecallHandler(
+          recallSdk({
+            values: { ...values, recallGate: gate, gateDecisionThreshold: threshold },
+            fetchImpl: mock.fetchImpl,
+            dataDir: dir,
+          }),
+        );
+        const short = await handler({
+          payload: { messages: [{ role: "user", content: "运行测试" }] },
+          session: { sessionId: `threshold-${gate}-${threshold}-short` },
+        });
+        const long = await handler({
+          payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+          session: { sessionId: `threshold-${gate}-${threshold}-long` },
+        });
+        rows.push([
+          gate,
+          threshold,
+          Boolean(short?.payload),
+          Boolean(long?.payload),
+          mock.calls.length,
+        ]);
+      }
+    }
+    eq(
+      "门槛只影响 decision 档：rules 在 0 与 1 下都是短指令跳过、长句召回；off 永远召回",
+      rows,
+      [
+        ["rules", 0, false, true, 1],
+        ["rules", 1, false, true, 1],
+        ["off", 0, true, true, 2],
+        ["off", 1, true, true, 2],
+      ],
+    );
+  }
+
   // ---- 题面渲染：写了占位符才内联，没写就只发题面（state 里已经是这条消息，不能发两遍）----
   eq(
     "decision 题面渲染：{{message}} 就地替换、没写就只发题面、空模板回空串",
@@ -6642,6 +7088,338 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
     ["decision", "off", "off"],
   );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall gate: fallback =================
+//
+// 判断失败（网络错 / 超时 / 返回结构不认识 / 题面为空）时按 gateFallback 兜底：
+//   recall（默认）——照常召回，判断失败不能变成漏召回；
+//   rules        ——退到规则判断跑一遍，规则说跳过才跳过。
+// 规则的判据没变（≤8 字 / 无问号 / 无疑问词 / 无指代词），这一节守的是「什么时候用它」。
+{
+  const dir = path.join(import.meta.dirname, ".tmp-recall-gate-fallback");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+
+  const base = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    recallGate: "decision",
+    systemoneServiceUrl: "http://127.0.0.1:8099",
+    systemoneServiceModel: "kev-4b",
+    systemoneServiceKey: "",
+    gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+    probe: true,
+  };
+
+  // 极短纯操作指令：规则判据说跳过。
+  const SHORT = "运行测试";
+  // 超 8 字且带指代词：规则判据说召回。
+  const LONG = "上次那个决定是什么";
+
+  const jsonOf = (payload, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  // 决策服务的四种失败：网络错（fetch 抛）、超时（挂着不回）、结构不认识、题面为空。
+  const failing = (mode = "refuse") => {
+    const calls = [];
+    const fetchImpl = async (url) => {
+      const target = String(url);
+      calls.push({ url: target });
+      if (!target.includes("/v1/systemone")) return jsonOf(recallBody);
+      if (mode === "timeout") return new Promise(() => {});
+      if (mode === "shape") return jsonOf({ answers: {} });
+      throw new Error("ECONNREFUSED 127.0.0.1:8099");
+    };
+    const systemone = () => calls.filter((call) => call.url.includes("/v1/systemone"));
+    return { calls, fetchImpl, systemone };
+  };
+
+  const run = async ({ values, mode, text, sessionId }) => {
+    const request = failing(mode);
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...base, ...values },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: text }] },
+      session: { sessionId },
+    });
+    return {
+      recalled: Boolean(result?.payload),
+      calls: request.calls.length,
+      systemone: request.systemone().length,
+      infos,
+    };
+  };
+
+  // ---- 默认值是 recall；非法值一律归一化回 recall ----
+  eq(
+    "兜底默认 recall（DEFAULTS / readSwitches 缺项 / gateFallbackOf 缺项）/ 显式 rules 读得回来 / 拼错、大小写、空串、数字、null 都归一化回 recall",
+    [
+      DEFAULTS.gateFallback,
+      (await readSwitches(sdkWith())).gateFallback,
+      gateFallbackOf({}),
+      gateFallbackOf({ gateFallback: "rules" }),
+      ["rule", "Rules", "", null, 0, "RECALL"].map((raw) =>
+        gateFallbackOf({ gateFallback: raw }),
+      ),
+    ],
+    [
+      "recall",
+      "recall",
+      "recall",
+      "rules",
+      ["recall", "recall", "recall", "recall", "recall", "recall"],
+    ],
+  );
+
+  // ---- 四种失败 × 两条兜底：decision 档 ----
+  // 每一行：失败种类 -> [rules+短指令, rules+长句, recall+短指令]
+  //   rules+短指令：退到规则，规则说跳过 -> 只发那一发失败请求，不发召回；
+  //   rules+长句：退到规则，规则说召回 -> 照常召回；
+  //   recall+短指令：默认照常召回，规则不参与。
+  const matrix = [
+    { label: "网络错", mode: "refuse" },
+    { label: "超时", mode: "timeout", timeout: "100" },
+    { label: "结构不认识", mode: "shape" },
+    { label: "空题面", mode: "empty", prompt: "" },
+  ];
+  const rows = [];
+  for (const [index, item] of matrix.entries()) {
+    const extra = {
+      ...(item.timeout ? { systemoneServiceTimeoutMs: item.timeout } : {}),
+      ...(item.prompt === "" ? { gateDecisionPrompt: "" } : {}),
+    };
+    const rulesShort = await run({
+      values: { gateFallback: "rules", ...extra },
+      mode: item.mode,
+      text: SHORT,
+      sessionId: `fb-${index}-short-rules`,
+    });
+    const rulesLong = await run({
+      values: { gateFallback: "rules", ...extra },
+      mode: item.mode,
+      text: LONG,
+      sessionId: `fb-${index}-long-rules`,
+    });
+    const recallShort = await run({
+      values: { ...extra },
+      mode: item.mode,
+      text: SHORT,
+      sessionId: `fb-${index}-short-recall`,
+    });
+    rows.push([
+      item.label,
+      [
+        rulesShort.recalled,
+        rulesShort.calls,
+        rulesShort.systemone,
+        rulesShort.infos.some((m) => m.includes("fallback=rules")),
+      ],
+      [rulesLong.recalled, rulesLong.calls],
+      [
+        recallShort.recalled,
+        recallShort.calls,
+        recallShort.infos.some((m) => m.includes("fallback=recall")),
+      ],
+    ]);
+  }
+  eq(
+    "decision 档四种失败（网络错 / 超时 / 结构不认识 / 空题面）在 fallback=rules 下都退到规则：极短纯操作指令跳过、其它照常召回；默认 fallback=recall 时一律照常召回（空题面一次判断请求都不发）",
+    rows,
+    [
+      ["网络错", [false, 1, 1, true], [true, 2], [true, 2, true]],
+      ["超时", [false, 1, 1, true], [true, 2], [true, 2, true]],
+      ["结构不认识", [false, 1, 1, true], [true, 2], [true, 2, true]],
+      ["空题面", [false, 0, 0, true], [true, 1], [true, 1, true]],
+    ],
+  );
+
+  // ---- 失败日志与跳过日志分开：一条说清走的哪条兜底，一条说规则判了什么 ----
+  {
+    const request = failing("refuse");
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...base, gateFallback: "rules" },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    await handler({
+      payload: { messages: [{ role: "user", content: SHORT }] },
+      session: { sessionId: "fb-log-rules" },
+    });
+    check(
+      "失败日志带兜底去向（gate: decision failed, fallback=rules），规则真的判了一次（gate: skipped by=rules）",
+      infos.some((m) => m.includes("gate: decision failed") && m.includes("fallback=rules")) &&
+        infos.some((m) => m.includes("gate: skipped") && m.includes("by=rules")),
+      infos.join(" | "),
+    );
+  }
+
+  // ---- llm 档同样受这个设置影响（失败 = 宿主播错 / 超时 / 空提示词）----
+  {
+    const rows = [];
+    for (const [text, tag] of [[SHORT, "short"], [LONG, "long"]]) {
+      const mock = mockFetch({ body: recallBody });
+      const fake = modelSdk({ utility: () => { throw new Error("APP_CAPABILITY_DENIED"); } });
+      const infos = [];
+      const handler = createRecallHandler(
+        recallSdk({
+          values: {
+            ...base,
+            recallGate: "llm",
+            gatePrompt: DEFAULT_GATE_PROMPT,
+            gateFallback: "rules",
+          },
+          fetchImpl: mock.fetchImpl,
+          dataDir: dir,
+          models: fake.models,
+          logger: { info: (m) => infos.push(m) },
+        }),
+      );
+      const result = await handler({
+        payload: { messages: [{ role: "user", content: text }] },
+        session: { sessionId: `fb-llm-${tag}` },
+      });
+      rows.push([
+        tag,
+        Boolean(result?.payload),
+        mock.calls.length,
+        infos.some((m) => m.includes("fallback=rules")),
+      ]);
+    }
+    eq(
+      "llm 档 + fallback=rules：宿主播错时退到规则，极短纯操作指令跳过、长句照常召回（日志带 fallback=rules）",
+      rows,
+      [["short", false, 0, true], ["long", true, 1, true]],
+    );
+  }
+  {
+    // llm 的空提示词 = 没有判据，同样按兜底走。
+    const mock = mockFetch({ body: recallBody });
+    const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          ...base,
+          recallGate: "llm",
+          gatePrompt: "",
+          gateFallback: "rules",
+        },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: SHORT }] },
+      session: { sessionId: "fb-llm-empty-prompt" },
+    });
+    eq(
+      "llm 空提示词 + fallback=rules：一次模型都不问，退到规则（短指令跳过，也不发召回）",
+      [result, fake.calls.utility.length, mock.calls.length],
+      [undefined, 0, 0],
+    );
+  }
+
+  // ---- off / rules 两档不受影响：它们自己就是判据，没有失败路径 ----
+  {
+    const rows = [];
+    for (const gate of ["rules", "off"]) {
+      for (const fallback of ["recall", "rules"]) {
+        const mock = mockFetch({ body: recallBody });
+        const handler = createRecallHandler(
+          recallSdk({
+            values: { ...base, recallGate: gate, gateFallback: fallback },
+            fetchImpl: mock.fetchImpl,
+            dataDir: dir,
+          }),
+        );
+        const short = await handler({
+          payload: { messages: [{ role: "user", content: SHORT }] },
+          session: { sessionId: `fb-${gate}-${fallback}-short` },
+        });
+        const long = await handler({
+          payload: { messages: [{ role: "user", content: LONG }] },
+          session: { sessionId: `fb-${gate}-${fallback}-long` },
+        });
+        rows.push([gate, fallback, Boolean(short?.payload), Boolean(long?.payload), mock.calls.length]);
+      }
+    }
+    eq(
+      "off / rules 两档不看 gateFallback：rules 短指令跳过、长句召回，off 永远召回（两条兜底行为一致）",
+      rows,
+      [
+        ["rules", "recall", false, true, 1],
+        ["rules", "rules", false, true, 1],
+        ["off", "recall", true, true, 2],
+        ["off", "rules", true, true, 2],
+      ],
+    );
+  }
+
+  // ---- 配置里是脏值（拼错）时按 recall 跑，不是按 rules ----
+  {
+    const row = await run({
+      values: { gateFallback: "rule" },
+      mode: "refuse",
+      text: SHORT,
+      sessionId: "fb-bogus",
+    });
+    eq(
+      "gateFallback 非法值（rule）归一化回 recall：decision 失败时照常召回，不偷偷退到规则",
+      [row.recalled, row.calls, row.infos.some((m) => m.includes("fallback=recall"))],
+      [true, 2, true],
+    );
+  }
+
+  // ---- 判断成功时兜底不该插手：模型给了答案就按模型的答案走 ----
+  {
+    const handler = (choice, confidence) => {
+      const calls = [];
+      const fetchImpl = async (url) => {
+        const target = String(url);
+        calls.push({ url: target });
+        if (!target.includes("/v1/systemone")) return jsonOf(recallBody);
+        return jsonOf({ answers: { q: { choice, confidence } } });
+      };
+      return createRecallHandler(
+        recallSdk({
+          values: { ...base, gateFallback: "rules" },
+          fetchImpl,
+          dataDir: dir,
+        }),
+      );
+    };
+    const need = await handler("need", 0.8)({
+      payload: { messages: [{ role: "user", content: LONG }] },
+      session: { sessionId: "fb-success-need" },
+    });
+    const standalone = await handler("standalone", 0.9)({
+      payload: { messages: [{ role: "user", content: LONG }] },
+      session: { sessionId: "fb-success-standalone" },
+    });
+    eq(
+      "判断成功时 gateFallback 不插手：need+0.8 照常召回、standalone+0.9 照旧跳过",
+      [Boolean(need?.payload), standalone],
+      [true, undefined],
+    );
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
