@@ -134,7 +134,7 @@ function onPromptChange(value) {
             :value="state.form.recallGate"
             @update:value="(value) => onSelect('recallGate', value)"
           />
-          <span class="field-hint">规则判断只认 ≤8 字、无问号、无疑问词、无指代词的指令；两档模型判断失败、超时按下面的「判断失败时」处理。</span>
+          <span class="field-hint">规则判断只认 ≤8 字、无问号、无疑问词、无指代词的指令；语言模型与决策模型这两档判断失败、超时按下面的「判断失败时」处理。</span>
         </div>
       </NGridItem>
       <!-- 判断失败时怎么兜底：只对 llm / decision 两档显示（另两档不依赖外部服务）。
@@ -200,6 +200,7 @@ function onPromptChange(value) {
                  用 HTML 实体写双花括号，编译期不当插值，渲染出来仍是 {{message}}。 -->
             <span v-if="!decisionOpen" class="field-hint">用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它的话，消息会自动接在末尾。</span>
             <span v-else id="decisionPromptHint" class="field-hint">这一格是题面，不是让模型生成文本：判定标准由内置的两条描述决定（有指代或省略 / 自己把话说完整），模型只在两者之间选一个并给出置信度。选「有指代或省略」且置信度不低于下面的召回门槛（默认 0.45）时照常召回，选「自己把话说完整」时跳过召回。
+              为什么问的是「能不能独立理解」而不是「要不要查记忆」：直接问要不要查，模型看一句孤立的话会倾向答「不用查」，实测十条该召回的一条都抓不到；改问这句话自不自足，它才会去找缺失的信息。两个问法测的是同一件事，后者才问得动。
               用 &#123;&#123;message&#125;&#125; 表示当前这条用户消息；没写它时这句就是纯题面（消息本身在 state 里，不会重复发）。</span>
           </div>
         </NGridItem>
