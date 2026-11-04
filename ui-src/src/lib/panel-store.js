@@ -20,6 +20,7 @@
 //   7. peer 名单整单提交，写路径不回读列表，只按服务端存下的名单重算标记。
 
 import {
+  DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
@@ -32,9 +33,12 @@ import {
   channelServiceMissing,
   channelTypeOptions,
   commitLayers,
+  decisionPromptDraft,
+  decisionPromptStatus,
   emptyRerankChannel,
   isCompleteRerankChannel,
   modelOptions,
+  normalizeGateDecisionPrompt,
   normalizeGatePrompt,
   normalizeRerankChannels,
   normalizeRerankPrompt,
@@ -76,6 +80,38 @@ export const NOTE_TIMEOUT_MS = 2600;
 const MISSING = () => {
   throw new Error("panel store: 缺少注入的依赖");
 };
+
+/**
+ * 三份提示词（语言模型判据 / 决策模型判据 / 重排模板）共用一套行为：
+ * 值当草稿、touched 标记、恢复默认走正常提交。
+ *
+ * why 一张表：三份的规则完全一样，各写一遍只会在加第四份时再抄一遍，
+ * 也容易让两份互相吃到对方的值（这才是真正要防的）。
+ *   key     —— state.prompts 里的键（`${key}Touched` 是它有没有被动过）
+ *   field   —— /recall-mode 里的配置键，也是输入框 id / state.focus 的值
+ *   default —— 「恢复默认」填回去的那份文本
+ *   draft   —— 配置为空时框里坐什么（默认全文，或动过之后的空）
+ */
+const PROMPTS = Object.freeze({
+  gate: Object.freeze({
+    key: "gate",
+    field: "gatePrompt",
+    default: DEFAULT_GATE_PROMPT,
+    draft: promptDraft,
+  }),
+  decision: Object.freeze({
+    key: "decision",
+    field: "gateDecisionPrompt",
+    default: DEFAULT_GATE_DECISION_PROMPT,
+    draft: decisionPromptDraft,
+  }),
+  rerank: Object.freeze({
+    key: "rerank",
+    field: "rerankPrompt",
+    default: DEFAULT_RERANK_PROMPT,
+    draft: rerankPromptDraft,
+  }),
+});
 
 /** 打分服务的字段 → 它属于哪一个 kind（超时边界不同）。 */
 export function serviceKindOfField(id) {
@@ -148,8 +184,10 @@ export function createPanelStore(deps = {}) {
     },
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
+      decision: DEFAULT_GATE_DECISION_PROMPT,
       rerank: DEFAULT_RERANK_PROMPT,
       gateTouched: false,
+      decisionTouched: false,
       rerankTouched: false,
     },
     // 打分服务的四个输入框（地址 / 模型 / 超时 / 密钥），键就是配置键（与手写面板的 DOM id 一致）。
@@ -283,13 +321,13 @@ export function createPanelStore(deps = {}) {
       state.form[key] = state.layers[key];
     }
 
-    if (state.focus !== "gatePrompt" && !changedInFlight("gatePrompt", state.prompts.gate)) {
-      state.prompts.gate = promptDraft(state.layers.gatePrompt, state.prompts.gateTouched);
-    }
-    if (state.focus !== "rerankPrompt" && !changedInFlight("rerankPrompt", state.prompts.rerank)) {
-      state.prompts.rerank = rerankPromptDraft(
-        state.layers.rerankPrompt,
-        state.prompts.rerankTouched,
+    // 三份提示词各画各的：拼错的键不影响别人，刷新也不会把用户手上那份盖掉。
+    for (const spec of Object.values(PROMPTS)) {
+      if (state.focus === spec.field) continue;
+      if (changedInFlight(spec.field, state.prompts[spec.key])) continue;
+      state.prompts[spec.key] = spec.draft(
+        state.layers[spec.field],
+        state.prompts[`${spec.key}Touched`],
       );
     }
 
@@ -380,7 +418,9 @@ export function createPanelStore(deps = {}) {
     return {
       recallGate: state.form.recallGate,
       queryMode: state.form.queryMode,
+      // 两份判据分开存、分开提交：改一份不会动另一份，切档也不丢内容。
       gatePrompt: normalizeGatePrompt(state.prompts.gate),
+      gateDecisionPrompt: normalizeGateDecisionPrompt(state.prompts.decision),
       gateModel: state.form.gateModel,
       rerank: state.form.rerank,
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
@@ -439,6 +479,7 @@ export function createPanelStore(deps = {}) {
     "recallGate",
     "queryMode",
     "gatePrompt",
+    "gateDecisionPrompt",
     "gateModel",
     "rerank",
     "rerankPrompt",
@@ -791,32 +832,38 @@ export function createPanelStore(deps = {}) {
     return promptStatus(state.prompts.gate);
   }
 
+  /** 决策判据的状态小字：与 gatePrompt 同一套三态，只是坐的是另一格。 */
+  function decisionPromptStatusOf() {
+    return decisionPromptStatus(state.prompts.decision);
+  }
+
   function rerankPromptStatusOf() {
     return rerankPromptStatus(state.prompts.rerank);
   }
 
   /** 用户动过提示词之后，刷新不再拿默认文案去盖他（包括他故意清空的那次）。 */
   function touchPrompt(which, value) {
-    if (which === "gate") {
-      state.prompts.gateTouched = true;
-      state.prompts.gate = value;
-    } else {
-      state.prompts.rerankTouched = true;
-      state.prompts.rerank = value;
-    }
+    const spec = PROMPTS[which];
+    if (!spec) return;
+    state.prompts[`${spec.key}Touched`] = true;
+    state.prompts[spec.key] = value;
   }
 
   /**
    * 恢复默认：只把文字填回框里，然后走正常提交，不绕过校验也不偷写配置。
+   * 三份各恢复各的默认值（语言模型 / 决策模型 / 重排），不会互相写。
    */
   function resetPrompt(which) {
-    const value = which === "gate" ? DEFAULT_GATE_PROMPT : DEFAULT_RERANK_PROMPT;
-    touchPrompt(which, value);
+    const spec = PROMPTS[which];
+    if (!spec) return undefined;
+    touchPrompt(spec.key, spec.default);
     return saveLayers();
   }
 
   function setPrompt(which, value) {
-    state.prompts[which] = value;
+    const spec = PROMPTS[which];
+    if (!spec) return undefined;
+    state.prompts[spec.key] = value;
     return saveLayers();
   }
 
@@ -902,6 +949,7 @@ export function createPanelStore(deps = {}) {
     setPrompt,
     resetPrompt,
     gatePromptStatusOf,
+    decisionPromptStatusOf,
     rerankPromptStatusOf,
     enabled,
     peerRows,

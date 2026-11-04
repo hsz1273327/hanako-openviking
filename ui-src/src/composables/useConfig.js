@@ -79,6 +79,7 @@ export function useConfig() {
     touchPrompt: (...args) => store.touchPrompt(...args),
     resetPrompt: (...args) => store.resetPrompt(...args),
     gatePromptStatus: () => store.gatePromptStatusOf(),
+    decisionPromptStatus: () => store.decisionPromptStatusOf(),
     rerankPromptStatus: () => store.rerankPromptStatusOf(),
     applyControls: (...args) => store.applyControls(...args),
   };

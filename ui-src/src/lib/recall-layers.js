@@ -4,7 +4,39 @@
 // 所以这里也只发一单，所有键一起带走，界面就不可能停在「一半生效」上。
 // 提交失败必须把界面退回上一次确认过的值，否则会显示成已经改了。
 
-export const RECALL_GATES = Object.freeze(["off", "rules", "llm"]);
+// 四档：off / rules / llm（语言模型判断）/ decision（决策模型判断）。
+// 文案与外发值分开：外发值永远是这个枚举，界面说的是 RECALL_GATE_LABELS 里那四个词。
+export const RECALL_GATES = Object.freeze(["off", "rules", "llm", "decision"]);
+
+/**
+ * 四档的中文说法，与 manifest.json 的 enumLabels 逐字一致。
+ *
+ * 不用缩写，也不把两档都说成「模型」：语言模型与决策模型是两个东西，
+ * 名字里各自带上是哪一个，下拉里才分得清。
+ */
+export const RECALL_GATE_LABELS = Object.freeze({
+  off: "关闭",
+  rules: "规则判断",
+  llm: "语言模型判断",
+  decision: "决策模型判断",
+});
+
+/**
+ * 召回判断下拉的选项：前三项固定，决策服务配好了才追加第四项。
+ *
+ * 没配服务时列表里没有这一档——选得到却永远不生效，比看不到更难查。
+ * 存着的 decision 遇到服务没配由 paintLayers 归一化回 off，不让下拉显示一个假档位。
+ */
+export function recallGateOptions(configured) {
+  const options = [
+    { value: "off", label: RECALL_GATE_LABELS.off },
+    { value: "rules", label: RECALL_GATE_LABELS.rules },
+    { value: "llm", label: RECALL_GATE_LABELS.llm },
+  ];
+  if (configured) options.push({ value: "decision", label: RECALL_GATE_LABELS.decision });
+  return options;
+}
+
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
@@ -363,6 +395,36 @@ export function channelServiceMissing(value, config) {
   return !normalizeServiceUrl(config?.[service.urlKey]);
 }
 
+/**
+ * 决策服务配好了吗：地址与模型都在才算（与 src/ov/settings.js 的
+ * decisionServiceConfigured 同一条判据）。判断模型下拉与第四档都看它。
+ */
+export function decisionServiceConfigured(config) {
+  return Boolean(
+    normalizeServiceUrl(config?.systemoneServiceUrl) &&
+      normalizeServiceModel(config?.systemoneServiceModel),
+  );
+}
+
+/**
+ * 「决策模型判断」这一档的状态行。
+ *
+ * 与 src/memory/recall.js 的 decisionGateServiceOf 同口径：地址与模型都在才算配好，
+ * 只填一半按未配置算。未配置不是「什么都不显示」——没配时第四档根本不会出现在下拉里，
+ * 这一行只在存量页面 / 刚清空的那一刻说清「现在不会判断，每轮都召回」。
+ */
+export function decisionServiceView(config) {
+  const url = normalizeServiceUrl(config?.systemoneServiceUrl);
+  const model = normalizeServiceModel(config?.systemoneServiceModel);
+  if (!url || !model) {
+    return {
+      configured: false,
+      text: "决策服务还没配置，先在全局配置里填决策服务（未配置时每轮都召回）",
+    };
+  }
+  return { configured: true, text: `决策服务：${url} · ${model}` };
+}
+
 /** 与 src/ov/settings.js 的 normalizeGateModel 同口径：空串 = 用宿主辅助模型。 */
 export function normalizeGateModel(value) {
   const text = textOf(value);
@@ -374,6 +436,12 @@ export function normalizeGateModel(value) {
 
 /** 与 src/ov/settings.js 的 normalizeGatePrompt 同口径：按字符截断。 */
 export function normalizeGatePrompt(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串 = 没有判据（照常召回）。 */
+export function normalizeGateDecisionPrompt(value) {
   if (typeof value !== "string" || !value) return "";
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
 }
@@ -411,6 +479,16 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 用户消息：{{message}}`;
 
 /**
+ * 决策模型判断的默认题面。与 src/ov/settings.js 的 DEFAULT_GATE_DECISION_PROMPT 逐字一致。
+ *
+ * 它只是「配过没配过」时的默认值：空值仍然是空（没有判据，照常召回），
+ * 面板只在用户还没动过这一格时拿它当草稿。判定标准是内置的两条 criteria，
+ * 不在这份可编辑文本里。
+ */
+export const DEFAULT_GATE_DECISION_PROMPT =
+  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
+
+/**
  * 重排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。
  * HTML 里不嵌这段字：面板加载不了 Node 模块，只能在这里存一份，
  * 冒烟会断言两边相等，也会断言 HTML 里没有第二份。
@@ -446,6 +524,21 @@ export function promptStatus(text) {
   return "已修改";
 }
 
+/** 决策提示词框的草稿：配置为空时同样把默认题面填进去当底稿。 */
+export function decisionPromptDraft(configValue, touched = false) {
+  const value = normalizeGateDecisionPrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_GATE_DECISION_PROMPT;
+}
+
+/** 决策提示词旁边那行小字：默认 / 已修改 / 空（不拦截，照常召回）。 */
+export function decisionPromptStatus(text) {
+  const value = normalizeGateDecisionPrompt(text);
+  if (value === DEFAULT_GATE_DECISION_PROMPT) return "当前为默认提示词";
+  if (!value.trim()) return "已修改 · 提示词为空时不会拦截任何召回";
+  return "已修改";
+}
+
 /** 重排提示词框的草稿：配置为空时同样把默认模板整段填进去。 */
 export function rerankPromptDraft(configValue, touched = false) {
   const value = normalizeRerankPrompt(configValue);
@@ -462,10 +555,12 @@ export function rerankPromptStatus(text) {
 }
 
 // 服务端回的投影 -> 下拉值。宿主回半个形状时回退默认值，别让下拉变空。
-// 判定口径与 src/ov/settings.js 的 normalizeRecallGate / normalizeQueryMode 一致。
+// 判定口径与 src/ov/settings.js 的 normalizeRecallGate / resolveRecallGate 一致：
+// decision 但决策服务没配 → off，别处漏过来的脏值也在这一层收掉。
 export function paintLayers(out) {
+  const gate = oneOf(out?.recallGate, RECALL_GATES, "off");
   return {
-    recallGate: oneOf(out?.recallGate, RECALL_GATES, "off"),
+    recallGate: gate === "decision" && !decisionServiceConfigured(out) ? "off" : gate,
     queryMode: oneOf(out?.queryMode, QUERY_MODES, "last"),
   };
 }
@@ -475,6 +570,13 @@ export function paintGateConfig(out) {
   return {
     gatePrompt: normalizeGatePrompt(out?.gatePrompt),
     gateModel: normalizeGateModel(out?.gateModel),
+  };
+}
+
+/** decision 那一块自己的字段：一份与 gatePrompt 完全分开的判据。 */
+export function paintDecisionConfig(out) {
+  return {
+    gateDecisionPrompt: normalizeGateDecisionPrompt(out?.gateDecisionPrompt),
   };
 }
 
@@ -596,11 +698,12 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + llm 提示词与模型来源 + 重排配置 + 打分服务。 */
+/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 重排配置 + 打分服务。 */
 export function paintRecallConfig(out) {
   return {
     ...paintLayers(out),
     ...paintGateConfig(out),
+    ...paintDecisionConfig(out),
     ...paintRerankConfig(out),
     ...paintScoringConfig(out),
   };

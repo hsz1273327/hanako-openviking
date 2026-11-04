@@ -172,6 +172,22 @@ export function renderGatePrompt(template, message) {
   return `${text}\n\n${body}`;
 }
 
+/**
+ * 决策档的判据渲染：与 renderGatePrompt 只差一条规矩。
+ *
+ * 决策模型的 state 里已经坐着这条用户消息，判据再自动把消息接一遍就成了
+ * 同一句话发两次（一个喂材料、一个喂问题），读数会飘。所以这里：
+ *   1. 写了 {{message}} 就地替换（用户想把消息拼进问法，随他）；
+ *   2. 没写就只发这句判据，消息本身留在 state 里。
+ * 空模板仍然返回空串：调用方据此不发请求、照常召回。
+ */
+export function renderDecisionPrompt(template, message) {
+  const text = typeof template === "string" ? template : "";
+  if (!text) return "";
+  const body = typeof message === "string" ? message : "";
+  return text.split(GATE_MESSAGE_PLACEHOLDER).join(body);
+}
+
 /** 候选摘要：首 120 字、压平换行、去首尾空白。 */
 export function candidateSummary(text) {
   const body = typeof text === "string" ? text : "";
@@ -634,6 +650,164 @@ function noulScoreOf(value) {
   if (typeof value === "number") return scoreOf(value);
   if (typeof value === "string" && value.trim()) return scoreOf(Number(value));
   return null;
+}
+
+/* ---------------- 决策模型判断（decision 档） ----------------
+ *
+ * 这一档与 llm 档是两条路数：llm 让宿主的生成式模型回答一句话，
+ * decision 让决策模型（/v1/systemone）做一道选择题——这句话自己说完整了，
+ * 还是得靠上文才知道在说什么。题型是 type=choice + criteria 两条内置描述，
+ * 服务端回 choice 与 confidence，不生成文本。所以它不吃 gatePrompt / gateModel，
+ * 用的是「打分服务」那组配置（systemoneService*）加自己的题面 gateDecisionPrompt。
+ *
+ * 为什么不是 noul：noul 等于让模型对一句话泛泛打一个相似度，实测真实对话 17 条
+ * 分数全挤在 0.20–0.42，该召回的十条一条没判出来。choice + criteria 把判定标准
+ * 写成两条互斥的描述，同一个服务同一个模型就能分得开。
+ */
+
+/**
+ * 决策那一档的判据：空串 = 没有判据（照常召回），与 gatePromptOf 同一条语义。
+ *
+ * 默认题面（DEFAULT_GATE_DECISION_PROMPT，在 src/ov/settings.js）是配置的默认值，
+ * 不是空值时的兜底：用户把这一格清空就是「不想判」，不能偷偷把默认题面塞回去。
+ */
+export function gateDecisionPromptOf(switches) {
+  return typeof switches?.gateDecisionPrompt === "string"
+    ? switches.gateDecisionPrompt.trim()
+    : "";
+}
+
+/**
+ * 内置判据：两个选项各配一段「什么样的句子算这一类」。
+ *
+ * choice 题型必须带 criteria，缺了服务端直接 400（questions.q: "criteria" must be
+ * a non-empty object）。这两段是判定标准，不由用户改——用户改的是题面
+ * gateDecisionPrompt。措辞是实测调过参的，照抄，不要顺手改写。
+ */
+export const DECISION_GATE_CRITERIA = Object.freeze({
+  need: "这句话里有指代或省略。比如「这个」「那个」「它」「修吧」「可以」「进度如何」，或者「那就不对了」「也就是说」这种接着上文的话。必须知道之前聊过什么，才知道它指的是什么、在回应哪件事。还有一种情况也算：问一个只有在之前对话里才出现过的名词是什么、干什么用的（例如「探针是干嘛的」「那些胶囊有啥用」），因为不知道前文就不知道在问哪个东西。",
+  standalone: "这句话自己把话说完整了。它给出了具体对象、具体诉求或具体判断，即使完全没有上下文，也能直接照着做或直接回答。问句里主语和对象都写全了的（例如「主进程的 node 能不能用」），算这一边。",
+});
+
+/** 选了 need 且置信度不低于这个数才算需要召回；低于它就是不需要。 */
+export const DECISION_GATE_THRESHOLD = 0.45;
+
+/**
+ * 没配超时时的默认值：这一档一次只问一个问题（单题一次前向），
+ * 比 systemone 那套「5 题批量」小得多，但它挡在每一轮对话前面。
+ */
+export const DECISION_GATE_TIMEOUT_MS = 1200;
+
+/**
+ * 这一档自己的超时上限：配了 systemoneServiceTimeoutMs 也按这个数封顶。
+ * 不能直接套 systemoneTimeoutFor：那条是按候选数自适应的，语义是「批量打分」。
+ */
+export const DECISION_GATE_TIMEOUT_MAX_MS = 2000;
+
+/**
+ * 决策这一档的服务读数：地址与模型都在才算配好了。
+ *
+ * 只填一半（存量里常见）整对当没配，与 resolveRerankChannel 的成对规则同口径。
+ * 面板的状态行也按同一判据说话（ui-src/src/lib/recall-layers.js 的 decisionServiceView）。
+ */
+export function decisionGateServiceOf(switches) {
+  const url =
+    typeof switches?.systemoneServiceUrl === "string"
+      ? switches.systemoneServiceUrl.trim()
+      : "";
+  const model =
+    typeof switches?.systemoneServiceModel === "string"
+      ? switches.systemoneServiceModel.trim()
+      : "";
+  const key = typeof switches?.systemoneServiceKey === "string" ? switches.systemoneServiceKey : "";
+  const given = Number(switches?.systemoneServiceTimeoutMs);
+  const timeoutMs =
+    Number.isFinite(given) && given > 0
+      ? Math.min(Math.floor(given), DECISION_GATE_TIMEOUT_MAX_MS)
+      : DECISION_GATE_TIMEOUT_MS;
+  return { url, model, key, timeoutMs, configured: Boolean(url && model) };
+}
+
+/**
+ * 决策答案的读数：只认 choice + confidence 这一种形状。
+ *
+ * 旧格式（answers.q.noul 一个概率）不再算有效答案：那是「泛泛打一个相似度」的题型，
+ * 实测分数全挤在 0.2–0.42。把它当「没答」，调用方据此照常召回，
+ * 比拿一个错的读数去拦截安全。
+ *
+ * confidence 只认数字或数字串（与 noulScoreOf 同一条边界：显式 null / 缺项不算 0）；
+ * choice 不是 need / standalone 的也算没答。
+ */
+function decisionAnswerOf(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const choice = value.choice === "need" || value.choice === "standalone" ? value.choice : "";
+  if (!choice) return null;
+  const confidence =
+    typeof value.confidence === "number"
+      ? scoreOf(value.confidence)
+      : typeof value.confidence === "string" && value.confidence.trim()
+        ? scoreOf(Number(value.confidence))
+        : null;
+  if (confidence === null) return null;
+  return { choice, confidence };
+}
+
+/**
+ * 问决策服务这条消息要不要查记忆，返回 { choice, confidence }。
+ *
+ * 判据看最后一条用户原话（调用方传进来的就是 lastText），与 llm 档同源，
+ * 不看拼接后的查询。提示词复用 renderDecisionPrompt：谁想用占位符就把 {{message}}
+ * 写进去，没写就只发题面；渲染后的那一段就是 instructions。
+ * state.content 仍然是最后一条用户消息本身，不跟着模板变形。
+ *
+ * 题型固定 choice + criteria：criteria 缺了服务端 400，所以它跟着请求一起发，
+ * 不放在用户可编辑的提示词里。
+ */
+export async function askDecisionGate(sdk, switches, text, prompt) {
+  const service = decisionGateServiceOf(switches);
+  if (!service.configured) throw new Error("决策服务未配置");
+  const body = typeof text === "string" ? text : "";
+  const data = await postJson(
+    sdk,
+    channelEndpoint(service.url, "/v1/systemone"),
+    {
+      model: service.model,
+      state: { type: "text", content: body },
+      questions: {
+        q: {
+          type: "choice",
+          instructions: renderDecisionPrompt(prompt, body),
+          criteria: DECISION_GATE_CRITERIA,
+        },
+      },
+    },
+    service.timeoutMs,
+    serviceAuthHeaders(service.key),
+  );
+  const answer = decisionAnswerOf(data?.answers?.q);
+  if (!answer) {
+    throw new Error("决策服务没有返回 answers.q.choice / answers.q.confidence");
+  }
+  return answer;
+}
+
+/**
+ * 答案 -> 这一轮跳不跳召回。
+ *
+ * 需要召回 ⟺ choice === "need" 且 confidence >= 0.45；其余一律跳过召回。
+ * 方向与 llm 档同源：need（有指代 / 省略）= 得靠上文，所以召回；
+ * standalone（自己把话说完整）= 不靠上文，所以跳过。置信度用服务端算好的那一个，
+ * 不拿 probabilities 重算；need 但置信度不够（< 0.45）按「不算需要召回」处理。
+ * 形状不对的答案（没 choice / choice 不认识 / confidence 不是数）不该走到这里
+ * （askDecisionGate 已经拦过），真到了也按「召回」处理——判断失败不能变成漏召回。
+ */
+export function decisionGateSkips(answer) {
+  if (!answer || typeof answer !== "object") return false;
+  if (answer.choice !== "need" && answer.choice !== "standalone") return false;
+  const confidence = Number(answer.confidence);
+  if (!Number.isFinite(confidence)) return false;
+  if (answer.choice === "standalone") return true;
+  return confidence < DECISION_GATE_THRESHOLD;
 }
 
 /**
@@ -1631,8 +1805,9 @@ export function createRecallHandler(sdk, options = {}) {
     // 判据看最后一条用户原话，不看拼接后的查询：gate 回答的是“这句话需不需要查记忆”，
     // queryMode 回答的是“用什么去查”，两件事分开。若用拼接结果判断，context 模式
     // 一旦有历史就必然超 8 字，rules 会被整个抵消掉。
-    // 召回判断：rules 只看极短纯操作指令；llm 让宿主模型判断。
-    // llm 失败 / 超时 / 没权限一律按「召回」走——判断失败不能变成漏召回。
+    // 召回判断：rules 只看极短纯操作指令；llm 让宿主的生成式模型回答（语言模型判断）；
+    // decision 让决策模型（/v1/systemone）在 need / standalone 之间选一个（决策模型判断）。
+    // 任何一档失败 / 超时 / 没配置一律按「召回」走——判断失败不能变成漏召回。
     let gateSkip = null;
     if (switches.recallGate === "llm") {
       const prompt = gatePromptOf(switches);
@@ -1650,6 +1825,29 @@ export function createRecallHandler(sdk, options = {}) {
             sdk,
             "info",
             `gate: llm failed, recall anyway (session=${sessionId}) ${reasonOf(error)}`,
+          );
+        }
+      }
+    } else if (switches.recallGate === "decision") {
+      const service = decisionGateServiceOf(switches);
+      const prompt = gateDecisionPromptOf(switches);
+      if (!service.configured) {
+        // 没配不是失败，是「没有判据」：照常召回，面板另给一句提示。不退回 llm。
+        log(sdk, "info", `gate: decision unconfigured, recall anyway (session=${sessionId})`);
+      } else if (!prompt) {
+        // 空判据不是「用默认问法」：没有判据就不拦，一次请求都不发。
+        log(sdk, "info", `gate: decision prompt empty, recall anyway (session=${sessionId})`);
+      } else {
+        try {
+          const answer = await askDecisionGate(sdk, switches, lastText, prompt);
+          if (decisionGateSkips(answer)) {
+            gateSkip = { by: "decision", reason: "decision-no-need" };
+          }
+        } catch (error) {
+          log(
+            sdk,
+            "info",
+            `gate: decision failed, recall anyway (session=${sessionId}) ${reasonOf(error)}`,
           );
         }
       }

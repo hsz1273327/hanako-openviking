@@ -3,6 +3,20 @@
 // 铁律：所有开关在"使用的那一刻"从 sdk.config 现读，不在加载时缓存。
 // 因此设置页里点一下关，下一轮立刻生效，不用重载 App。
 
+/**
+ * 决策模型判断的默认题面（不是提示词模板）。
+ *
+ * 与 gatePrompt 的默认值不一样：那一条默认是空串（空 = 不拦截），这一条默认给一句完整问法，
+ * 因为决策模型的题型固定是 choice + criteria（两条内置描述写在 src/memory/recall.js 的
+ * DECISION_GATE_CRITERIA 里），用户能改的只是「题面」怎么问，不是判定标准。
+ * 空值仍然是「没有判据，照常召回」——这里给的是「没配过时读到什么」，不是「空值时偷偷套什么」。
+ *
+ * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
+ * 冒烟会比对两边。
+ */
+export const DEFAULT_GATE_DECISION_PROMPT =
+  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -21,6 +35,7 @@ export const DEFAULTS = {
   recallGate: "off",
   queryMode: "last",
   gatePrompt: "",
+  gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
   gateModel: "",
   rerank: "off",
   rerankPrompt: "",
@@ -36,8 +51,17 @@ export const DEFAULTS = {
   systemoneServiceKey: "",
 };
 
-/** 召回判断：off 永远召回，rules 只跳过极短的纯操作指令，llm 让宿主模型判断。 */
-export const RECALL_GATES = Object.freeze(["off", "rules", "llm"]);
+/**
+ * 召回判断（四档，界面文案见 ui-src/src/lib/recall-layers.js 的 RECALL_GATE_LABELS）：
+ *   off      关闭，每轮都召回
+ *   rules    规则判断，只跳过极短的纯操作指令
+ *   llm      语言模型判断：让宿主的生成式模型回答「要不要查」
+ *   decision 决策模型判断：让决策模型（/v1/systemone）在 need / standalone 之间选一个
+ *
+ * 后两者不是同一条路数：一个生成文本，一个只出概率。混用一个枚举名会把区别抹掉。
+ * 第四档要有决策服务才有意义，所以归一化时按服务是否配好回退，见 resolveRecallGate。
+ */
+export const RECALL_GATES = Object.freeze(["off", "rules", "llm", "decision"]);
 
 /** 召回查询：last 只用最后一句，context 拼最近几条用户文本。 */
 export const QUERY_MODES = Object.freeze(["last", "context"]);
@@ -116,6 +140,12 @@ export function normalizeRerank(raw) {
 
 /** 提示词按字符截断，不把代理对切成两半。空串表示“没有提示词，不拦截”。 */
 export function normalizeGatePrompt(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
+}
+
+/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串 = 没有判据（照常召回）。 */
+export function normalizeGateDecisionPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
 }
@@ -409,6 +439,10 @@ async function read(sdk, key) {
 }
 
 export async function readSwitches(sdk) {
+  // 决策服务的地址与模型先读出来：recallGate 的归一化要用它们当判据
+  // （选了 decision 但服务没配 → off），与路由 GET / 面板投影同一份规则。
+  const systemoneServiceUrl = normalizeServiceUrl(await read(sdk, "systemoneServiceUrl"));
+  const systemoneServiceModel = normalizeServiceModel(await read(sdk, "systemoneServiceModel"));
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
@@ -416,9 +450,13 @@ export async function readSwitches(sdk) {
     readOnly: await read(sdk, "readOnly"),
     skillRouting: await read(sdk, "skillRouting"),
     probe: await read(sdk, "probe"),
-    recallGate: normalizeRecallGate(await read(sdk, "recallGate")),
+    recallGate: resolveRecallGate(await read(sdk, "recallGate"), {
+      systemoneServiceUrl,
+      systemoneServiceModel,
+    }),
     queryMode: normalizeQueryMode(await read(sdk, "queryMode")),
     gatePrompt: normalizeGatePrompt(await read(sdk, "gatePrompt")),
+    gateDecisionPrompt: normalizeGateDecisionPrompt(await read(sdk, "gateDecisionPrompt")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
     rerank: normalizeRerank(await read(sdk, "rerank")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
@@ -438,14 +476,40 @@ export async function readSwitches(sdk) {
       "rerank",
     ),
     rerankServiceKey: normalizeServiceKey(await read(sdk, "rerankServiceKey")),
-    systemoneServiceUrl: normalizeServiceUrl(await read(sdk, "systemoneServiceUrl")),
-    systemoneServiceModel: normalizeServiceModel(await read(sdk, "systemoneServiceModel")),
+    systemoneServiceUrl,
+    systemoneServiceModel,
     systemoneServiceTimeoutMs: normalizeServiceTimeout(
       await read(sdk, "systemoneServiceTimeoutMs"),
       "systemone",
     ),
     systemoneServiceKey: normalizeServiceKey(await read(sdk, "systemoneServiceKey")),
   };
+}
+
+/**
+ * 决策服务配好了吗：地址与模型都在才算（与 resolveRerankChannel 的成对规则一致）。
+ *
+ * 只填一半按没配算：地址为空等于该服务未配置，孤立的模型名运行时会被整对忽略。
+ * 这是「第四档能不能选」与「已选的第四档还算不算数」的唯一判据，运行时 / 路由 / 面板共用。
+ */
+export function decisionServiceConfigured(switches) {
+  return Boolean(
+    normalizeServiceUrl(switches?.systemoneServiceUrl) &&
+      normalizeServiceModel(switches?.systemoneServiceModel),
+  );
+}
+
+/**
+ * 归一化召回判断：decision 但服务没配 → 回退 off。
+ *
+ * 除了「认不认这个枚举值」，还有一条「此刻算不算数」：决策服务被清掉之后，
+ * 存着的 decision 已经没有意义了，界面与运行时都必须看到 off，不能显示一个
+ * 实际不生效的档位。只在 decision 这一档上判，别的档与服务无关。
+ */
+export function resolveRecallGate(gate, switches) {
+  const value = normalizeRecallGate(gate);
+  if (value === "decision" && !decisionServiceConfigured(switches)) return "off";
+  return value;
 }
 
 export async function readExcludedPeers(sdk) {

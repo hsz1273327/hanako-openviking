@@ -35,6 +35,7 @@ import {
   normalizeRecallGate,
   normalizeQueryMode,
   normalizeGateModel,
+  normalizeGateDecisionPrompt,
   normalizeGatePrompt,
   normalizeRerank,
   normalizeRerankModel,
@@ -49,6 +50,9 @@ import {
   parseRerankChannel,
   parseRerankChannels,
   serializeRerankChannels,
+  DEFAULT_GATE_DECISION_PROMPT,
+  decisionServiceConfigured,
+  resolveRecallGate,
   GATE_PROMPT_MAX,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TYPES,
@@ -125,6 +129,15 @@ import {
   GATE_MESSAGE_PLACEHOLDER,
   GATE_TIMEOUT_MS,
   GATE_MAX_TOKENS,
+  gateDecisionPromptOf,
+  DECISION_GATE_CRITERIA,
+  DECISION_GATE_THRESHOLD,
+  DECISION_GATE_TIMEOUT_MS,
+  DECISION_GATE_TIMEOUT_MAX_MS,
+  askDecisionGate,
+  decisionGateServiceOf,
+  decisionGateSkips,
+  renderDecisionPrompt,
   RERANK_TIMEOUT_MS,
   RERANK_MAX_TOKENS,
   DEDUP_LIMIT,
@@ -180,10 +193,12 @@ import {
 } from "../ui-src/src/lib/check-summary.js";
 // 面板那排召回下拉的状态与提交：成功 / 失败两种收笔都由它定。
 import {
+  DEFAULT_GATE_DECISION_PROMPT as UI_DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT as UI_DEFAULT_RERANK_PROMPT,
   RERANK_CHANNEL_LABELS,
+  RECALL_GATE_LABELS as UI_RECALL_GATE_LABELS,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SCORING_SERVICES,
@@ -196,6 +211,12 @@ import {
   SERVICE_URL_MAX as UI_SERVICE_URL_MAX,
   SERVICE_KEY_MASK_DOTS as UI_SERVICE_KEY_MASK_DOTS,
   channelPairNote as uiChannelPairNote,
+  decisionPromptDraft,
+  decisionPromptStatus,
+  decisionServiceConfigured as uiDecisionServiceConfigured,
+  decisionServiceView,
+  normalizeGateDecisionPrompt as uiNormalizeGateDecisionPrompt,
+  paintDecisionConfig,
   normalizeServiceKey as uiNormalizeServiceKey,
   normalizeServiceTimeout as uiNormalizeServiceTimeout,
   serviceKeyMask as uiServiceKeyMask,
@@ -222,6 +243,7 @@ import {
   paintScoringConfig,
   promptDraft,
   promptStatus,
+  recallGateOptions,
   rerankPromptDraft,
   rerankPromptStatus,
   rerankChannelsText,
@@ -268,6 +290,10 @@ import {
 } from "../ui-src/src/conn-fields.js";
 // 主题也是一份纯数据：直接检查对象，比正则靠谱。
 import { lightThemeOverrides } from "../ui-src/src/theme.js";
+
+// 决策那份默认题面：字面量只在这里写一次，其余断言引用它。
+const DECISION_PROMPT_TEXT =
+  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
 
 let passed = 0;
 const failures = [];
@@ -1981,7 +2007,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       UI_SYSTEMONE_TIMEOUT_MAX,
       [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
       UI_SYSTEMONE_MAX_CANDIDATES,
-    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, Object.keys(RERANK_CHANNEL_LABELS)], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
+    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, Object.keys(RERANK_CHANNEL_LABELS)], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_GATE_DECISION_PROMPT, UI_DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
     [[
       RERANK_CHANNELS_MAX,
       {
@@ -1992,7 +2018,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       SYSTEMONE_TIMEOUT_MAX_MS,
       [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
       SYSTEMONE_MAX_CANDIDATES,
-    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [["rerank", "systemone", "model"], ["rerank", "systemone", "model"]], [DEFAULT_GATE_PROMPT, DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
+    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [["rerank", "systemone", "model"], ["rerank", "systemone", "model"]], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_RERANK_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX]],
+  );
+
+  // 决策那份默认题面就是那句完整问法：两个常量逐字一致，而且不是「空值兜底」的那份字。
+  eq(
+    "决策提示词默认值就是那句完整问法（前后端两份常量逐字一致，且不是 gatePrompt 的默认）",
+    [
+      DEFAULT_GATE_DECISION_PROMPT,
+      UI_DEFAULT_GATE_DECISION_PROMPT,
+      DEFAULT_GATE_DECISION_PROMPT === DEFAULT_GATE_PROMPT,
+      DEFAULTS.gateDecisionPrompt,
+      normalizeGateDecisionPrompt("字".repeat(GATE_PROMPT_MAX + 5)).length,
+      uiNormalizeGateDecisionPrompt("字".repeat(GATE_PROMPT_MAX + 5)).length,
+    ],
+    [
+      DECISION_PROMPT_TEXT,
+      DECISION_PROMPT_TEXT,
+      false,
+      DECISION_PROMPT_TEXT,
+      GATE_PROMPT_MAX,
+      GATE_PROMPT_MAX,
+    ],
   );
 
   // manifest 是配置的唯一声明面：密钥要标 sensitive，新增键不能只活在代码里。
@@ -2003,6 +2050,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "两个服务密钥在 manifest 里标了 sensitive（不当普通字符串存）",
     [props.rerankServiceKey?.sensitive, props.systemoneServiceKey?.sensitive],
     [true, true],
+  );
+  eq(
+    "manifest 的四档 enumLabels 就是「关闭 / 规则判断 / 语言模型判断 / 决策模型判断」/ 决策题面有独立配置项且默认是那句完整问法",
+    [
+      props.recallGate?.enum,
+      props.recallGate?.ui?.enumLabels,
+      props.gateDecisionPrompt?.default,
+      props.gateDecisionPrompt?.type,
+    ],
+    [
+      ["off", "rules", "llm", "decision"],
+      ["关闭", "规则判断", "语言模型判断", "决策模型判断"],
+      DECISION_PROMPT_TEXT,
+      "string",
+    ],
   );
   check(
     "manifest 里每个 DEFAULTS 键都有声明（新增配置不能只活在代码里）",
@@ -2327,6 +2389,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       recallGate: "off",
       queryMode: "last",
       gatePrompt: "",
+      gateDecisionPrompt: "",
       gateModel: "",
       rerank: "off",
       rerankPrompt: "",
@@ -2433,7 +2496,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       state.conn.apiKeyPlaceholder,
       state.conn.peerPrefix,
       [state.form.recallGate, state.form.queryMode, state.form.rerank],
-    ], [state.prompts.gate, state.prompts.rerank], [
+    ], [state.prompts.gate, state.prompts.decision, state.prompts.rerank], [
       state.draft.rerankServiceUrl,
       state.draft.rerankServiceModel,
       state.draft.rerankServiceTimeoutMs,
@@ -2447,7 +2510,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "已填写（留空表示不改）",
       "lab",
       ["off", "last", "off"],
-    ], [DEFAULT_GATE_PROMPT, DEFAULT_RERANK_PROMPT], ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "sk-a••••••••7890", ""], ["孤儿通道"], ["", "p/m"]],
+    ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_RERANK_PROMPT], ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "sk-a••••••••7890", ""], ["孤儿通道"], ["", "p/m"]],
   );
   check("目录可用时不显示原因", ui.store.modelHint() === "");
   eq(
@@ -2594,6 +2657,81 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [ui.gatePromptStatus().includes("不会拦截任何召回"), backend["/recall-mode"].gatePrompt],
       [true, ""],
     );
+    // 复位，后面的断言按默认草稿走。
+    await ui.resetPrompt("gate");
+  }
+
+  // ---- 两份判据提示词互不影响 + 第四档只在服务配好后可选 ----
+  {
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    await ui.setForm("recallGate", "llm");
+    await ui.setPrompt("decision", "决策那份：{{message}}");
+    await ui.setPrompt("gate", "语言模型那份");
+    eq(
+      "两份提示词分开存、分开提交：改一份不动另一份，两份都在同一单里",
+      [
+        state.prompts.gate,
+        state.prompts.decision,
+        saves().at(-1).body.gatePrompt,
+        saves().at(-1).body.gateDecisionPrompt,
+      ],
+      ["语言模型那份", "决策那份：{{message}}", "语言模型那份", "决策那份：{{message}}"],
+    );
+
+    await ui.resetPrompt("decision");
+    eq(
+      "恢复默认只恢复决策那一份（语言模型那份原样）",
+      [state.prompts.decision, ui.decisionPromptStatus(), state.prompts.gate],
+      [DEFAULT_GATE_DECISION_PROMPT, "当前为默认提示词", "语言模型那份"],
+    );
+
+    // 切档：两份草稿都不丢。
+    await ui.setForm("recallGate", "rules");
+    await ui.setForm("recallGate", "llm");
+    eq(
+      "切到别的档再切回来，两份提示词的草稿都还在",
+      [state.prompts.gate, state.prompts.decision],
+      ["语言模型那份", DEFAULT_GATE_DECISION_PROMPT],
+    );
+
+    // 服务没配：下拉里没有第四档；配上之后（GET 回来）才出现。
+    eq(
+      "决策服务没配时下拉只有三项",
+      recallGateOptions(uiDecisionServiceConfigured(state.layers)).map((option) => option.value),
+      ["off", "rules", "llm"],
+    );
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      systemoneServiceUrl: "http://127.0.0.1:8097",
+      systemoneServiceModel: "kev-4b",
+    };
+    await ui.refresh();
+    eq(
+      "服务配好后第四项出现（重新读 /recall-mode 才解锁）",
+      recallGateOptions(uiDecisionServiceConfigured(state.layers)).map((option) => option.value),
+      ["off", "rules", "llm", "decision"],
+    );
+    await ui.setForm("recallGate", "decision");
+    eq(
+      "服务配好时选 decision 能被接住（投影仍是 decision，不会被洗成 off）",
+      [state.form.recallGate, state.layers.recallGate],
+      ["decision", "decision"],
+    );
+
+    // 选了 decision 之后把服务清空：面板投影回 off，下拉也回到三项。
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      recallGate: "decision",
+      systemoneServiceUrl: "",
+      systemoneServiceModel: "",
+    };
+    await ui.refresh();
+    eq(
+      "已选 decision 但服务被清空：面板自己归一化回 off（不在下拉里留假档位）",
+      [state.form.recallGate, state.layers.recallGate, recallGateOptions(uiDecisionServiceConfigured(state.layers)).length],
+      ["off", "off", 3],
+    );
+
     // 复位，后面的断言按默认草稿走。
     await ui.resetPrompt("gate");
   }
@@ -2953,9 +3091,69 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [DEFAULT_GATE_PROMPT, [DEFAULT_GATE_PROMPT, "", "我的提示词", GATE_PROMPT_MAX], ["当前为默认提示词", "已修改", true, true]],
   );
 
+  // ---- 四档文案与选项：没配决策服务就只有三项 ----
+  eq(
+    "四档文案与顺序（关闭 / 规则判断 / 语言模型判断 / 决策模型判断）",
+    [
+      recallGateOptions(true).map((option) => option.value),
+      recallGateOptions(true).map((option) => option.label),
+      UI_RECALL_GATE_LABELS,
+    ],
+    [
+      ["off", "rules", "llm", "decision"],
+      ["关闭", "规则判断", "语言模型判断", "决策模型判断"],
+      { off: "关闭", rules: "规则判断", llm: "语言模型判断", decision: "决策模型判断" },
+    ],
+  );
+  eq(
+    "决策服务未配置时下拉只有三项 / 配好（地址与模型成对）之后第四项才出现",
+    [
+      recallGateOptions(false).map((option) => option.value),
+      recallGateOptions(
+        uiDecisionServiceConfigured({
+          systemoneServiceUrl: "http://127.0.0.1:8099",
+          systemoneServiceModel: "kev-4b",
+        }),
+      ).map((option) => option.value),
+      recallGateOptions(
+        uiDecisionServiceConfigured({ systemoneServiceUrl: "http://127.0.0.1:8099" }),
+      ).length,
+      recallGateOptions(uiDecisionServiceConfigured({})).length,
+    ],
+    [["off", "rules", "llm"], ["off", "rules", "llm", "decision"], 3, 3],
+  );
+
+  // ---- 决策提示词自己的草稿与三态（与 gatePrompt 同一套，只是另一格） ----
+  eq(
+    "决策提示词草稿（空配置坐默认问法、动过不再填、自定义照显、超长按码点截断） / 三态小字（默认 / 已修改 / 空＝照常召回）",
+    [
+      decisionPromptDraft(""),
+      decisionPromptDraft("", true),
+      decisionPromptDraft("自定义判据"),
+      decisionPromptStatus(UI_DEFAULT_GATE_DECISION_PROMPT),
+      decisionPromptStatus("自定义判据"),
+      decisionPromptStatus("").includes("不会拦截任何召回"),
+      decisionPromptStatus("   \n ").includes("不会拦截任何召回"),
+      paintDecisionConfig({ gateDecisionPrompt: "字".repeat(GATE_PROMPT_MAX + 10) })
+        .gateDecisionPrompt.length,
+      paintDecisionConfig({}).gateDecisionPrompt,
+    ],
+    [
+      UI_DEFAULT_GATE_DECISION_PROMPT,
+      "",
+      "自定义判据",
+      "当前为默认提示词",
+      "已修改",
+      true,
+      true,
+      GATE_PROMPT_MAX,
+      "",
+    ],
+  );
+
   // ---- llm 的提示词与判断模型：归一化 + 整单收笔 ----
   eq(
-    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、重排配置、通道与打分服务",
+    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、重排配置、通道与打分服务",
     [paintGateConfig({
       gatePrompt: "字".repeat(GATE_PROMPT_MAX + 10),
       gateModel: "  p1/m1  ",
@@ -2968,6 +3166,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     queryMode: "last",
     gatePrompt: "",
     gateModel: "",
+    gateDecisionPrompt: "",
     rerank: "off",
     rerankPrompt: "",
     rerankModel: "",
@@ -4098,9 +4297,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const defaults = await get();
   eq(
-    "GET 缺省时五个字段都是默认值（off / last / off / 空提示词 / 默认通道）",
-    [defaults.body.recallGate, defaults.body.queryMode, defaults.body.rerank, defaults.body.rerankPrompt, defaults.body.rerankModel],
-    ["off", "last", "off", "", ""],
+    "GET 缺省时都是默认值（off / last / off / 空提示词 / 决策那份是默认问法 / 空模型）",
+    [
+      defaults.body.recallGate,
+      defaults.body.queryMode,
+      defaults.body.rerank,
+      defaults.body.rerankPrompt,
+      defaults.body.gateDecisionPrompt,
+      defaults.body.rerankModel,
+    ],
+    ["off", "last", "off", "", DEFAULT_GATE_DECISION_PROMPT, ""],
   );
 
   store.recallGate = "bogus";
@@ -4128,6 +4334,60 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "只提交一个键也能改 / 另一个键保持原值",
     [partial.status, store.recallGate],
     [200, "rules"],
+  );
+
+  // ---- decision 档：写入口认这第四档，且不要求 gatePrompt / gateModel ----
+  // 第四档要有判据来源才有意义，所以先把决策服务配上（成对）。
+  await post({
+    systemoneServiceUrl: "http://127.0.0.1:8097",
+    systemoneServiceModel: "kev-4b",
+  });
+  writes.length = 0;
+  const decision = await post({ recallGate: "decision" });
+  eq(
+    "recallGate=decision 能落库（服务配好时枚举多了第四档），不要求 gatePrompt 与 gateModel",
+    [decision.status, store.recallGate, decision.body.gatePrompt, decision.body.gateModel, writes.length],
+    [200, "decision", "", "", 1],
+  );
+
+  // ---- 第四档的落库口径：服务没配 → 落库前就回退 off，并记进 applied ----
+  writes.length = 0;
+  const unconfiguredDecision = await post({
+    recallGate: "decision",
+    systemoneServiceUrl: "",
+    systemoneServiceModel: "",
+  });
+  eq(
+    "POST 把 recallGate 写成 decision 而决策服务同一单被清空：落库是 off、applied 里也有它（没有「存 decision 显示 off」）",
+    [
+      unconfiguredDecision.status,
+      store.recallGate,
+      unconfiguredDecision.body.recallGate,
+      unconfiguredDecision.body.applied.includes("recallGate"),
+    ],
+    [200, "off", "off", true],
+  );
+
+  writes.length = 0;
+  const halfConfiguredDecision = await post({
+    recallGate: "decision",
+    systemoneServiceUrl: "http://127.0.0.1:8097",
+  });
+  eq(
+    "只填一半地址（缺模型）整单被拒 400：decision 不会落库，也不留下半对配置",
+    [halfConfiguredDecision.status, store.recallGate, store.systemoneServiceUrl, store.systemoneServiceModel],
+    [400, "off", "", ""],
+  );
+
+  // 已存 decision、服务被清空：同一单里把档位改回 off（状态不许自相矛盾）。
+  await post({ systemoneServiceUrl: "http://127.0.0.1:8097", systemoneServiceModel: "kev-4b" });
+  await post({ recallGate: "decision" });
+  writes.length = 0;
+  const clearedService = await post({ systemoneServiceUrl: "", systemoneServiceModel: "" });
+  eq(
+    "已选 decision 但这一单把服务清空：档位跟着回退并落库为 off",
+    [clearedService.status, store.recallGate, clearedService.body.recallGate],
+    [200, "off", "off"],
   );
 
   // ---- llm 档与提示词 / 判断模型 ----
@@ -4170,6 +4430,78 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const badPrompt = await post({ gatePrompt: 1 });
   eq("超长 / 类型不对的提示词都 400、零写入",
     [longPrompt.status, badPrompt.status, writes.length], [400, 400, 0]);
+
+  // ---- 决策判据是独立一份：分开存、分开提交，改一份不动另一份 ----
+  writes.length = 0;
+  const decisionPrompt = await post({ gateDecisionPrompt: "先查历史吗：{{message}}" });
+  eq(
+    "gateDecisionPrompt 可写：落库与回显都是原值 / 同一单里 gatePrompt 一个字节都没动",
+    [
+      decisionPrompt.status,
+      store.gateDecisionPrompt,
+      decisionPrompt.body.gateDecisionPrompt,
+      store.gatePrompt,
+      decisionPrompt.body.gatePrompt,
+    ],
+    [200, "先查历史吗：{{message}}", "先查历史吗：{{message}}", "自定义提示词", "自定义提示词"],
+  );
+
+  writes.length = 0;
+  const promptBack = await post({ gatePrompt: "语言模型那份改回来" });
+  eq(
+    "改 gatePrompt 不动 gateDecisionPrompt（两份互不影响）",
+    [promptBack.status, store.gatePrompt, store.gateDecisionPrompt],
+    [200, "语言模型那份改回来", "先查历史吗：{{message}}"],
+  );
+
+  writes.length = 0;
+  const longDecisionPrompt = await post({ gateDecisionPrompt: "字".repeat(GATE_PROMPT_MAX + 1) });
+  const badDecisionPrompt = await post({ gateDecisionPrompt: 1 });
+  eq("决策提示词超长 / 类型不对都 400、零写入",
+    [longDecisionPrompt.status, badDecisionPrompt.status, writes.length, store.gateDecisionPrompt],
+    [400, 400, 0, "先查历史吗：{{message}}"]);
+
+  writes.length = 0;
+  const clearedDecisionPrompt = await post({ gateDecisionPrompt: "" });
+  eq(
+    "决策提示词可以清空（空 = 没有判据，照常召回），清空也不影响 gatePrompt",
+    [clearedDecisionPrompt.status, store.gateDecisionPrompt, clearedDecisionPrompt.body.gateDecisionPrompt, store.gatePrompt],
+    [200, "", "", "语言模型那份改回来"],
+  );
+
+  // ---- 服务端投影与运行时 / 面板同一判据：存着 decision 但服务没配 → off ----
+  {
+    const savedGate = store.recallGate;
+    store.recallGate = "decision";
+    store.systemoneServiceUrl = "";
+    store.systemoneServiceModel = "";
+    const unconfiguredView = await get();
+    store.systemoneServiceUrl = "http://127.0.0.1:8097";
+    store.systemoneServiceModel = "kev-4b";
+    const configuredView = await get();
+    store.recallGate = savedGate;
+    store.systemoneServiceUrl = "";
+    store.systemoneServiceModel = "";
+    eq(
+      "已选 decision 但服务被清空：settings / 路由 GET / 面板投影三处同值 off；服务配好三处同值 decision",
+      [
+        resolveRecallGate("decision", {}),
+        unconfiguredView.body.recallGate,
+        paintLayers({ recallGate: "decision" }).recallGate,
+        resolveRecallGate("decision", {
+          systemoneServiceUrl: "http://127.0.0.1:8097",
+          systemoneServiceModel: "kev-4b",
+        }),
+        configuredView.body.recallGate,
+        paintLayers({
+          recallGate: "decision",
+          systemoneServiceUrl: "http://127.0.0.1:8097",
+          systemoneServiceModel: "kev-4b",
+        }).recallGate,
+      ],
+      ["off", "off", "off", "decision", "decision", "decision"],
+    );
+  }
 
   // ---- 结果重排：开关 / 提示词 / 模型三个字段 ---------
   writes.length = 0;
@@ -5464,7 +5796,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     serverUrl: "http://h:1",
     recallGate: "llm",
     gateModel: "",
-    // 空提示词已经不再回退成默认，要跑模型判断就得真存一份提示词。
+    // 空提示词已经不再回退成默认，要跑语言模型判断就得真存一份提示词。
     gatePrompt: DEFAULT_GATE_PROMPT,
     probe: true,
   };
@@ -5752,6 +6084,564 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     }
     check("stream error 事件直接抛", String(threw?.message).includes("坏了"));
   }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= recall gate: decision =================
+//
+// 这一档走决策模型（/v1/systemone，type=choice + criteria），与 llm 档（宿主生成式模型）是两条路。
+// 两路响应分开给：/v1/systemone 回 answers.q.choice + answers.q.confidence，其余（召回）回 OpenViking 的形状。
+{
+  const dir = path.join(import.meta.dirname, ".tmp-recall-gate-decision");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+  const values = {
+    enabled: true,
+    apiKey: "k",
+    serverUrl: "http://h:1",
+    recallGate: "decision",
+    systemoneServiceUrl: "http://127.0.0.1:8099",
+    systemoneServiceModel: "kev-4b",
+    systemoneServiceKey: "",
+    probe: true,
+  };
+
+  const jsonOf = (payload, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  const decisionFetch = ({
+    choice = "need",
+    confidence = 0.8,
+    payload,
+    systemoneStatus = 200,
+    hang = false,
+  } = {}) => {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      const target = String(url);
+      calls.push({ url: target, init });
+      if (!target.includes("/v1/systemone")) return jsonOf(recallBody);
+      if (hang) return new Promise(() => {});
+      if (systemoneStatus !== 200) return jsonOf({ error: "boom" }, systemoneStatus);
+      return jsonOf(payload ?? { answers: { q: { choice, confidence } } });
+    };
+    const systemone = () => calls.filter((call) => call.url.includes("/v1/systemone"));
+    return { calls, fetchImpl, systemone };
+  };
+
+  // ---- need + 0.8：需要召回 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.8 });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+      session: { sessionId: "decision-recall" },
+    });
+    const call = request.systemone()[0];
+    const body = JSON.parse(call?.init?.body || "{}");
+    eq(
+      "decision need+0.8 判为需要召回：照常召回并发一次 /v1/systemone / 请求体是 choice 形态（model + text state + q.type=choice）",
+      [
+        Boolean(result?.payload),
+        request.systemone().length,
+        call?.url,
+        body.model,
+        body.state,
+        body.questions?.q?.type,
+      ],
+      [
+        true,
+        1,
+        "http://127.0.0.1:8099/v1/systemone",
+        "kev-4b",
+        { type: "text", content: "上次那个决定是什么" },
+        "choice",
+      ],
+    );
+    eq(
+      "decision 请求体带 criteria 的两个键（need / standalone），两段描述都不是空串——缺了服务端直接 400",
+      [
+        Object.keys(body.questions?.q?.criteria || {}),
+        Array.isArray(body.questions?.q?.criteria),
+        typeof body.questions?.q?.criteria?.need,
+        typeof body.questions?.q?.criteria?.standalone,
+        JSON.stringify(body.questions?.q?.criteria),
+      ],
+      [
+        ["need", "standalone"],
+        false,
+        "string",
+        "string",
+        JSON.stringify(DECISION_GATE_CRITERIA),
+      ],
+    );
+    check(
+      "criteria 是内置的两条描述：need 提到指代 / 省略，standalone 提到自己把话说完整",
+      DECISION_GATE_CRITERIA.need.includes("指代或省略") &&
+        DECISION_GATE_CRITERIA.standalone.includes("把话说完整") &&
+        DECISION_GATE_CRITERIA.need.length > 50 &&
+        DECISION_GATE_CRITERIA.standalone.length > 50,
+      JSON.stringify(DECISION_GATE_CRITERIA),
+    );
+    check(
+      "没配 gateDecisionPrompt 时用默认题面（默认句不含占位符，所以 instructions 就是这句话本身，消息在 state 里不重复）",
+      body.questions?.q?.instructions === DEFAULT_GATE_DECISION_PROMPT &&
+        body.questions?.q?.instructions === DECISION_PROMPT_TEXT &&
+        !DEFAULT_GATE_DECISION_PROMPT.includes("{{message}}") &&
+        body.state?.content === "上次那个决定是什么",
+      body.questions?.q?.instructions,
+    );
+    eq(
+      "decision 空密钥不发 Authorization（content-type 照发）/ 判据是最后一条用户原话",
+      ["Authorization" in call.init.headers, call.init.headers["content-type"], body.state?.content],
+      [false, "application/json", "上次那个决定是什么"],
+    );
+  }
+
+  // ---- 判定的四条行为：choice 与 confidence 两维合起来决定跳不跳 ----
+  // 需要召回 ⇔ choice === "need" 且 confidence >= 0.45；其余一律跳过召回（任务书的口径）。
+  // 方向与 llm 档同源：need（有指代 / 省略）= 得靠上文 → 召回；
+  // standalone（自己把话说完整）= 不靠上文 → 跳过。
+  // 形状坏的答案（缺 confidence / choice 不认识 / noul 旧格式）不是「不需要」，
+  // 而是「没问出结果」，一律照常召回，不能变成漏召回。
+  // 注意：need 但置信度低于阈值这一格按任务书的公式算「不需要」，会跳过——
+  // 这是唯一一个「模型其实偏 need、我们仍然不查」的口子，改口径就改 decisionGateSkips 一处。
+  {
+    const cases = [
+      { label: "need+0.8", choice: "need", confidence: 0.8 },
+      { label: "need+0.3", choice: "need", confidence: 0.3 },
+      { label: "standalone+0.9", choice: "standalone", confidence: 0.9 },
+      { label: "缺 confidence", payload: { answers: { q: { choice: "need" } } } },
+      { label: "choice 是别的值", payload: { answers: { q: { choice: "maybe", confidence: 0.9 } } } },
+      { label: "noul 旧格式", payload: { answers: { q: { noul: 0.1 } } } },
+    ];
+    const outcomes = [];
+    for (const item of cases) {
+      const request = decisionFetch({ choice: item.choice, confidence: item.confidence, payload: item.payload });
+      const handler = createRecallHandler(
+        recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+      );
+      const result = await handler({
+        payload: { messages: [{ role: "user", content: `判定用例 ${item.label}` }] },
+        session: { sessionId: `decision-case-${item.label}` },
+      });
+      outcomes.push({
+        label: item.label,
+        skipped: result === undefined,
+        systemone: request.systemone().length,
+        total: request.calls.length,
+      });
+    }
+    eq(
+      "decision 判定：need+0.8 需要召回（发召回）/ need+0.3 低于 0.45 不算需要召回（跳过）/ standalone+0.9 跳过 / 缺 confidence 照常召回 / choice 别的值照常召回 / noul 旧格式不再算有效答案、照常召回",
+      outcomes,
+      [
+        { label: "need+0.8", skipped: false, systemone: 1, total: 2 },
+        { label: "need+0.3", skipped: true, systemone: 1, total: 1 },
+        { label: "standalone+0.9", skipped: true, systemone: 1, total: 1 },
+        { label: "缺 confidence", skipped: false, systemone: 1, total: 2 },
+        { label: "choice 是别的值", skipped: false, systemone: 1, total: 2 },
+        { label: "noul 旧格式", skipped: false, systemone: 1, total: 2 },
+      ],
+    );
+  }
+
+  // ---- 判据是渲染后的题面：{{message}} 被替换，state 里仍是原话 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.9 });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, gateDecisionPrompt: "先查记忆吗？{{message}} 只回一个选择。" },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上次那个决定是什么" }] },
+      session: { sessionId: "decision-rendered-prompt" },
+    });
+    const body = JSON.parse(request.systemone()[0]?.init?.body || "{}");
+    eq(
+      "decision 的 instructions 是渲染后的题面（{{message}} 被替换进去）/ state.content 仍是最后一条用户消息 / 题型是 choice",
+      [
+        Boolean(result?.payload),
+        body.questions?.q?.instructions,
+        body.state?.content,
+        body.questions?.q?.type,
+      ],
+      [true, "先查记忆吗？上次那个决定是什么 只回一个选择。", "上次那个决定是什么", "choice"],
+    );
+  }
+
+  // ---- 空判据：没有判据就不拦，一次请求都不发 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.1 });
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, gateDecisionPrompt: "   " },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "空提示词也要召回" }] },
+      session: { sessionId: "decision-empty-prompt" },
+    });
+    eq(
+      "decision 空提示词 = 没有判据：一次判断请求都不发、照常召回",
+      [Boolean(result?.payload), request.systemone().length, request.calls.length],
+      [true, 0, 1],
+    );
+    check(
+      "空提示词日志说清照常召回（gate: decision prompt empty, recall anyway）",
+      infos.some((m) => m.includes("gate: decision prompt empty") && m.includes("recall anyway")),
+      infos.join(" | "),
+    );
+  }
+
+  eq(
+    "gateDecisionPromptOf：缺项 / 只有空白给空串（没有判据），自定义去首尾空白",
+    [
+      gateDecisionPromptOf({}),
+      gateDecisionPromptOf({ gateDecisionPrompt: "  \n " }),
+      gateDecisionPromptOf({ gateDecisionPrompt: "  自定义  " }),
+    ],
+    ["", "", "自定义"],
+  );
+
+  // ---- need + 0.2：低于阈值 -> 跳过召回 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.2 });
+    const infos = [];
+    const probes = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values,
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "运行测试" }] },
+      session: { sessionId: "decision-skip" },
+    });
+    eq(
+      "decision need+0.2 判为不需要召回：返回 undefined、只发那一发 /v1/systemone、不发召回",
+      [result, request.calls.length, request.systemone().length],
+      [undefined, 1, 1],
+    );
+    eq(
+      "decision 跳过日志与探针带 by=decision / reason=decision-no-need",
+      [
+        infos.some((m) => m.includes("gate: skipped") && m.includes("by=decision")),
+        probes.length,
+        probes[0]?.invocation.by,
+        probes[0]?.invocation.reason,
+      ],
+      [true, 1, "decision", "decision-no-need"],
+    );
+  }
+
+  // ---- 阈值与超时读数：等于阈值算「需要召回」（跳过要求严格小于）；配了超时也受这一档自己的上限管 ----
+  eq(
+    "decision 阈值 0.45：need+0.8 不跳过、need+0.45 不跳过、need+0.44 跳过、standalone 跳过、形状坏不跳过 / 超时：没配用 1200，配了也不超过 2000",
+    [
+      DECISION_GATE_THRESHOLD,
+      decisionGateSkips({ choice: "need", confidence: 0.8 }),
+      decisionGateSkips({ choice: "need", confidence: 0.45 }),
+      decisionGateSkips({ choice: "need", confidence: 0.44 }),
+      decisionGateSkips({ choice: "standalone", confidence: 0.9 }),
+      decisionGateSkips(null),
+      decisionGateSkips({ choice: "need" }),
+      decisionGateSkips({ choice: "need", confidence: Number.NaN }),
+      decisionGateServiceOf({}).timeoutMs,
+      decisionGateServiceOf({ systemoneServiceTimeoutMs: 8000 }).timeoutMs,
+      decisionGateServiceOf({ systemoneServiceTimeoutMs: 300 }).timeoutMs,
+    ],
+    [0.45, false, false, true, true, false, false, false, DECISION_GATE_TIMEOUT_MS, DECISION_GATE_TIMEOUT_MAX_MS, 300],
+  );
+
+  // ---- 题面渲染：写了占位符才内联，没写就只发题面（state 里已经是这条消息，不能发两遍）----
+  eq(
+    "decision 题面渲染：{{message}} 就地替换、没写就只发题面、空模板回空串",
+    [
+      renderDecisionPrompt(DECISION_PROMPT_TEXT, "在吗"),
+      renderDecisionPrompt("需要查记忆吗？{{message}}", "在吗"),
+      renderDecisionPrompt("{{message}} 要不要查", "在吗"),
+      renderDecisionPrompt("", "在吗"),
+      renderDecisionPrompt(null, "在吗"),
+    ],
+    [
+      DECISION_PROMPT_TEXT,
+      "需要查记忆吗？在吗",
+      "在吗 要不要查",
+      "",
+      "",
+    ],
+  );
+
+  // ---- 服务未配置：档位在读取侧就归一化成 off，一次判断请求都不发 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.1 });
+    const sdk = recallSdk({
+      values: { ...values, systemoneServiceUrl: "", systemoneServiceModel: "" },
+      fetchImpl: request.fetchImpl,
+      dataDir: dir,
+    });
+    const handler = createRecallHandler(sdk);
+    // 运行时读到的档位已经不是 decision 了：没配服务就没有这一档（与路由 GET / 面板同一条判据）。
+    const live = await readSwitches(sdk);
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "没配服务也要召回" }] },
+      session: { sessionId: "decision-unconfigured" },
+    });
+    eq(
+      "decision 服务未配置：readSwitches 归一化回 off，一次判断请求都不发、照常召回",
+      [live.recallGate, Boolean(result?.payload), request.systemone().length, request.calls.length],
+      ["off", true, 0, 1],
+    );
+  }
+
+  // ---- 只填一半（地址有、模型空）：整对当没配 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.1 });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, systemoneServiceModel: "" },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "半对配置也要召回" }] },
+      session: { sessionId: "decision-half-pair" },
+    });
+    eq(
+      "decision 地址与模型只填一半：按未配置处理，照常召回",
+      [Boolean(result?.payload), request.systemone().length],
+      [true, 0],
+    );
+  }
+
+  // ---- 请求失败：照常召回 ----
+  {
+    const request = decisionFetch({ systemoneStatus: 500 });
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values,
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "服务 500 也要召回" }] },
+      session: { sessionId: "decision-http-500" },
+    });
+    eq(
+      "decision 请求失败：照常召回并发起召回请求",
+      [Boolean(result?.payload), request.systemone().length, request.calls.length],
+      [true, 1, 2],
+    );
+    check(
+      "失败日志与 llm 档同形（gate: decision failed, recall anyway）",
+      infos.some((m) => m.includes("gate: decision failed") && m.includes("recall anyway")),
+    );
+  }
+
+  // ---- 超时：按配置超时收手，照常召回 ----
+  {
+    const request = decisionFetch({ hang: true });
+    const infos = [];
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, systemoneServiceTimeoutMs: "100" },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        logger: { info: (m) => infos.push(m) },
+      }),
+    );
+    const started = Date.now();
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "超时也要召回" }] },
+      session: { sessionId: "decision-timeout" },
+    });
+    const elapsed = Date.now() - started;
+    check(
+      "decision 超时：1.5 秒内收手、照常召回，日志带 TIMEOUT",
+      elapsed < 1500 &&
+        Boolean(result?.payload) &&
+        infos.some((m) => m.includes("gate: decision failed") && m.includes("TIMEOUT")),
+      `elapsed=${elapsed}`,
+    );
+  }
+
+  // ---- 返回结构不认识：照常召回 ----
+  {
+    const request = decisionFetch({ payload: { answers: {} } });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "结构不认识也要召回" }] },
+      session: { sessionId: "decision-shape" },
+    });
+    eq(
+      "decision 返回里没有 answers.q.choice / confidence：照常召回",
+      [Boolean(result?.payload), request.systemone().length, request.calls.length],
+      [true, 1, 2],
+    );
+
+    let threw = null;
+    try {
+      await askDecisionGate(
+        recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+        values,
+        "问一句",
+        DEFAULT_GATE_DECISION_PROMPT,
+      );
+    } catch (error) {
+      threw = error;
+    }
+    check(
+      "askDecisionGate 读不到 q.choice / q.confidence 时抛错，由调用方当成判断失败",
+      String(threw?.message).includes("answers.q.choice") &&
+        String(threw?.message).includes("confidence"),
+    );
+  }
+
+  // ---- 旧格式（noul）不再被当成有效答案 ----
+  {
+    let threw = null;
+    try {
+      const request = decisionFetch({ payload: { answers: { q: { noul: 0.1 } } } });
+      await askDecisionGate(
+        recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+        values,
+        "旧格式",
+        DEFAULT_GATE_DECISION_PROMPT,
+      );
+    } catch (error) {
+      threw = error;
+    }
+    check(
+      "noul 旧格式响应（只有一个概率）不再被当成有效答案，askDecisionGate 直接抛",
+      threw instanceof Error && String(threw.message).includes("answers.q.choice"),
+      String(threw?.message),
+    );
+  }
+
+  // ---- confidence 是数字串也认（noulScoreOf 的老规矩） ----
+  {
+    const request = decisionFetch({ payload: { answers: { q: { choice: "need", confidence: "0.9" } } } });
+    const handler = createRecallHandler(
+      recallSdk({ values, fetchImpl: request.fetchImpl, dataDir: dir }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "数字串也认" }] },
+      session: { sessionId: "decision-string-score" },
+    });
+    check("decision confidence 是数字串 0.9 时判为需要召回", Boolean(result?.payload));
+  }
+
+  // ---- 配了密钥就发 Bearer ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.9 });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, systemoneServiceKey: "sk-sys-1" },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    await handler({
+      payload: { messages: [{ role: "user", content: "带密钥的判断" }] },
+      session: { sessionId: "decision-key" },
+    });
+    eq(
+      "decision 配了密钥就发 Authorization: Bearer（复用打分服务的密钥）",
+      request.systemone()[0]?.init?.headers?.Authorization,
+      "Bearer sk-sys-1",
+    );
+  }
+
+  // ---- decision 与 llm 是两条路：llm 档一次 /v1/systemone 都不发 ----
+  {
+    const request = decisionFetch({ choice: "need", confidence: 0.1 });
+    const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { ...values, recallGate: "llm", gatePrompt: DEFAULT_GATE_PROMPT },
+        fetchImpl: request.fetchImpl,
+        dataDir: dir,
+        models: fake.models,
+      }),
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "llm 档没有被改坏" }] },
+      session: { sessionId: "decision-llm-untouched" },
+    });
+    eq(
+      "llm 档仍然只问宿主模型，一次 /v1/systemone 都不发",
+      [result, request.systemone().length, fake.calls.utility.length],
+      [undefined, 0, 1],
+    );
+  }
+
+  // ---- 枚举：新增 decision 一档，非法值仍然回退 off ----
+  eq(
+    "recallGate 枚举多了 decision 一档 / 非法值（含旧叫法 systemone）仍然回退 off",
+    ["decision", "rules", "systemone", "", null].map((raw) => normalizeRecallGate(raw)),
+    ["decision", "rules", "off", "off", "off"],
+  );
+
+  // ---- 面板状态行：纯函数给文案（未配置时每轮都召回） ----
+  eq(
+    "决策服务状态行：配好了给地址与模型 / 只填一半或没配都给一句提示",
+    [
+      decisionServiceView({
+        systemoneServiceUrl: "http://127.0.0.1:8099/",
+        systemoneServiceModel: "  kev-4b  ",
+      }),
+      decisionServiceView({ systemoneServiceUrl: "http://127.0.0.1:8099" }),
+      decisionServiceView({}),
+    ],
+    [
+      { configured: true, text: "决策服务：http://127.0.0.1:8099 · kev-4b" },
+      {
+        configured: false,
+        text: "决策服务还没配置，先在全局配置里填决策服务（未配置时每轮都召回）",
+      },
+      {
+        configured: false,
+        text: "决策服务还没配置，先在全局配置里填决策服务（未配置时每轮都召回）",
+      },
+    ],
+  );
+  eq(
+    "面板下拉值归一化：服务配好时保留 decision / 服务没配时回退 off（不在界面上留假档位）",
+    [
+      paintLayers({
+        recallGate: "decision",
+        systemoneServiceUrl: "http://127.0.0.1:8099",
+        systemoneServiceModel: "kev-4b",
+      }).recallGate,
+      paintLayers({ recallGate: "decision" }).recallGate,
+      paintLayers({ recallGate: "decision", systemoneServiceUrl: "http://127.0.0.1:8099" }).recallGate,
+    ],
+    ["decision", "off", "off"],
+  );
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

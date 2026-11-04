@@ -8,6 +8,7 @@
 // 写入前先整单校验：同一次提交里只要有一个值不合法，一个字段都不写。
 
 import {
+  DEFAULT_GATE_DECISION_PROMPT,
   GATE_PROMPT_MAX,
   QUERY_MODES,
   RECALL_GATES,
@@ -18,9 +19,9 @@ import {
   SERVICE_KINDS,
   SERVICE_MODEL_MAX,
   normalizeGateModel,
+  normalizeGateDecisionPrompt,
   normalizeGatePrompt,
   normalizeQueryMode,
-  normalizeRecallGate,
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
@@ -31,6 +32,7 @@ import {
   parseRerankChannel,
   parseRerankChannels,
   readSwitches,
+  resolveRecallGate,
   serializeServiceTimeout,
   servicePairError,
   serviceTimeoutOrDefault,
@@ -139,10 +141,22 @@ function serviceModelError(raw, field) {
 async function current(ctx) {
   const rerankKey = keyShape(await ctx.config.get("rerankServiceKey"));
   const systemoneKey = keyShape(await ctx.config.get("systemoneServiceKey"));
+  // 决策服务先读：recallGate 的投影要用它当判据（选了 decision 但服务没配 → off），
+  // 与 src/ov/settings.js 的 readSwitches、面板的 paintLayers 同一份规则。
+  const systemoneServiceUrl = normalizeServiceUrl(await ctx.config.get("systemoneServiceUrl"));
+  const systemoneServiceModel = normalizeServiceModel(await ctx.config.get("systemoneServiceModel"));
   return {
-    recallGate: normalizeRecallGate(await ctx.config.get("recallGate")),
+    recallGate: resolveRecallGate(await ctx.config.get("recallGate"), {
+      systemoneServiceUrl,
+      systemoneServiceModel,
+    }),
     queryMode: normalizeQueryMode(await ctx.config.get("queryMode")),
     gatePrompt: normalizeGatePrompt(await ctx.config.get("gatePrompt")),
+    // 这一项的默认值不是空串：没配过时投影出那句默认题面（读侧与 readSwitches 同口径）。
+    // 用户明确清空（存了空串）仍然是空串——空就是「没有判据」，不拿默认去盖。
+    gateDecisionPrompt: normalizeGateDecisionPrompt(
+      (await ctx.config.get("gateDecisionPrompt")) ?? DEFAULT_GATE_DECISION_PROMPT,
+    ),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
     rerank: normalizeRerank(await ctx.config.get("rerank")),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
@@ -161,8 +175,8 @@ async function current(ctx) {
       await ctx.config.get("rerankServiceTimeoutMs"),
       "rerank",
     ),
-    systemoneServiceUrl: normalizeServiceUrl(await ctx.config.get("systemoneServiceUrl")),
-    systemoneServiceModel: normalizeServiceModel(await ctx.config.get("systemoneServiceModel")),
+    systemoneServiceUrl,
+    systemoneServiceModel,
     systemoneServiceTimeoutMs: normalizeServiceTimeout(
       await ctx.config.get("systemoneServiceTimeoutMs"),
       "systemone",
@@ -219,6 +233,19 @@ export default function registerRecallModeRoutes(app, ctx) {
         );
       }
       changes.push(["gatePrompt", body.gatePrompt]);
+    }
+
+    if (has(body, "gateDecisionPrompt")) {
+      if (typeof body.gateDecisionPrompt !== "string") {
+        return c.json({ ok: false, error: "gateDecisionPrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.gateDecisionPrompt).length > GATE_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `gateDecisionPrompt 最多 ${GATE_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["gateDecisionPrompt", body.gateDecisionPrompt]);
     }
 
     if (has(body, "gateModel")) {
@@ -344,6 +371,29 @@ export default function registerRecallModeRoutes(app, ctx) {
           channels.push(channel);
         }
         changes.push(["rerankChannels", JSON.stringify(channels)]);
+      }
+    }
+
+    // 收尾：这一单写完之后「档位与服务」必须自洽。同一单里既可能把档位写成 decision、
+    // 也可能把决策服务清空，所以按「这一单之后的生效值」判：服务没配就把档位改回 off
+    // 并记进 applied——不让「存的是 decision、界面显示 off」这种状态存在。
+    const written = new Map(changes);
+    const gateAfter = written.has("recallGate")
+      ? written.get("recallGate")
+      : await ctx.config.get("recallGate");
+    if (gateAfter === "decision") {
+      const serviceAfter = {
+        systemoneServiceUrl: written.has("systemoneServiceUrl")
+          ? written.get("systemoneServiceUrl")
+          : await ctx.config.get("systemoneServiceUrl"),
+        systemoneServiceModel: written.has("systemoneServiceModel")
+          ? written.get("systemoneServiceModel")
+          : await ctx.config.get("systemoneServiceModel"),
+      };
+      if (resolveRecallGate(gateAfter, serviceAfter) === "off") {
+        const index = changes.findIndex(([key]) => key === "recallGate");
+        if (index >= 0) changes[index] = ["recallGate", "off"];
+        else changes.push(["recallGate", "off"]);
       }
     }
 

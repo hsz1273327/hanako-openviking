@@ -72,21 +72,27 @@
           "recallGate": {
             "type": "string",
             "title": "召回判断",
-            "description": "off 不判断、永远召回；rules 只跳过极短的纯操作指令；llm 用宿主模型判断这一句要不要查历史。",
+            "description": "off 关闭、永远召回；rules 规则判断，只跳过极短的纯操作指令；llm 语言模型判断（宿主生成式模型）看这一句要不要查历史；decision 决策模型判断（/v1/systemone，choice + 内置 criteria），复用决策服务那组配置。决策服务（地址与模型）没配好时不出现 decision 这一档，存着的 decision 会归一化成 off。",
             "default": "off",
-            "enum": ["off", "rules", "llm"],
-            "ui": { "enumLabels": ["不判断", "规则跳过", "模型判断"] }
+            "enum": ["off", "rules", "llm", "decision"],
+            "ui": { "enumLabels": ["关闭", "规则判断", "语言模型判断", "决策模型判断"] }
           },
           "gatePrompt": {
             "type": "string",
             "title": "判断提示词",
-            "description": "llm 召回判断使用的系统提示词，最长 2000 字符。留空表示不拦截任何召回。",
+            "description": "语言模型判断（llm 档）使用的提示词，最长 2000 字符。留空表示不拦截任何召回。决策模型判断不吃这一项，那份存在 gateDecisionPrompt 里。",
             "default": ""
+          },
+          "gateDecisionPrompt": {
+            "type": "string",
+            "title": "决策判断提示词",
+            "description": "决策模型判断（decision 档）使用的题面，最长 2000 字符。判定标准由内置的两条 criteria 描述决定，这一格只决定怎么问。用 {{message}} 表示当前这条用户消息，写了就地替换；没写就只发这句题面（消息本身在 state 里）。留空表示不拦截任何召回。与语言模型判断那份分开存、互不影响。",
+            "default": "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？"
           },
           "gateModel": {
             "type": "string",
             "title": "判断模型",
-            "description": "空串用宿主的辅助模型（utility）；非空形如 provider/model，用该模型（stream）。选项取自宿主的模型目录。",
+            "description": "llm 档的判断模型：空串用宿主的辅助模型（utility）；非空形如 provider/model，用该模型（stream）。选项取自宿主的模型目录。决策模型判断不吃这一项（模型由决策服务配置决定）。",
             "default": ""
           },
           "rerank": {
@@ -143,7 +149,7 @@
           "systemoneServiceUrl": {
             "type": "string",
             "title": "决策服务地址",
-            "description": "决策模型（/v1/systemone）服务地址。只接受 http:// 或 https://，留空表示未配置，精排通道里不能选这一类。",
+            "description": "决策模型（/v1/systemone）服务地址，同时供精排的决策通道与召回判断的「决策模型判断」使用。地址与模型都填才算出第四档，任何一项为空就只剩前三档。只接受 http:// 或 https://，留空表示未配置，精排通道里不能选这一类。",
             "default": ""
           },
           "systemoneServiceModel": {
@@ -155,7 +161,7 @@
           "systemoneServiceTimeoutMs": {
             "type": "string",
             "title": "决策服务超时",
-            "description": "一次 /v1/systemone 请求的超时（ms），留空用默认 3500，可填 100 到 8000。越界或非数字按默认值处理。",
+            "description": "一次 /v1/systemone 请求的超时（ms），留空用默认 3500，可填 100 到 8000。越界或非数字按默认值处理。召回判断的「决策模型判断」卡在每轮对话前面，另受更紧的上限约束（默认 1200，最多 2000）。",
             "default": ""
           },
           "systemoneServiceKey": {
