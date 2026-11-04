@@ -550,7 +550,7 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
  * 不在这份可编辑文本里。
  */
 export const DEFAULT_GATE_DECISION_PROMPT =
-  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
+  "只看这一句话、不看之前的对话，够不够回答它？";
 
 /**
  * 重排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。

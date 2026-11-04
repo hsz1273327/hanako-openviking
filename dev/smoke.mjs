@@ -315,7 +315,7 @@ import { lightThemeOverrides } from "../ui-src/src/theme.js";
 
 // 决策那份默认题面：字面量只在这里写一次，其余断言引用它。
 const DECISION_PROMPT_TEXT =
-  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
+  "只看这一句话、不看之前的对话，够不够回答它？";
 
 let passed = 0;
 const failures = [];

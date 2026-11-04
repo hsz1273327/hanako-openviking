@@ -15,7 +15,7 @@
  * 冒烟会比对两边。
  */
 export const DEFAULT_GATE_DECISION_PROMPT =
-  "把这句话单独发给一个没看过聊天记录的人，他能不能立刻知道在说什么？";
+  "只看这一句话、不看之前的对话，够不够回答它？";
 
 /**
  * 决策模型判断的召回门槛：choice 是 need 且 confidence 不低于这个数才算「需要召回」。
