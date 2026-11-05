@@ -148,12 +148,12 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 
 用户消息：{{message}}`;
 
-/** 重排模板里的两个占位符：当前消息，以及带编号的候选清单。 */
+/** 精排模板里的两个占位符：当前消息，以及带编号的候选清单。 */
 export const RERANK_MESSAGE_PLACEHOLDER = "{{message}}";
 export const RERANK_CANDIDATES_PLACEHOLDER = "{{candidates}}";
 
 /**
- * llm 重排的默认提示词模板。导出给测试与面板文案对照。
+ * llm 精排的默认提示词模板。导出给测试与面板文案对照。
  * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
  * 冒烟会比对两边；配置里的 rerankPrompt 为空时就用这段。
  */
@@ -230,7 +230,7 @@ function candidateLines(candidates) {
 }
 
 /**
- * 重排模板 + 消息 + 候选 -> 发给模型的那一段文本。
+ * 精排模板 + 消息 + 候选 -> 发给模型的那一段文本。
  *
  * 两个占位符各自只展开一次，而且是在原模板上单次扫描替换的：
  * 消息或候选摘要里恰好带着 `{{message}}` / `{{candidates}}` 时，
@@ -295,13 +295,13 @@ export function gateModelOf(switches) {
   return typeof switches?.gateModel === "string" ? switches.gateModel.trim() : "";
 }
 
-/** 重排模型与 gateModel 同形：空串表示用宿主辅助模型。 */
+/** 精排模型与 gateModel 同形：空串表示用宿主辅助模型。 */
 export function rerankModelOf(switches) {
   return typeof switches?.rerankModel === "string" ? switches.rerankModel.trim() : "";
 }
 
 /**
- * 重排提示词：与 gate 相反，空串不是“不问”，而是“用内置默认模板”。
+ * 精排提示词：与 gate 相反，空串不是“不问”，而是“用内置默认模板”。
  * rerank 本身就是 opt-in 的（默认 off），打开之后总得有个判据。
  */
 export function rerankPromptOf(switches) {
@@ -462,7 +462,7 @@ export async function askGateModel(sdk, switches, text) {
   }
 }
 
-/** 重排比判断多要几个编号，但同样不能把这一轮挂在模型上。 */
+/** 精排比判断多要几个编号，但同样不能把这一轮挂在模型上。 */
 export const RERANK_TIMEOUT_MS = 600;
 
 /** 32 个 token 足够吐出几十个编号；再大只会让超时来得更早。 */
@@ -1191,7 +1191,7 @@ export async function testScoringService({ sdk, kind, url, model, timeoutMs, key
 /** 宿主模型通道：沿用编号清单，挑中 1、未挑中 0。 */
 async function scoreModelChannel(sdk, switches, channel, query, items) {
   const prompt = renderRerankPrompt(rerankPromptOf(switches), query, items);
-  if (!prompt) throw new Error("重排提示词为空");
+  if (!prompt) throw new Error("精排提示词为空");
 
   const answer = channel.legacy
     ? await askRerankModel(sdk, switches, prompt)
@@ -1725,7 +1725,7 @@ function textOf(value) {
  *   3. entries[].text —— 原始命中条目，逐条保留，跳过空项。
  * 其余形状一律给空数组（调用方据此 return undefined 并告警一次），不猜字段名。
  *
- * 重排必须在拼成一段文本之前做，所以这里保留条目边界；
+ * 精排必须在拼成一段文本之前做，所以这里保留条目边界；
  * extractRecallText 只是把它按原有规则拼回去。
  */
 export function extractRecallItems(value) {
@@ -2011,7 +2011,7 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
-    // 重排必须在拼成一段文本之前做：拼完就分不清候选边界了。
+    // 精排必须在拼成一段文本之前做：拼完就分不清候选边界了。
     // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
     let kept = items;
     if (switches.rerank === "llm" && items.length >= 2) {

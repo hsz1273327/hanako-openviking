@@ -207,6 +207,15 @@ import {
   readTab,
   writeTab,
 } from "../ui-src/src/lib/tabs.js";
+// 记忆页三个子页签：纯逻辑 + 组件挂载方式。
+import {
+  DEFAULT_MEMORY_TAB,
+  MEMORY_TAB_LABELS,
+  MEMORY_TABS,
+  memoryPaneVisible,
+  nextMemoryTab,
+  normalizeMemoryTab,
+} from "../ui-src/src/lib/memory-tabs.js";
 // checks 归一化的唯一实现：路由与工具共用，这里直接验同一份输入过两处。
 import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
 // check 状态 -> 颜色档位，前端与详情行共用。
@@ -1732,7 +1741,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 模型标识：只认 provider/model；空串 = 用宿主辅助模型 ----
   eq(
-    "模型标识归一化（provider/model 原样保留，其余回空 = 默认通道；重排同形） / 提示词归一：非字符串给空串、超长按字符截断（判断 / 重排同一口径，默认都是空 = 用内置模板）",
+    "模型标识归一化（provider/model 原样保留，其余回空 = 默认通道；精排同形） / 提示词归一：非字符串给空串、超长按字符截断（判断 / 精排同一口径，默认都是空 = 用内置模板）",
     [[
       normalizeGateModel("   "),
       normalizeGateModel(" deepseek/deepseek-flash "),
@@ -1767,7 +1776,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     }),
   );
   eq(
-    "readSwitches 读到 llm 档、截断提示词、收敛模型标识（判断与重排各一遍，存量脏值回空） / 结果重排：默认 off、枚举只有 off / llm，非法值（枚举外 / 数字 / 大小写）回 off",
+    "readSwitches 读到 llm 档、截断提示词、收敛模型标识（判断与精排各一遍，存量脏值回空） / 结果精排：默认 off、枚举只有 off / llm，非法值（枚举外 / 数字 / 大小写）回 off",
     [[
       [gateSet.recallGate, Array.from(gateSet.gatePrompt).length, gateSet.gateModel],
       [rerankSet.rerank, Array.from(rerankSet.rerankPrompt).length, rerankSet.rerankModel],
@@ -2049,7 +2058,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 面板加载不了 App 的 Node 模块，常量只能各存一份。这一节只守「两份不许漂」：
   // 漂了就是用户按下保存、落库的却是另一个数。组件结构不在这里验。
   eq(
-    "通道上限 / 三种类型的默认超时 / 决策超时上限与自适应两端同值 / 服务字段上限两端同值（模型 / 地址 / 密钥） / 通道类型三种都有下拉文案（类型枚举与文案键一一对应） / 两份默认提示词逐字一致（判断 / 重排） / 提示词截断上限两端同值",
+    "通道上限 / 三种类型的默认超时 / 决策超时上限与自适应两端同值 / 服务字段上限两端同值（模型 / 地址 / 密钥） / 通道类型三种都有下拉文案（类型枚举与文案键一一对应） / 两份默认提示词逐字一致（判断 / 精排） / 提示词截断上限两端同值",
     [[
       UI_RERANK_CHANNELS_MAX,
       UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
@@ -2334,6 +2343,95 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "切页不触发重算或写入",
     selectTabBody !== "" &&
       ["refresh", "saveLayers", "applyLayers", "rerankChannels", "patchControls"].every(
+        (name) => selectTabBody.includes(name) === false,
+      ),
+    selectTabBody,
+  );
+}
+// ================= 记忆页：三个子页签 =================
+{
+  eq(
+    "记忆页子页签的名字逐字是 召回 / 精排 / 候选池",
+    MEMORY_TABS.map((name) => MEMORY_TAB_LABELS[name]),
+    ["召回", "精排", "候选池"],
+  );
+  eq(
+    "记忆页默认停在召回；非法页名回落到召回",
+    [DEFAULT_MEMORY_TAB, normalizeMemoryTab("bogus")],
+    ["recall", "recall"],
+  );
+  eq(
+    "任一时刻只有一个子页可见（另外两块只靠 hidden 隐藏，不卸载）",
+    MEMORY_TABS.map((active) => MEMORY_TABS.filter((name) => memoryPaneVisible(active, name))),
+    [["recall"], ["rerank"], ["peers"]],
+  );
+  eq(
+    "子页签键盘换页：左右循环 / Home / End / 其它键不接管",
+    [
+      nextMemoryTab("recall", "ArrowRight"),
+      nextMemoryTab("peers", "ArrowRight"),
+      nextMemoryTab("recall", "ArrowLeft"),
+      nextMemoryTab("rerank", "Home"),
+      nextMemoryTab("rerank", "End"),
+      nextMemoryTab("recall", "Enter"),
+    ],
+    ["rerank", "recall", "peers", "recall", "peers", null],
+  );
+
+  const panel = uiCode("components/MemoryPanel.vue");
+  const paneTags = [...panel.matchAll(/<div\b[^>]*class="memory-pane"[^>]*>/g)].map((m) => m[0]);
+  eq("记忆页里三个子页容器都在 DOM 里（不靠 v-if 重建组件）", paneTags.length, 3);
+  check(
+    "三个子页容器都不用 v-if / v-show / 动态 :key 重建",
+    paneTags.every((tag) => !/v-if|v-show|:key/.test(tag)),
+    paneTags.join("\n"),
+  );
+  for (const [name, label] of [
+    ["recall", "召回"],
+    ["rerank", "精排"],
+    ["peers", "候选池"],
+  ]) {
+    check(
+      `子页签「${label}」始终挂载、只靠 hidden 切显隐`,
+      paneTags.some(
+        (tag) =>
+          tag.includes(`id="memory-panel-${name}"`) &&
+          tag.includes(`:hidden="!memoryPaneVisible(activeTab, '${name}')"`),
+      ),
+      panel.slice(panel.indexOf("memory-tabs-body"), panel.indexOf("memory-tabs-body") + 1600),
+    );
+  }
+  eq(
+    "三个子组件各挂一次（RecallCard / RerankCard / PeerList 都不在条件分支里）",
+    ["RecallCard", "RerankCard", "PeerList"].map(
+      (name) => (panel.match(new RegExp(`<${name}\\b`, "g")) || []).length,
+    ),
+    [1, 1, 1],
+  );
+  check(
+    "子页签是 NTabs line + small，不是卡片式（不与四个主页面签抢层次）",
+    panel.includes('type="line"') &&
+      panel.includes('size="small"') &&
+      panel.includes('type="card"') === false,
+    panel.slice(0, 800),
+  );
+  check(
+    "默认页由 DEFAULT_MEMORY_TAB 初始化，标签文案来自 MEMORY_TAB_LABELS",
+    panel.includes("ref(DEFAULT_MEMORY_TAB)") &&
+      panel.includes("MEMORY_TAB_LABELS[name]") &&
+      panel.includes('@update:value="selectTab"'),
+    panel.slice(0, 1200),
+  );
+  check(
+    "候选池的 peer 计数仍在卡头 header-extra 里",
+    /#header-extra[\s\S]{0,400}id="peerCount"[\s\S]{0,200}peerCountText/.test(panel),
+    panel.slice(panel.indexOf("header-extra"), panel.indexOf("header-extra") + 500),
+  );
+  const selectTabBody = panel.match(/function selectTab\(name\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  check(
+    "切子页签只改本地 activeTab，不触发任何读 / 写 / 重算",
+    selectTabBody !== "" &&
+      ["refresh", "saveLayers", "applyLayers", "setForm", "setPrompt", "patchControls"].every(
         (name) => selectTabBody.includes(name) === false,
       ),
     selectTabBody,
@@ -2765,7 +2863,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [["context", "rules"], ["context", "rules"]],
     );
   }
-  // ---- 拆卡之后仍然是整单（召回卡 / 重排卡两张，但请求只有一单） ----
+  // ---- 拆卡之后仍然是整单（召回卡 / 精排卡两张，但请求只有一单） ----
   {
     // 先把两个键摆到**非默认值**，免得受前面几段留下的状态影响。
     // 为什么必须是非默认值：整单里少了这个键时，normalize 会拿默认值补上，
@@ -2784,18 +2882,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
   {
-    // 只改重排卡里的「结果重排」：请求里仍然要带着召回卡那两个键，值都是此刻的（非默认）。
+    // 只改精排卡里的「结果精排」：请求里仍然要带着召回卡那两个键，值都是此刻的（非默认）。
     const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
     await ui.setForm("recallGate", "rules");
     const before = saves().length;
     await ui.setForm("rerank", "llm");
     const body = saves().at(-1).body;
     eq(
-      "改重排开关时那一单里同时有 recallGate 与 queryMode",
+      "改精排开关时那一单里同时有 recallGate 与 queryMode",
       [saves().length - before, body.rerank, body.recallGate, body.queryMode, state.form.recallGate, state.form.queryMode],
       [1, "llm", "rules", "context", "rules", "context"],
     );
-    // 复位：后面几段按「重排关着」的草稿走。
+    // 复位：后面几段按「精排关着」的草稿走。
     await ui.setForm("rerank", "off");
   }
   {
@@ -2807,6 +2905,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       cards.some((code) => code.includes(needle)),
     );
     eq("RecallCard / RerankCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
+  }
+
+  // ---- 记忆页子页签：切到精排改个值，切回召回，再切回精排，值还在 ----
+  {
+    // activeTab 是组件里的本地 ref；这里用一个普通变量复现同一条轨迹。
+    let activeTab = DEFAULT_MEMORY_TAB;
+    const switchTo = (name) => {
+      activeTab = normalizeMemoryTab(name);
+      return MEMORY_TABS.filter((tab) => memoryPaneVisible(activeTab, tab));
+    };
+    eq("打开记忆页默认停在召回，只有召回可见", switchTo(DEFAULT_MEMORY_TAB), ["recall"]);
+
+    // 切到精排，改一个值（模拟输入框里的草稿，还没提交）。
+    eq("切到精排只显示精排", switchTo("rerank"), ["rerank"]);
+    ui.store.touchPrompt("rerank", "精排页里改的草稿");
+    ui.store.note("精排页提示位", false);
+
+    // 切回召回，再切回精排：草稿与提示位都还在。
+    eq("切回召回只显示召回", switchTo("recall"), ["recall"]);
+    eq("再切回精排只显示精排", switchTo("rerank"), ["rerank"]);
+    eq(
+      "切走再切回：草稿、已填未提交的值、提示位都还在",
+      [state.prompts.rerank, state.prompts.rerankTouched, state.note.text, state.note.bad],
+      ["精排页里改的草稿", true, "精排页提示位", false],
+    );
+
+    // 复位，后面的断言按默认草稿走。
+    await ui.resetPrompt("rerank");
   }
 
   // ---- 「判断失败时」：与召回判断同一单、同一套即时提交与失败回滚 ----
@@ -3533,7 +3659,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- llm 的提示词与判断模型：归一化 + 整单收笔 ----
   eq(
-    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、重排配置、通道与打分服务",
+    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、精排配置、通道与打分服务",
     [paintGateConfig({
       gatePrompt: "字".repeat(GATE_PROMPT_MAX + 10),
       gateModel: "  p1/m1  ",
@@ -3567,16 +3693,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   }],
   );
 
-  // ---- 重排配置的归一化与草稿 ----
+  // ---- 精排配置的归一化与草稿 ----
   eq(
-    "重排配置归一化非法值 / 重排配置读到 llm；形状不对的模型标识当空 / 重排草稿（空配置坐默认全文、动过不再填、自定义照显） / 重排状态小字（等于默认 / 改过 / 清空提醒回默认模板）",
+    "精排配置归一化非法值 / 精排配置读到 llm；形状不对的模型标识当空 / 精排草稿（空配置坐默认全文、动过不再填、自定义照显） / 精排状态小字（等于默认 / 改过 / 清空提醒回默认模板）",
     [paintRerankConfig({
       rerank: "on",
       rerankPrompt: "字".repeat(RERANK_PROMPT_MAX + 10),
       rerankModel: "  p1/m1  ",
-    }), [paintRerankConfig({ rerank: "llm" }).rerank, paintRerankConfig({ rerankModel: "m1" }).rerankModel], [rerankPromptDraft(""), rerankPromptDraft("", true), rerankPromptDraft("我的重排提示词")], [
+    }), [paintRerankConfig({ rerank: "llm" }).rerank, paintRerankConfig({ rerankModel: "m1" }).rerankModel], [rerankPromptDraft(""), rerankPromptDraft("", true), rerankPromptDraft("我的精排提示词")], [
       rerankPromptStatus(DEFAULT_RERANK_PROMPT),
-      rerankPromptStatus("我的重排提示词"),
+      rerankPromptStatus("我的精排提示词"),
       rerankPromptStatus("").includes("已修改") && rerankPromptStatus("").includes("提示词为空时使用默认模板"),
     ]],
     [{
@@ -3584,7 +3710,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       rerankPrompt: "字".repeat(RERANK_PROMPT_MAX),
       rerankModel: "p1/m1",
       rerankChannels: [],
-    }, ["llm", ""], [DEFAULT_RERANK_PROMPT, "", "我的重排提示词"], ["当前为默认提示词", "已修改", true]],
+    }, ["llm", ""], [DEFAULT_RERANK_PROMPT, "", "我的精排提示词"], ["当前为默认提示词", "已修改", true]],
   );
 
   // ---- 精排通道的界面归一化 ----
@@ -5156,16 +5282,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- 结果重排：开关 / 提示词 / 模型三个字段 ---------
+  // ---- 结果精排：开关 / 提示词 / 模型三个字段 ---------
   writes.length = 0;
   const rerankOk = await post({
     rerank: "llm",
-    rerankPrompt: "重排模板 {{message}} {{candidates}}",
+    rerankPrompt: "精排模板 {{message}} {{candidates}}",
     rerankModel: "" ,
   });
-  const rerankStored = ["llm", "重排模板 {{message}} {{candidates}}", ""];
+  const rerankStored = ["llm", "精排模板 {{message}} {{candidates}}", ""];
   eq(
-    "重排档可写：档位 / 提示词落库，空模型 = 默认通道，GET 照原样回显",
+    "精排档可写：档位 / 提示词落库，空模型 = 默认通道，GET 照原样回显",
     [
       store.rerank,
       store.rerankPrompt,
@@ -5175,29 +5301,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [...rerankStored, rerankStored],
   );
 
-  // 重排的四种坏输入（枚举外 / 超长提示词 / 提示词类型 / 模型缺 provider）：400 且零写入。
+  // 精排的四种坏输入（枚举外 / 超长提示词 / 提示词类型 / 模型缺 provider）：400 且零写入。
   writes.length = 0;
   const badRerank = await post({ rerank: "rules" });
   const badRerankPrompt = await post({ rerankPrompt: "字".repeat(RERANK_PROMPT_MAX + 1) });
   const badRerankPromptType = await post({ rerankPrompt: 1 });
   const badRerankRef = await post({ rerankModel: "m1" });
-  eq("重排四种坏输入都 400、零写入，被拒后旧 rerank 还在",
+  eq("精排四种坏输入都 400、零写入，被拒后旧 rerank 还在",
     [badRerank.status, badRerankPrompt.status, badRerankPromptType.status, badRerankRef.status, writes.length, store.rerank],
     [400, 400, 400, 400, 0, "llm"]);
 
   writes.length = 0;
   const rerankRef = await post({ rerankModel: "  p2/m2  " });
   eq(
-    "重排模型标识落库 / 重排模型回显也去空白",
+    "精排模型标识落库 / 精排模型回显也去空白",
     [store.rerankModel, rerankRef.body.rerankModel],
     ["p2/m2", "p2/m2"],
   );
 
-  // 整单校验：重排字段不合法时，同一单里的合法字段也不能落库。
+  // 整单校验：精排字段不合法时，同一单里的合法字段也不能落库。
   writes.length = 0;
   const rerankMixed = await post({ rerank: "llm", rerankModel: "bad" });
   eq(
-    "重排整单被拒 / 重排整单被拒时零写入",
+    "精排整单被拒 / 精排整单被拒时零写入",
     [rerankMixed.status, writes.length],
     [400, 0],
   );
@@ -6382,7 +6508,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [["p/m", "", "", ""], ["p/m", "", ""]],
   );
   eq(
-    "提示词来源：判断层空串 = 不拦（没有判据就不拦），重排层空串 = 用内置模板",
+    "提示词来源：判断层空串 = 不拦（没有判据就不拦），精排层空串 = 用内置模板",
     [gatePromptOf({ gatePrompt: "   " }), rerankPromptOf({ rerankPrompt: "  " })],
     ["", DEFAULT_RERANK_PROMPT],
   );
@@ -7958,12 +8084,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["问：这句话\n候选：\n1. 甲\n2. 乙", "只问 消息\n\n1. 甲", "", "消息里有 {{candidates}}|1. 甲", 120, "第一行 第二行"],
   );
   check(
-    "默认重排模板带两个占位符",
+    "默认精排模板带两个占位符",
     DEFAULT_RERANK_PROMPT.includes("{{message}}") &&
       DEFAULT_RERANK_PROMPT.includes("{{candidates}}"),
   );
   eq(
-    "空配置用默认重排模板 / 只有空白也用默认重排模板 / 自定义重排模板原样返回",
+    "空配置用默认精排模板 / 只有空白也用默认精排模板 / 自定义精排模板原样返回",
     [rerankPromptOf({ rerankPrompt: "" }), rerankPromptOf({ rerankPrompt: "   " }), rerankPromptOf({ rerankPrompt: " 自定义 " })],
     [DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_PROMPT, "自定义"],
   );
@@ -7971,7 +8097,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 解析：任务书里的六种输入 + 边界 ----
   // 解析模型回答：编号转下标、超范围丢、重复去重；一个合法编号都没有（含空 / 跑题 / 非字符串）算失败。
   eq(
-    "解析重排回答（编号转下标 / 越界丢 / 去重 / 一个都没有算失败） / 超时常量 600ms / 重排 maxTokens 32",
+    "解析精排回答（编号转下标 / 越界丢 / 去重 / 一个都没有算失败） / 超时常量 600ms / 精排 maxTokens 32",
     [[
       parseRerankAnswer("1,3", 5),
       parseRerankAnswer("无", 5),
@@ -8040,7 +8166,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       payload: { messages: [{ role: "user", content: "挑出有用的两条" }] },
       session: { sessionId: "rerank-keep-two" },
     });
-    check("重排后仍有注入", Boolean(result?.payload));
+    check("精排后仍有注入", Boolean(result?.payload));
     check("保留第一个候选", contentOf(result).includes("第一条"));
     check("保留第三个候选", contentOf(result).includes("第三条"));
     check("丢掉没被选中的候选", !contentOf(result).includes("第二条"));
@@ -8140,24 +8266,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       }),
     );
     const result = await handler({
-      payload: { messages: [{ role: "user", content: "自选模型重排" }] },
+      payload: { messages: [{ role: "user", content: "自选模型精排" }] },
       session: { sessionId: "rerank-stream" },
     });
-    check("stream 重排后仍有注入", Boolean(result?.payload));
+    check("stream 精排后仍有注入", Boolean(result?.payload));
     eq(
-      "自选重排走 stream / 自选重排不走 utility",
+      "自选精排走 stream / 自选精排不走 utility",
       [fake.calls.stream.length, fake.calls.utility.length],
       [1, 0],
     );
     const req = fake.calls.stream[0];
     eq(
-      "重排 stream provider/model / 重排 stream temperature",
+      "精排 stream provider/model / 精排 stream temperature",
       [[req.provider, req.model], req.temperature],
       [["p1", "m1"], 0],
     );
     check(
-      "自定义重排模板渲染生效",
-      req.messages[0].content.startsWith("自定义：自选模型重排") &&
+      "自定义精排模板渲染生效",
+      req.messages[0].content.startsWith("自定义：自选模型精排") &&
         req.messages[0].content.includes("1. 第一条"),
     );
   }

@@ -627,7 +627,7 @@ export const DEFAULT_GATE_CONTEXT_PROMPT =
   "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？";
 
 /**
- * 重排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。
+ * 精排的默认提示词。与 src/memory/recall.js 里的 DEFAULT_RERANK_PROMPT 逐字一致。
  * HTML 里不嵌这段字：面板加载不了 Node 模块，只能在这里存一份，
  * 冒烟会断言两边相等，也会断言 HTML 里没有第二份。
  */
@@ -692,14 +692,14 @@ export function contextPromptStatus(text) {
   return "已修改";
 }
 
-/** 重排提示词框的草稿：配置为空时同样把默认模板整段填进去。 */
+/** 精排提示词框的草稿：配置为空时同样把默认模板整段填进去。 */
 export function rerankPromptDraft(configValue, touched = false) {
   const value = normalizeRerankPrompt(configValue);
   if (value) return value;
   return touched ? "" : DEFAULT_RERANK_PROMPT;
 }
 
-/** 重排提示词旁边那行小字：默认 / 已修改 / 空（回默认模板）。 */
+/** 精排提示词旁边那行小字：默认 / 已修改 / 空（回默认模板）。 */
 export function rerankPromptStatus(text) {
   const value = normalizeRerankPrompt(text);
   if (value === DEFAULT_RERANK_PROMPT) return "当前为默认提示词";
@@ -745,7 +745,7 @@ export function paintGateFallbackConfig(out) {
   return { gateFallback: normalizeGateFallback(out?.gateFallback) };
 }
 
-/** 重排通道的界面归一化：只收敛形状，不丢用户正在编辑的行。 */
+/** 精排通道的界面归一化：只收敛形状，不丢用户正在编辑的行。 */
 export function normalizeRerankChannel(value) {
   const item = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const type = oneOf(item.type, RERANK_CHANNEL_TYPES, "rerank");
@@ -824,7 +824,7 @@ export function rerankChannelsCountText(list) {
   return `${channels.length} 路通道 · ${enabled} 路启用`;
 }
 
-/** 重排三个字段：开关、提示词模板、模型标识。 */
+/** 精排三个字段：开关、提示词模板、模型标识。 */
 export function paintRerankConfig(out) {
   return {
     rerank: normalizeRerank(out?.rerank),
@@ -863,7 +863,7 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 重排配置 + 打分服务。 */
+/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 精排配置 + 打分服务。 */
 export function paintRecallConfig(out) {
   return {
     ...paintLayers(out),

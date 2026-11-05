@@ -301,28 +301,58 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* NText 默认 14px；面板整体是 12px 档，不随组件默认值为了“正常”而变胖。 */
 .hint-body { font-size: 12px; line-height: 1.35; }
 
-/* ---------- 记忆页（召回 / 重排 / 候选池） ---------- */
+/* ---------- 记忆页（召回 / 精排 / 候选池 三个子页签） ---------- */
 
-/* 召回与重排按内容定高，不吃余量（各自一张卡，页面的 12px 间距就是它们的分隔）：
-   shrink 也写 0，免得矮屏时被 .tab-panel 压扁、把控件挤出卡片边界。
-   放不下时交给 .tab-panel 自己滚。 */
+/* 召回与精排卡按内容定高，不吃余量：它们的伸缩由外面的子页容器负责。
+   shrink 也写 0，免得矮屏时被压扁、把控件挤出卡片边界。 */
 .recall-card,
 .rerank-card { flex: 0 0 auto; }
 
-/* 候选池是记忆页里唯一吃满剩余高度的一块：上面的卡按内容定高，
-   剩下的全部给 peer 名单，名单在自己的 NScrollbar 里滚。
+/* 子页签栏与主标签栏同一档：不参与纵向伸缩，字号 12px，焦点环自己画
+   （n-tabs 不输出键盘焦点样式，与 .tabs 那组规则保持一致）。 */
+.memory-tabs { flex: none; }
+.memory-tabs .n-tabs-nav { line-height: 1.2; }
+.memory-tabs .n-tabs-tab {
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 4px 0 6px;
+}
+.memory-tabs .n-tabs-tab:focus-visible {
+  outline: 2px solid rgba(128, 128, 128, 0.45);
+  outline-offset: -2px;
+}
+
+/* 子页容器吃满标签栏与提示位之间的余量。中间的 body 与每个 pane 都要
+   能收缩（min-height: 0），否则内容一长就把整页顶回去——与 .tab-panel 同理。 */
+.memory-tabs-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.memory-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 召回 / 精排的内容比一屏高时，由子页容器自己滚（滚动条贴内容区右缘），
+   不再让整页长出去。候选池的滚动交给卡内的 .peer-scroll，所以这一页裁掉溢出。 */
+#memory-panel-recall,
+#memory-panel-rerank { overflow-x: hidden; overflow-y: auto; }
+#memory-panel-peers { overflow: hidden; }
+
+/* 候选池卡在子页里吃满高度，剩下的全部给 peer 名单，名单在自己的 NScrollbar 里滚。
    n-card 的正文要跟着做 flex 列，否则名单拿不到「剩下的高度」这个确定值。
-   min-height 给一个下限（卡头 + 正文内边距 + 四行名单）：两级都展开时
-   上面两张卡加起来已经超过一屏，flex 会把这块唯一的可收缩项压成 0 ——
-   卡还在 DOM 里，但高度是 0，名单等于彻底消失。压到下限就停手，
-   放不下的部分交给 .tab-panel 自己滚。 */
+   min-height 给一个下限（卡头 + 正文内边距 + 四行名单）：压到下限就停手，
+   不再把名单压成 0；overflow 留给卡内的滚动点，卡本身不滚。 */
 .peers-card {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 120px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
 }
 .peers-card > .n-card-header { flex: none; }
 .peers-card > .n-card-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
@@ -553,6 +583,12 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   #panel-app { height: auto; }
   .page { height: auto; overflow: visible; }
   .tab-panel { flex: 0 0 auto; overflow: visible; }
+  /* 子页容器在这个高度下也退回按内容定高，否则 .tab-panel 已经是 auto，
+     flex:1 拿不到确定高度，召回 / 精排的区内滚动会变成 0 高。 */
+  .memory-tabs-body,
+  .memory-pane { flex: 0 0 auto; min-height: 0; }
+  #memory-panel-recall,
+  #memory-panel-rerank { overflow: visible; }
   .peers-card,
   .peers-card > .n-card-content { flex: 0 0 auto; min-height: 0; overflow: visible; }
   .peer-list,

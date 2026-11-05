@@ -1,16 +1,16 @@
 <script setup>
-// 重排卡：「查回来之后怎么排序」——重排开关、重排提示词、兜底模型、精排通道。
+// 精排卡：「查回来之后怎么排序」——精排开关、精排提示词、兜底模型、精排通道。
 // 召回（查不查 / 拿什么查）在 RecallCard.vue，两件事不混在一张卡里。
 //
 // 行为第 1~2、4、6 条仍然成立，只是搬家：
-//   - 「结果重排」是这张卡的第一项，改了就提交，没有保存按钮；
+//   - 「结果精排」是这张卡的第一项，改了就提交，没有保存按钮；
 //   - 失败回滚由 store.saveLayers → commitLayers 负责，控件值跟着退回；
 //   - 提交仍然是**整单**：本卡只调 setForm / setPrompt，请求体由
 //     lib/panel-store.js 的 readLayers() 整份拼（这一卡改一个键，请求里
 //     仍然带着 recallGate 与 queryMode）。组件里不出现任何 post / fetch。
 //   - 提示词框里放的是 value，三态小字：默认 / 已修改 / 空；恢复默认只填框、走正常提交。
 //
-// 形态交给 naive-ui：一张 n-card（title="重排"），按内容定高（不吃余量，
+// 形态交给 naive-ui：一张 n-card（title="精排"），按内容定高（不吃余量，
 // 余量归候选池卡）。展开区里提示词与模型两格 NGrid :cols="2"（700px 以下一列），
 // 通道列表在 ChannelList.vue。
 import { computed } from "vue";
@@ -48,21 +48,21 @@ function onPromptChange(which, value) {
   <NCard
     class="rerank-card"
     size="small"
-    title="重排"
+    title="精排"
     :bordered="false"
     header-style="padding: 4px 16px"
     content-style="padding: 16px"
   >
-    <!-- 第一项就是「结果重排」：它是这张卡的总开关，展开区跟着它走。
+    <!-- 第一项就是「结果精排」：它是这张卡的总开关，展开区跟着它走。
          两档（关/开）用 NSwitch，不用下拉：下拉是「从多个值里选」，开关是「开还是关」，
          这里只有后一件事。 -->
     <NGrid class="rerank-grid" cols="1 700:2" responsive="screen" :x-gap="10" :class="{ dim: !enabled }">
       <NGridItem>
         <div class="field">
-          <span class="field-label">结果重排</span>
+          <span class="field-label">结果精排</span>
           <NSwitch
             size="small"
-            aria-label="结果重排"
+            aria-label="结果精排"
             :input-props="{ id: 'rerank' }"
             :value="rerankOpen"
             @update:value="(value) => onSelect('rerank', value ? 'llm' : 'off')"
@@ -78,7 +78,7 @@ function onPromptChange(which, value) {
         <NGridItem>
           <div class="field">
             <div class="prompt-head">
-              <label for="rerankPrompt">重排提示词</label>
+              <label for="rerankPrompt">精排提示词</label>
               <span id="rerankPromptStatus" class="prompt-status">{{ rerankStatus }}</span>
               <NButton id="rerankResetPrompt" size="small" quaternary @click="resetPrompt('rerank')">
                 恢复默认

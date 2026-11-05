@@ -167,7 +167,7 @@
           },
           "rerank": {
             "type": "string",
-            "title": "结果重排",
+            "title": "结果精排",
             "description": "off 原样注入；llm 按 rerankChannels 配置的通道做精排。任一路失败只弃权，全部弃权时原样保留。",
             "default": "off",
             "enum": [
@@ -189,13 +189,13 @@
           },
           "rerankPrompt": {
             "type": "string",
-            "title": "重排提示词",
-            "description": "llm 重排使用的提示词模板，最长 2000 字符。留空表示使用内置默认模板。支持 {{message}} 与 {{candidates}}。",
+            "title": "精排提示词",
+            "description": "llm 精排使用的提示词模板，最长 2000 字符。留空表示使用内置默认模板。支持 {{message}} 与 {{candidates}}。",
             "default": ""
           },
           "rerankModel": {
             "type": "string",
-            "title": "重排模型",
+            "title": "精排模型",
             "description": "空串用宿主的辅助模型（utility）；非空形如 provider/model，用该模型（stream）。与判断模型同形。",
             "default": ""
           },

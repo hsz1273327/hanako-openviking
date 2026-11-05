@@ -116,7 +116,7 @@ export const RECALL_GATE_FALLBACKS = Object.freeze(["recall", "rules"]);
 /** 召回查询：last 只用最后一句，context 拼最近几条用户文本。 */
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 
-/** 结果重排：off 原样注入，llm 按 rerankChannels 跑配置好的通道。 */
+/** 结果精排：off 原样注入，llm 按 rerankChannels 跑配置好的通道。 */
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
 
 /** 精排通道类型：OpenAI 兼容 rerank、llama.cpp systemone、宿主模型。 */
@@ -168,7 +168,7 @@ function serviceLimits(kind) {
 /** 自定义提示词上限。超过这个长度的存量值在读取侧截断，POST 侧整单拒绝。 */
 export const GATE_PROMPT_MAX = 2000;
 
-/** 重排提示词上限，与判断提示词同一口径。 */
+/** 精排提示词上限，与判断提示词同一口径。 */
 export const RERANK_PROMPT_MAX = 2000;
 
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
@@ -263,7 +263,7 @@ export function serializeGateDecisionThreshold(raw) {
   return String(normalizeGateDecisionThreshold(raw));
 }
 
-/** 重排提示词与判断提示词同口径：空串表示“用内置默认模板”。 */
+/** 精排提示词与判断提示词同口径：空串表示“用内置默认模板”。 */
 export function normalizeRerankPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, RERANK_PROMPT_MAX).join("");
@@ -292,7 +292,7 @@ export function normalizeGateModel(raw) {
   return `${provider}/${model}`;
 }
 
-/** 重排模型与 gateModel 同形：复用同一份解析。 */
+/** 精排模型与 gateModel 同形：复用同一份解析。 */
 export const normalizeRerankModel = normalizeGateModel;
 
 /** 通道 URL 只认 http / https；末尾斜杠在这里统一去掉，拼接端点时不会再出现双斜杠。 */
