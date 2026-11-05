@@ -80,6 +80,9 @@ export const DEFAULTS = {
   rerank: "off",
   assembleMode: "rules",
   rerankPrompt: "",
+  // 判别模型（systemone）那一路的题面。空串 = 用内置那句默认问法。
+  rerankSystemonePrompt: "",
+  // 存量兜底模型的标识。界面不再显示、运行时不读，只在读取通道时用来补一条 model 通道。
   rerankModel: "",
   rerankChannels: "",
   rerankServiceUrl: "",
@@ -132,10 +135,17 @@ export const RERANK_MODES = Object.freeze(["off", "llm"]);
  */
 export const ASSEMBLE_MODES = Object.freeze(["off", "rules"]);
 
-/** 精排通道类型：OpenAI 兼容 rerank、llama.cpp systemone、宿主模型。 */
+/**
+ * 精排通道类型：语言模型（宿主模型）、判别模型（llama.cpp systemone）、rerank 模型（OpenAI 兼容 rerank）。
+ *
+ * 三种类型各最多一条，界面上是三条固定的路，谁也不是谁的备胎。
+ */
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 
-/** 一次最多跑几路。超出的部分不解析，避免一张配置把一轮召回拖成十几跳。 */
+/**
+ * 通道数组的存量上限。每种类型只留一条，所以真实能跑的永远不超过三条；
+ * 这个数只用来挡住「一整串脏数据」这种写法，读取与写入两侧都按它截。
+ */
 export const RERANK_CHANNELS_MAX = 8;
 
 /** 权重边界。合并时按 Σ(score×weight) / Σ(weight) 算，只统计成功的通道。 */
@@ -285,6 +295,9 @@ export function normalizeRerankPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, RERANK_PROMPT_MAX).join("");
 }
+
+/** 判别模型的题面与精排提示词同一口径（同一个长度上限，空串 = 用内置那句默认问法）。 */
+export const normalizeRerankSystemonePrompt = normalizeRerankPrompt;
 
 /** 模型标识的单项上限。与 APPS.md 里可调用模型标识的边界一致。 */
 export const MODEL_REF_PART_MAX = 128;
@@ -476,9 +489,47 @@ export function parseRerankChannel(raw) {
     url,
     model: type === "model" ? (model ? normalizeGateModel(model) : "") : model,
     weight,
-    enabled,
+    // 语言模型（model 通道）恒启用：精排至少要留一路，停用状态在读写两侧都不成立。
+    enabled: type === "model" ? true : enabled,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
+}
+
+/**
+ * 每种类型最多一条：同类型的重复项只留第一条，其余丢掉。
+ *
+ * 三条路是固定的（语言模型 / 判别模型 / rerank 模型），数组形态只为存量兼容保留。
+ * 收敛在读与写两侧都做，不让「同一个类型两条」这种状态在配置里活下来。
+ */
+export function dedupeRerankChannels(list) {
+  const out = [];
+  const seen = new Set();
+  for (const channel of Array.isArray(list) ? list : []) {
+    if (!channel || typeof channel !== "object") continue;
+    if (seen.has(channel.type)) continue;
+    seen.add(channel.type);
+    out.push(channel);
+  }
+  return out;
+}
+
+/**
+ * 存量迁移：老配置里的 rerankModel（兜底模型）并进通道表。
+ *
+ * 判据是「rerankModel 有值且没有 model 通道」——已经有 model 通道时那一路说了算，
+ * 不再拿 rerankModel 去覆盖。补出来的通道与界面新建的一模一样（权重 1、启用），
+ * 所以补完之后运行时的行为与当年那一路兜底等价。
+ * rerankModel 这个键本身不删（用户配置里那份还在），只是读完这一次就不再被引用。
+ */
+export function migrateRerankChannels(channels, rerankModel) {
+  const list = Array.isArray(channels) ? channels : [];
+  const ref = normalizeRerankModel(rerankModel);
+  if (!ref) return list;
+  if (list.some((channel) => channel && channel.type === "model")) return list;
+  return [
+    ...list,
+    { type: "model", name: "", url: "", model: ref, weight: 1, enabled: true },
+  ];
 }
 
 /**
@@ -504,12 +555,18 @@ export function parseRerankChannels(raw, warn) {
   }
 
   const out = [];
+  const seen = new Set();
   for (const item of parsed) {
     const channel = parseRerankChannel(item);
     if (!channel) {
       report("rerankChannels 有一项字段不全，整项丢弃");
       continue;
     }
+    if (seen.has(channel.type)) {
+      report(`rerankChannels 有一项与前面的 ${channel.type} 通道重复，只留第一条`);
+      continue;
+    }
+    seen.add(channel.type);
     out.push(channel);
     if (out.length >= RERANK_CHANNELS_MAX) {
       if (parsed.length > RERANK_CHANNELS_MAX) {
@@ -524,10 +581,9 @@ export function parseRerankChannels(raw, warn) {
 /** 通道数组 -> 配置里那份 JSON 串。路由写入前用它把校验过的形状落库。 */
 export function serializeRerankChannels(list) {
   const channels = Array.isArray(list) ? list : [];
-  const normalized = channels
-    .map((item) => parseRerankChannel(item))
-    .filter(Boolean)
-    .slice(0, RERANK_CHANNELS_MAX);
+  const normalized = dedupeRerankChannels(
+    channels.map((item) => parseRerankChannel(item)).filter(Boolean),
+  ).slice(0, RERANK_CHANNELS_MAX);
   return JSON.stringify(normalized);
 }
 
@@ -573,6 +629,8 @@ export async function readSwitches(sdk) {
   // （选了 decision 但服务没配 → off），与路由 GET / 面板投影同一份规则。
   const systemoneServiceUrl = normalizeServiceUrl(await read(sdk, "systemoneServiceUrl"));
   const systemoneServiceModel = normalizeServiceModel(await read(sdk, "systemoneServiceModel"));
+  // 兜底模型的存量值先读出来：通道表要用它补那一条 model 通道，补完就不再用这个键。
+  const rerankModel = normalizeRerankModel(await read(sdk, "rerankModel"));
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
@@ -597,14 +655,20 @@ export async function readSwitches(sdk) {
     rerank: normalizeRerank(await read(sdk, "rerank")),
     assembleMode: normalizeAssembleMode(await read(sdk, "assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
-    rerankModel: normalizeRerankModel(await read(sdk, "rerankModel")),
-    rerankChannels: parseRerankChannels(await read(sdk, "rerankChannels"), (message) => {
-      try {
-        sdk?.logger?.warn?.(`openviking ${message}`);
-      } catch {
-        /* 日志不能影响配置读取 */
-      }
-    }),
+    rerankSystemonePrompt: normalizeRerankSystemonePrompt(
+      await read(sdk, "rerankSystemonePrompt"),
+    ),
+    rerankModel,
+    rerankChannels: migrateRerankChannels(
+      parseRerankChannels(await read(sdk, "rerankChannels"), (message) => {
+        try {
+          sdk?.logger?.warn?.(`openviking ${message}`);
+        } catch {
+          /* 日志不能影响配置读取 */
+        }
+      }),
+      rerankModel,
+    ),
     rerankServiceUrl: normalizeServiceUrl(await read(sdk, "rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await read(sdk, "rerankServiceModel")),
     // null = 没配（用默认值）；数字 = 用户配的那个。运行时靠这个区分「没配」与「配了默认值」。

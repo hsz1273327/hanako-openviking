@@ -22,6 +22,8 @@ import {
   RERANK_PROMPT_MAX,
   SERVICE_KINDS,
   SERVICE_MODEL_MAX,
+  dedupeRerankChannels,
+  migrateRerankChannels,
   normalizeAssembleMode,
   normalizeGateContext,
   normalizeGateContextPrompt,
@@ -34,6 +36,7 @@ import {
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
+  normalizeRerankSystemonePrompt,
   normalizeServiceKey,
   normalizeServiceModel,
   normalizeServiceTimeout,
@@ -159,6 +162,8 @@ async function current(ctx) {
   // 与 src/ov/settings.js 的 readSwitches、面板的 paintLayers 同一份规则。
   const systemoneServiceUrl = normalizeServiceUrl(await ctx.config.get("systemoneServiceUrl"));
   const systemoneServiceModel = normalizeServiceModel(await ctx.config.get("systemoneServiceModel"));
+  // 兜底模型的存量值：只在拼通道表时用一次（补一条 model 通道），补完就不再用这个键。
+  const rerankModel = normalizeRerankModel(await ctx.config.get("rerankModel"));
   return {
     recallGate: resolveRecallGate(await ctx.config.get("recallGate"), {
       systemoneServiceUrl,
@@ -190,14 +195,20 @@ async function current(ctx) {
     // 组装：脏值 / 缺项一律画成 rules（与 readSwitches 同口径）。
     assembleMode: normalizeAssembleMode(await ctx.config.get("assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
-    rerankModel: normalizeRerankModel(await ctx.config.get("rerankModel")),
-    rerankChannels: parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {
-      try {
-        ctx?.logger?.warn?.(`openviking ${message}`);
-      } catch {
-        /* 日志不能影响读数 */
-      }
-    }),
+    rerankSystemonePrompt: normalizeRerankSystemonePrompt(
+      await ctx.config.get("rerankSystemonePrompt"),
+    ),
+    rerankModel,
+    rerankChannels: migrateRerankChannels(
+      parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {
+        try {
+          ctx?.logger?.warn?.(`openviking ${message}`);
+        } catch {
+          /* 日志不能影响读数 */
+        }
+      }),
+      rerankModel,
+    ),
     rerankServiceUrl: normalizeServiceUrl(await ctx.config.get("rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await ctx.config.get("rerankServiceModel")),
     // null = 没配（用默认值），数字 = 配的那个。面板的 placeholder 与运行时共用这个口径。
@@ -335,6 +346,20 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push(["rerankPrompt", body.rerankPrompt]);
     }
 
+    // 判别模型那份题面：与精排提示词同一个长度上限，分开校验、分开落库。
+    if (has(body, "rerankSystemonePrompt")) {
+      if (typeof body.rerankSystemonePrompt !== "string") {
+        return c.json({ ok: false, error: "rerankSystemonePrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.rerankSystemonePrompt).length > RERANK_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `rerankSystemonePrompt 最多 ${RERANK_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["rerankSystemonePrompt", body.rerankSystemonePrompt]);
+    }
+
     if (has(body, "rerankModel")) {
       const problem = modelRefError(body.rerankModel, "rerankModel");
       if (problem) return c.json({ ok: false, error: problem }, 400);
@@ -428,6 +453,7 @@ export default function registerRecallModeRoutes(app, ctx) {
           );
         }
         const channels = [];
+        const seenTypes = new Set();
         for (const [index, item] of parsed.entries()) {
           const channel = parseRerankChannel(item);
           if (!channel) {
@@ -436,9 +462,12 @@ export default function registerRecallModeRoutes(app, ctx) {
               400,
             );
           }
+          // 三种类型各最多一条：同类型重复的只留第一条（与读取侧同一取舍，不 400）。
+          if (seenTypes.has(channel.type)) continue;
+          seenTypes.add(channel.type);
           channels.push(channel);
         }
-        changes.push(["rerankChannels", JSON.stringify(channels)]);
+        changes.push(["rerankChannels", JSON.stringify(dedupeRerankChannels(channels))]);
       }
     }
 

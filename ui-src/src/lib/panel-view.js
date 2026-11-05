@@ -7,7 +7,7 @@
 //
 // 这里不许碰 DOM、不许碰响应式、不许发请求。
 
-import { RERANK_CHANNEL_LABELS } from "./recall-layers.js";
+import { RERANK_LANE_LABELS } from "./recall-layers.js";
 
 /* ---------------- 顶部身份条 ---------------- */
 
@@ -231,7 +231,7 @@ export function formatChannelTest(out) {
     `候选 ${out?.candidates ?? 0} 条 · ${channels.length} 路通道 · ${out?.elapsedMs ?? 0}ms`,
   );
   for (const channel of channels) {
-    const label = RERANK_CHANNEL_LABELS[channel?.type] || channel?.type || "通道";
+    const label = RERANK_LANE_LABELS[channel?.type] || channel?.type || "通道";
     const name = channel?.name ? `${label} ${channel.name}` : label;
     if (channel?.ok) {
       const raw = (Array.isArray(channel.scores) ? channel.scores : []).map(fixed2).join(", ");

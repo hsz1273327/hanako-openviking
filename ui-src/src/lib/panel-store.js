@@ -25,17 +25,13 @@ import {
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
+  DEFAULT_RERANK_SYSTEMONE_PROMPT,
   GATE_CONTEXT_DEFAULT,
   GATE_CONTEXT_TURNS_DEFAULT,
   GATE_DECISION_THRESHOLD_DEFAULT,
-  RERANK_CHANNELS_MAX,
-  RERANK_CHANNEL_LABELS,
-  RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SCORING_SERVICES,
   SYSTEMONE_TIMEOUT_MAX,
   channelPairNote,
-  channelServiceMissing,
-  channelTypeOptions,
   commitLayers,
   contextPromptDraft,
   contextPromptStatus,
@@ -52,13 +48,15 @@ import {
   normalizeGateDecisionThreshold,
   normalizeGateFallback,
   normalizeGatePrompt,
-  normalizeRerankChannels,
   normalizeRerankPrompt,
+  normalizeRerankSystemonePrompt,
   normalizeServiceTimeout,
   paintRecallConfig,
   promptDraft,
   promptStatus,
   rerankChannelsText,
+  rerankLanes,
+  rerankLanesCountText,
   rerankPromptDraft,
   rerankPromptStatus,
   scoringServiceOf,
@@ -66,6 +64,8 @@ import {
   serviceTestReady,
   serviceTestView,
   serviceTimeoutInput,
+  systemonePromptDraft,
+  systemonePromptStatus,
 } from "./recall-layers.js";
 import { summarizeChecks } from "./check-summary.js";
 import {
@@ -128,6 +128,12 @@ const PROMPTS = Object.freeze({
     field: "rerankPrompt",
     default: DEFAULT_RERANK_PROMPT,
     draft: rerankPromptDraft,
+  }),
+  systemone: Object.freeze({
+    key: "systemone",
+    field: "rerankSystemonePrompt",
+    default: DEFAULT_RERANK_SYSTEMONE_PROMPT,
+    draft: systemonePromptDraft,
   }),
 });
 
@@ -206,17 +212,18 @@ export function createPanelStore(deps = {}) {
       // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
       assembleMode: "rules",
       gateModel: "",
-      rerankModel: "",
     },
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
       decision: DEFAULT_GATE_DECISION_PROMPT,
       context: DEFAULT_GATE_CONTEXT_PROMPT,
       rerank: DEFAULT_RERANK_PROMPT,
+      systemone: DEFAULT_RERANK_SYSTEMONE_PROMPT,
       gateTouched: false,
       decisionTouched: false,
       contextTouched: false,
       rerankTouched: false,
+      systemoneTouched: false,
     },
     // 打分服务的四个输入框（地址 / 模型 / 超时 / 密钥），键就是配置键（与手写面板的 DOM id 一致）。
     // 密钥那一格存的是掩码串（服务端只回掩码），空串 = 没配。
@@ -335,7 +342,6 @@ export function createPanelStore(deps = {}) {
     "rerank",
     "assembleMode",
     "gateModel",
-    "rerankModel",
   ];
 
   /**
@@ -486,7 +492,7 @@ export function createPanelStore(deps = {}) {
       rerank: state.form.rerank,
       assembleMode: normalizeAssembleMode(state.form.assembleMode),
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
-      rerankModel: state.form.rerankModel,
+      rerankSystemonePrompt: normalizeRerankSystemonePrompt(state.prompts.systemone),
       // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
       rerankChannels: state.channels.filter(isCompleteRerankChannel),
       ...scoring,
@@ -556,7 +562,7 @@ export function createPanelStore(deps = {}) {
     "gateModel",
     "rerank",
     "rerankPrompt",
-    "rerankModel",
+    "rerankSystemonePrompt",
     "rerankChannels",
     // 组装开关与召回策略同一单，所以也得进「这一单有没有变化」的比较：
     // 漏在这里，切开关会看起来“没改”，一单都不发。
@@ -828,102 +834,79 @@ export function createPanelStore(deps = {}) {
     }
   }
 
-  /* ---------------- 精排通道 ---------------- */
+  /* ---------------- 精排：三条固定的路 ---------------- */
 
-  function channelTypeChoices() {
-    return channelTypeOptions(state.layers);
+  /**
+   * 三条路此刻的展示数据。
+   *
+   * 用的是草稿（state.channels），不是服务端确认过的那份：拨了开关要立刻变，
+   * 不用等回包。哪几条出现由 rerankLanes 判定（配了服务才有判别 / rerank 那两条，
+   * 语言模型恒有）。
+   */
+  function laneRows() {
+    return rerankLanes({ ...state.layers, rerankChannels: state.channels });
   }
 
-  function addChannel() {
-    if (state.channels.length >= RERANK_CHANNELS_MAX) return;
-    // 新行默认用当前可选的第一类；两个服务都没配时按钮已禁用。
-    const firstType = channelTypeChoices()[0]?.value || "model";
-    state.channels = [...state.channels, emptyRerankChannel(firstType)];
+  function laneCountText() {
+    return rerankLanesCountText(laneRows());
+  }
+
+  /**
+   * 改一条路的配置。没有这一条通道就现建一条（只有拨开关 / 改权重才会走到这里），
+   * 所以「界面上看得见的那条路」与「配置里真有的通道」不会长期错位。
+   *
+   * 语言模型的 enabled 恒为 true：那个开关在界面上是禁用态，这里再兜一层，
+   * 免得别的调用方把停用状态写进配置。
+   */
+  function patchLane(type, patch) {
+    const index = state.channels.findIndex((channel) => channel && channel.type === type);
+    const base = index >= 0 ? state.channels[index] : emptyRerankChannel(type);
+    const next = { ...base, ...patch };
+    if (type === "model") next.enabled = true;
+    if (index >= 0) state.channels[index] = next;
+    else state.channels = [...state.channels, next];
     return saveLayers();
   }
 
-  function updateChannel(index, patch) {
-    const current = state.channels[index];
-    if (!current) return;
-    state.channels[index] = { ...current, ...patch };
-    return saveLayers();
-  }
-
-  function removeChannel(index) {
-    if (!state.channels[index]) return;
-    state.channels.splice(index, 1);
-    state.channels = [...state.channels];
-    return saveLayers();
+  /** 启用 / 停用一条路。语言模型那一条不可停用，调用直接返回（不改状态也不发请求）。 */
+  function setLaneEnabled(type, enabled) {
+    if (type === "model") return undefined;
+    return patchLane(type, { enabled: Boolean(enabled) });
   }
 
   /** 权重：非数字退回原值；数字收敛到 0.1 ~ 10。 */
-  function setChannelWeight(index, raw) {
-    const current = state.channels[index];
-    if (!current) return;
+  function setLaneWeight(type, raw) {
     const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) {
-      return;
-    }
+    if (!Number.isFinite(parsed)) return undefined;
     const clamped = Math.min(10, Math.max(0.1, parsed));
-    return updateChannel(index, { weight: clamped });
+    return patchLane(type, { weight: clamped });
   }
 
   /** 超时：留空 = 用该类型的默认值；非数字退回；数字收敛到 200 ~ 该类型上限。 */
-  function setChannelTimeout(index, raw) {
-    const ceiling = state.channels[index]?.type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000;
-    const current = state.channels[index];
-    if (!current) return;
+  function setLaneTimeout(type, raw) {
+    const ceiling = type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000;
     const text = String(raw ?? "").trim();
-    if (!text) {
-      const next = { ...current };
-      delete next.timeoutMs;
-      state.channels[index] = next;
-      return saveLayers();
-    }
+    if (!text) return clearLaneTimeout(type);
     const parsed = Number(text);
-    if (!Number.isFinite(parsed)) {
-      return;
-    }
+    if (!Number.isFinite(parsed)) return undefined;
     const clamped = Math.min(ceiling, Math.max(200, Math.floor(parsed)));
-    return updateChannel(index, { timeoutMs: clamped });
+    return patchLane(type, { timeoutMs: clamped });
   }
 
-  /** 一行通道此刻的展示数据：可选类型、是否不可用、配对说明、超时边界。 */
-  function channelView(channel, index) {
-    const choices = channelTypeChoices();
-    const options = [...choices];
-    // 存量通道的类型可能已不在可选范围内（服务被清空）：把当前值留住，别让下拉变空。
-    if (!options.some((option) => option.value === channel?.type)) {
-      options.push({
-        value: channel?.type,
-        label: `${RERANK_CHANNEL_LABELS[channel?.type] || channel?.type}（服务未配置）`,
-      });
-    }
-    return {
-      index,
-      channel,
-      options,
-      unavailable: channelServiceMissing(channel, state.layers),
-    // 卡头标题自动拼：通道序号 + 这一路实际打到哪个模型。名字不再手填，
-      // 每类服务只能配一个模型，再抄一遍只会抄错。
-      title: (() => {
-        const label = RERANK_CHANNEL_LABELS[channel?.type] || channel?.type || "通道";
-        const model =
-          channel?.model ||
-          (channel?.type === "rerank"
-            ? state.layers?.rerankServiceModel
-            : channel?.type === "systemone"
-              ? state.layers?.systemoneServiceModel
-              : "") ||
-          "";
-        return model ? `通道 ${index + 1} · ${model}` : `通道 ${index + 1} · ${label}`;
-      })(),
-      // 配对说明拿「服务端确认过的打分服务」当配置：草稿里填了一半时，
-      // 运行时那一对其实还没生效。
-      pairNote: channelPairNote(channel, state.layers),
-      timeoutCeiling: channel?.type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000,
-      timeoutPlaceholder: String(RERANK_CHANNEL_TIMEOUT_DEFAULTS[channel?.type] ?? 800),
-    };
+  /** 把这一格的超时删掉（= 回到该类型的默认值 / 自适应）。 */
+  function clearLaneTimeout(type) {
+    const index = state.channels.findIndex((channel) => channel && channel.type === type);
+    if (index < 0) return undefined;
+    const next = { ...state.channels[index] };
+    delete next.timeoutMs;
+    state.channels[index] = next;
+    return saveLayers();
+  }
+
+  /** 一条路自己的零碎状态（整对回退说明、服务是否还在）。 */
+  function laneNote(lane) {
+    if (!lane?.channel) return "";
+    return channelPairNote(lane.channel, state.layers);
   }
 
   /* ---------------- peer 名单 ---------------- */
@@ -980,6 +963,11 @@ export function createPanelStore(deps = {}) {
 
   function rerankPromptStatusOf() {
     return rerankPromptStatus(state.prompts.rerank);
+  }
+
+  /** 判别模型题面的三态小字：与精排提示词同一套，只是坐的是另一格。 */
+  function systemonePromptStatusOf() {
+    return systemonePromptStatus(state.prompts.systemone);
   }
 
   /** 用户动过提示词之后，刷新不再拿默认文案去盖他（包括他故意清空的那次）。 */
@@ -1080,13 +1068,12 @@ export function createPanelStore(deps = {}) {
     setServiceKey,
     testService,
     testChannels,
-    addChannel,
-    updateChannel,
-    removeChannel,
-    setChannelWeight,
-    setChannelTimeout,
-    channelView,
-    channelTypeChoices,
+    laneRows,
+    laneCountText,
+    laneNote,
+    setLaneEnabled,
+    setLaneWeight,
+    setLaneTimeout,
     togglePeer,
     touchPrompt,
     setPrompt,
@@ -1095,6 +1082,7 @@ export function createPanelStore(deps = {}) {
     decisionPromptStatusOf,
     contextPromptStatusOf,
     rerankPromptStatusOf,
+    systemonePromptStatusOf,
     enabled,
     peerRows,
     peerCountText,

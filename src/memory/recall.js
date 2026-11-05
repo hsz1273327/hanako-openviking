@@ -154,6 +154,20 @@ export const RERANK_MESSAGE_PLACEHOLDER = "{{message}}";
 export const RERANK_CANDIDATES_PLACEHOLDER = "{{candidates}}";
 
 /**
+ * 判别模型题面里的序号占位符。
+ *
+ * 不是候选清单那种模板：一份题面只问一条候选，所以这里换进去的是一个数字。
+ */
+export const SYSTEMONE_N_PLACEHOLDER = "{{n}}";
+
+/**
+ * 判别模型的默认题面。导出给测试与面板文案对照。
+ * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
+ * 冒烟会比对两边；rerankSystemonePrompt 为空时就用这段。
+ */
+export const DEFAULT_RERANK_SYSTEMONE_PROMPT = "第 {{n}} 条候选能帮助回答用户的问题吗";
+
+/**
  * llm 精排的默认提示词模板。导出给测试与面板文案对照。
  * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
  * 冒烟会比对两边；配置里的 rerankPrompt 为空时就用这段。
@@ -294,11 +308,6 @@ export function gatePromptOf(switches) {
  */
 export function gateModelOf(switches) {
   return typeof switches?.gateModel === "string" ? switches.gateModel.trim() : "";
-}
-
-/** 精排模型与 gateModel 同形：空串表示用宿主辅助模型。 */
-export function rerankModelOf(switches) {
-  return typeof switches?.rerankModel === "string" ? switches.rerankModel.trim() : "";
 }
 
 /**
@@ -507,13 +516,42 @@ export const SYSTEMONE_DOCUMENT_CHARS = 500;
 export const SYSTEMONE_STATE_MAX_CHARS = 12000;
 
 /**
- * systemone 的逐条提问。
+ * 判别模型（systemone）的逐条提问。
  *
  * /v1/systemone 的设计是「一个 state + 多个问题」，不是「多条 state 各问一次」。
  * 所以每条候选配一个问题，序号必须与 state 里候选列表的编号一一对应。
+ *
+ * 题面可配（rerankSystemonePrompt），{{n}} 是候选在本批里的序号（从 1 开始）：
+ *   1. 写了 {{n}} 就在原地换成序号（多处出现都换）；
+ *   2. 没写就把序号补在题面最前面（默认题面带 {{n}}，所以空配置时的输出
+ *      与加这个配置之前逐字一致：「第 1 条候选能帮助回答用户的问题吗」）；
+ *   3. 空串 / 全是空白 = 用内置的默认题面。
+ *
+ * 与 renderRerankPrompt 不同：那边的空模板返回空串（等于不问），这边不允许「没有问题」——
+ * systemone 的 questions 少一项就等于那一条候选没被打分，静默少一条比报错更难查。
  */
+export function renderSystemoneInstruction(template, position) {
+  const index = Math.max(1, Math.floor(Number(position) || 1));
+  const text =
+    typeof template === "string" && template.trim() ? template : DEFAULT_RERANK_SYSTEMONE_PROMPT;
+  if (text.includes(SYSTEMONE_N_PLACEHOLDER)) {
+    return text.split(SYSTEMONE_N_PLACEHOLDER).join(String(index));
+  }
+  return `第 ${index} 条 ${text}`;
+}
+
+/** 默认题面渲染出来的那一句（没有配题面时运行时实际发的东西）。 */
 export function systemoneInstructions(position) {
-  return `第 ${position} 条候选能帮助回答用户的问题吗`;
+  return renderSystemoneInstruction(DEFAULT_RERANK_SYSTEMONE_PROMPT, position);
+}
+
+/** 判别模型题面的读数：空串表示用默认题面（与 rerankPrompt 同一个取舍）。 */
+export function systemonePromptOf(switches) {
+  const value =
+    typeof switches?.rerankSystemonePrompt === "string"
+      ? switches.rerankSystemonePrompt.trim()
+      : "";
+  return value || DEFAULT_RERANK_SYSTEMONE_PROMPT;
 }
 
 function raceTimeout(promise, timeoutMs, label = "channel") {
@@ -889,8 +927,7 @@ export function decisionGateSkips(answer, threshold = DECISION_GATE_THRESHOLD) {
 }
 
 /**
- * 宿主模型通道的通用调用。askRerankModel 与可配置的 model 通道共用这一份；
- * 唯一区别是模型标识与超时由调用方给。
+ * 宿主模型通道的通用调用。提示词由 scoreModelChannel 渲染好，模型标识与超时也由它给。
  */
 async function askModelChannel(sdk, { modelRef = "", prompt = "", timeoutMs = RERANK_TIMEOUT_MS } = {}) {
   const models = sdk?.models;
@@ -942,20 +979,6 @@ async function askModelChannel(sdk, { modelRef = "", prompt = "", timeoutMs = RE
   } finally {
     clearTimeout(timer);
   }
-}
-
-/**
- * 问宿主模型哪些候选真正有用。
- *
- * 保留旧签名：没有启用任何通道时，这就是兜底那一路。
- * 超时 / 抛错都抛给调用方，由调用方决定“保留全部”。
- */
-export async function askRerankModel(sdk, switches, prompt) {
-  return askModelChannel(sdk, {
-    modelRef: rerankModelOf(switches),
-    prompt,
-    timeoutMs: RERANK_TIMEOUT_MS,
-  });
 }
 
 /** OpenAI 兼容 /v1/rerank：一次带上全部候选，按 relevance_score 打分。 */
@@ -1060,10 +1083,13 @@ export function buildSystemOneState(query, items) {
  * llama.cpp /v1/systemone：全部候选拼进同一个 state，一次请求问回全部概率。
  *
  * 逐条串行并不更快（每问一次前向），批量省的是 HTTP 往返和重复的 state 编码。
- * 返回数组与 items 等长：没问的（超过 8 条、state 放不下、宿主没答）一律 null，
+ * 返回数组与 items 等长：没问的（超过 5 条、state 放不下、宿主没答）一律 null，
  * 这些位置不参与这一路的标准化，但仍然是合法下标，供其它路投票。
+ *
+ * instructionFor 是题面渲染（position -> 一句完整问法），由调用方把配置里的
+ * rerankSystemonePrompt 带进来；缺省时用内置默认题面。
  */
-async function scoreSystemOneChannel(sdk, channel, query, items) {
+async function scoreSystemOneChannel(sdk, channel, query, items, instructionFor) {
   const scores = new Array(items.length).fill(null);
   const asked = items.slice(0, SYSTEMONE_MAX_CANDIDATES);
   if (!asked.length) return scores;
@@ -1071,9 +1097,10 @@ async function scoreSystemOneChannel(sdk, channel, query, items) {
   const { state, count } = buildSystemOneState(query, asked);
   if (!count) return scores;
 
+  const render = typeof instructionFor === "function" ? instructionFor : systemoneInstructions;
   const questions = {};
   for (let position = 1; position <= count; position += 1) {
-    questions[`r${position}`] = { type: "noul", instructions: systemoneInstructions(position) };
+    questions[`r${position}`] = { type: "noul", instructions: render(position) };
   }
 
   const data = await postJson(
@@ -1189,18 +1216,16 @@ export async function testScoringService({ sdk, kind, url, model, timeoutMs, key
   };
 }
 
-/** 宿主模型通道：沿用编号清单，挑中 1、未挑中 0。 */
+/** 宿主模型通道：沿用编号清单，挑中 1、未挑中 0。提示词是 rerankPrompt（与判别模型那份无关）。 */
 async function scoreModelChannel(sdk, switches, channel, query, items) {
   const prompt = renderRerankPrompt(rerankPromptOf(switches), query, items);
   if (!prompt) throw new Error("精排提示词为空");
 
-  const answer = channel.legacy
-    ? await askRerankModel(sdk, switches, prompt)
-    : await askModelChannel(sdk, {
-        modelRef: channel.model,
-        prompt,
-        timeoutMs: channelTimeout(channel, RERANK_MODEL_CHANNEL_TIMEOUT_MS),
-      });
+  const answer = await askModelChannel(sdk, {
+    modelRef: channel.model,
+    prompt,
+    timeoutMs: channelTimeout(channel, RERANK_MODEL_CHANNEL_TIMEOUT_MS),
+  });
   const indexes = parseRerankAnswer(answer, items.length);
   if (indexes === null) throw new Error("模型回答解析不出编号");
   const picked = new Set(indexes);
@@ -1311,25 +1336,15 @@ export function resolveRerankChannel(channel, switches) {
 /**
  * 这一轮实际要跑的通道。
  *
- * 有启用通道就按配置跑；一个启用通道都没有时，退回旧的 rerankPrompt / rerankModel
- * 那一路（等价于一个 weight=1 的 model 通道），已有配置不会突然失灵。
+ * 只跑启用的那几条，一个都没有就返回空数组（调用方据此直接跳过精排）。
+ * 不再偷偷用宿主模型顶上：三种类型是平的三条路，谁也不是谁的备胎。
+ * 存量 rerankModel 的值由 src/ov/settings.js 的 migrateRerankChannels 在读取侧
+ * 并成一条 model 通道，所以到这里已经没有需要兼容的旧形态。
  */
 export function rerankChannelsOf(switches) {
   const raw = switches?.rerankChannels;
   const configured = Array.isArray(raw) ? raw : parseRerankChannels(raw);
-  const enabled = configured.filter((channel) => channel && channel.enabled !== false);
-  if (enabled.length) return enabled;
-  return [
-    {
-      type: "model",
-      name: "兜底模型",
-      url: "",
-      model: rerankModelOf(switches),
-      weight: 1,
-      enabled: true,
-      legacy: true,
-    },
-  ];
+  return configured.filter((channel) => channel && channel.enabled !== false);
 }
 
 /**
@@ -1459,6 +1474,20 @@ export function dropRejectedIndexes(indexes, results) {
 }
 
 /**
+ * 这一路吃哪一份提示词：
+ *   model     -> rerankPrompt（语言模型，编号清单）
+ *   systemone -> rerankSystemonePrompt（判别模型，逐条题面）
+ *   rerank    -> none（交叉编码器直接对问题和候选成对打分，没有提示词可配）
+ *
+ * 探针只记这个来源名，不记全文。
+ */
+export function promptSourceOf(type) {
+  if (type === "model") return "rerankPrompt";
+  if (type === "systemone") return "rerankSystemonePrompt";
+  return "none";
+}
+
+/**
  * 跑一轮多路精排。
  *
  * 每路先在自己批内 min-max 标准化，再按权重平均；同分的一路直接弃权。
@@ -1473,6 +1502,9 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   );
   const list = (Array.isArray(channels) && channels.length ? channels : rerankChannelsOf(switches))
     .map((channel) => resolveRerankChannel(channel, switches));
+  // 判别模型的题面只在这里渲染一次：同一个模板给全部候选逐条换序号。
+  const systemoneTemplate = systemonePromptOf(switches);
+  const instructionFor = (position) => renderSystemoneInstruction(systemoneTemplate, position);
 
   const results = await Promise.all(
     list.map(async (channel) => {
@@ -1489,7 +1521,7 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
           scores = result.scores;
           scoreScale = result.scoreScale;
         } else if (channel.type === "systemone") {
-          scores = await scoreSystemOneChannel(sdk, channel, query, candidates);
+          scores = await scoreSystemOneChannel(sdk, channel, query, candidates, instructionFor);
         } else if (channel.type === "model") {
           scores = await scoreModelChannel(sdk, switches, channel, query, candidates);
         } else {
@@ -1549,6 +1581,9 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
       weight: result.channel.weight,
       ok: result.ok,
       abstained: result.abstained === true,
+      // 这一路实际吃的是哪一份提示词。只记来源名，不记全文：探针里放全文
+      // 既会把日志撞爆，也让「用户改了提示词」这件事变成一件能被读到内容的事。
+      promptSource: promptSourceOf(result.channel.type),
       // 这一批原始分被当成 logit 还是 probability。判定是启发式的，把结果留下，
       // 排序反常时看探针就能判断是不是误判。
       scoreScale: result.scoreScale,
@@ -2049,51 +2084,58 @@ export function createRecallHandler(sdk, options = {}) {
     // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
     let kept = items;
     if (switches.rerank === "llm" && items.length >= 2) {
-      // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
-      writeRerankSample(sdk, sessionId, { query: lastText, items });
+      const channels = rerankChannelsOf(switches);
+      if (!channels.length) {
+        // 三条路都停用（或者一条都没配）：不拿宿主模型顶上，候选原样保留。
+        log(sdk, "info", `rerank: no enabled channel, skip (session=${sessionId})`);
+      } else {
+        // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
+        writeRerankSample(sdk, sessionId, { query: lastText, items });
 
-      const outcome = await runRerankChannels({
-        sdk,
-        switches,
-        query: lastText,
-        items,
-      });
-      kept = outcome.kept;
+        const outcome = await runRerankChannels({
+          sdk,
+          switches,
+          query: lastText,
+          items,
+          channels,
+        });
+        kept = outcome.kept;
 
-      for (const channel of outcome.channels) {
-        if (!channel.ok) {
-          log(
-            sdk,
-            "info",
-            `rerank: channel ${channel.type} failed, abstained (session=${sessionId}) ${channel.error}`,
-          );
+        for (const channel of outcome.channels) {
+          if (!channel.ok) {
+            log(
+              sdk,
+              "info",
+              `rerank: channel ${channel.type} failed, abstained (session=${sessionId}) ${channel.error}`,
+            );
+          }
         }
-      }
-      if (outcome.fallback) {
-        log(sdk, "info", `rerank: all channels abstained, keep all (session=${sessionId})`);
-      }
-
-      if (switches.probe && typeof options.probe === "function") {
-        try {
-          await options.probe("recall/rerank", {
-            session,
-            query: lastText,
-            candidates: items.length,
-            enabledChannels: outcome.channelCount,
-            channels: outcome.channels,
-            kept: kept.length,
-            fallback: outcome.fallback,
-            elapsedMs: outcome.elapsedMs,
-          });
-        } catch {
-          /* 探针写不进去不能影响本轮对话 */
+        if (outcome.fallback) {
+          log(sdk, "info", `rerank: all channels abstained, keep all (session=${sessionId})`);
         }
-      }
 
-      if (!kept.length) {
-        // 有通道成功，且把所有候选都打了 0 分：本轮不注入。
-        log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
-        return undefined;
+        if (switches.probe && typeof options.probe === "function") {
+          try {
+            await options.probe("recall/rerank", {
+              session,
+              query: lastText,
+              candidates: items.length,
+              enabledChannels: outcome.channelCount,
+              channels: outcome.channels,
+              kept: kept.length,
+              fallback: outcome.fallback,
+              elapsedMs: outcome.elapsedMs,
+            });
+          } catch {
+            /* 探针写不进去不能影响本轮对话 */
+          }
+        }
+
+        if (!kept.length) {
+          // 有通道成功，且把所有候选都打了 0 分：本轮不注入。
+          log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
+          return undefined;
+        }
       }
     }
 

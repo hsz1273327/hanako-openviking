@@ -88,11 +88,36 @@ export function normalizeAssembleMode(value) {
 
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 export const RERANK_CHANNELS_MAX = 8;
-export const RERANK_CHANNEL_LABELS = Object.freeze({
-  rerank: "精排服务",
-  systemone: "决策服务",
-  model: "宿主模型",
+
+/**
+ * 精排页那三条固定的路的顺序：语言模型 / 判别模型 / rerank 模型。
+ *
+ * 与 RERANK_CHANNEL_TYPES（配置里的枚举）故意分成两份：那边是存量数据的写法，
+ * 这边是给人看的顺序，语言模型放最上面（它恒启用，是那一条基线）。
+ */
+export const RERANK_LANE_ORDER = Object.freeze(["model", "systemone", "rerank"]);
+
+export const RERANK_LANE_LABELS = Object.freeze({
+  model: "语言模型",
+  systemone: "判别模型",
+  rerank: "rerank 模型",
 });
+
+/** 每种路的默认超时显示（超时框的 placeholder）。systemone 没配时是自适应的。 */
+export const RERANK_LANE_TIMEOUT_PLACEHOLDERS = Object.freeze({
+  model: "1500",
+  systemone: "自适应",
+  rerank: "800",
+});
+
+/**
+ * rerank 模型那一条规则区里的那一句：它没有提示词可配。
+ *
+ * 语言模型与判别模型的规则区是输入框，自己就把事说清了；只有这一条需要一句解释，
+ * 否则「只看到权重和超时」会让人以为少了一个输入框。
+ */
+export const RERANK_LANE_NO_PROMPT_NOTE =
+  "交叉编码器直接对问题和候选成对打分，没有提示词可配。";
 // 打分服务的模型名上限，与 src/ov/settings.js 的 SERVICE_MODEL_MAX 同值。
 export const SERVICE_MODEL_MAX = 128;
 // 打分服务地址上限，与 src/ov/settings.js 的 RERANK_CHANNEL_URL_MAX 同值。
@@ -411,22 +436,62 @@ export function channelPairNote(value, config) {
 }
 
 /**
- * 通道类型下拉的选项：按已配置的打分服务动态生成。
+ * 一条路对应哪一组打分服务（语言模型没有服务，返回 null）。
  *
- * 精排服务配了才出现「精排服务」，决策服务配了才出现「决策服务」；
- * 宿主模型不需要端点，所以始终在。两个服务都没配时只剩这一项。
+ * 服务配了哪一类，精排页就多出哪一条路；两者都不配时只剩语言模型那一条。
  */
-export function channelTypeOptions(config) {
-  const options = [];
-  for (const service of SCORING_SERVICES) {
-    if (!normalizeServiceUrl(config?.[service.urlKey])) continue;
-    options.push({
-      value: service.kind,
-      label: RERANK_CHANNEL_LABELS[service.kind] || service.label,
+export function rerankLaneService(type) {
+  return type === "model" ? null : scoringServiceOf(type);
+}
+
+/** 这一条路对应的打分服务配好了吗（语言模型不需要服务，永远算配好）。 */
+export function rerankLaneConfigured(type, config) {
+  const service = rerankLaneService(type);
+  if (!service) return true;
+  return Boolean(normalizeServiceUrl(config?.[service.urlKey]));
+}
+
+/**
+ * 精排页要画的那几条路（纯函数，冒烟直接验）。
+ *
+ * 规则只有三条：
+ *   1. 语言模型恒有、恒启用（精排至少留一路，停用状态在数据侧也不成立）；
+ *   2. 判别模型 / rerank 模型：配了对应的打分服务才出现；已经有通道的也留下
+ *      （服务被清空时行还在，只标记不会生效，不自动删用户的数据）；
+ *   3. 启用状态看那条通道；还没有通道就是没启用（开启会在 store 里建出这一条）。
+ *
+ * 返回的是展示模型，不是配置：组件只读它，不反过来写回配置。
+ */
+export function rerankLanes(config) {
+  const channels = normalizeRerankChannels(config?.rerankChannels);
+  const byType = new Map();
+  for (const channel of channels) {
+    if (!byType.has(channel.type)) byType.set(channel.type, channel);
+  }
+
+  const lanes = [];
+  for (const type of RERANK_LANE_ORDER) {
+    const channel = byType.get(type) || null;
+    const configured = rerankLaneConfigured(type, config);
+    if (type !== "model" && !channel && !configured) continue;
+    const locked = type === "model";
+    lanes.push({
+      type,
+      label: RERANK_LANE_LABELS[type],
+      channel,
+      enabled: locked ? true : Boolean(channel && channel.enabled),
+      locked,
+      hasChannel: Boolean(channel),
+      // 有通道、但那一类服务已经不在了（且它自己也没成对配上地址 + 模型）：
+      // 运行时这一路会直接弃权，界面要说出来。判据与 channelServiceMissing 同一份。
+      unavailable: channel ? channelServiceMissing(channel, config) : false,
+      weight: channel ? channel.weight : 1,
+      timeoutMs: channel && channel.timeoutMs !== undefined ? channel.timeoutMs : null,
+      timeoutPlaceholder: RERANK_LANE_TIMEOUT_PLACEHOLDERS[type] || "",
+      timeoutCeiling: type === "systemone" ? SYSTEMONE_TIMEOUT_MAX : 30000,
     });
   }
-  options.push({ value: "model", label: RERANK_CHANNEL_LABELS.model });
-  return options;
+  return lanes;
 }
 
 /**
@@ -605,6 +670,9 @@ export function normalizeRerankPrompt(value) {
   return Array.from(value).slice(0, RERANK_PROMPT_MAX).join("");
 }
 
+/** 判别模型的题面与精排提示词同一口径（同一个上限，空串 = 用默认题面）。 */
+export const normalizeRerankSystemonePrompt = normalizeRerankPrompt;
+
 /**
  * 默认提示词。与 src/memory/recall.js 里的 DEFAULT_GATE_PROMPT 逐字一致。
  *
@@ -652,6 +720,15 @@ export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}
 挑出真正能帮助回答这个问题的候选。只回编号，用逗号分隔，例如 1,3。
 如果一条都用不上，只回两个字：无。
 不要解释。`;
+
+/**
+ * 判别模型的默认题面。与 src/memory/recall.js 里的 DEFAULT_RERANK_SYSTEMONE_PROMPT
+ * 逐字一致（冒烟比对两边）。{{n}} 是候选在本批里的序号，从 1 开始。
+ */
+export const DEFAULT_RERANK_SYSTEMONE_PROMPT = "第 {{n}} 条候选能帮助回答用户的问题吗";
+
+/** 判别模型题面里的序号占位符，与 src/memory/recall.js 的 SYSTEMONE_N_PLACEHOLDER 同值。 */
+export const SYSTEMONE_N_PLACEHOLDER = "{{n}}";
 
 /**
  * textarea 里该显示什么。
@@ -719,6 +796,21 @@ export function rerankPromptStatus(text) {
   return "已修改";
 }
 
+/** 判别模型题面的草稿：空配置时同样把默认题面填进去当底稿。 */
+export function systemonePromptDraft(configValue, touched = false) {
+  const value = normalizeRerankSystemonePrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_RERANK_SYSTEMONE_PROMPT;
+}
+
+/** 判别模型题面的三态小字：默认 / 已修改 / 空（回默认题面）。 */
+export function systemonePromptStatus(text) {
+  const value = normalizeRerankSystemonePrompt(text);
+  if (value === DEFAULT_RERANK_SYSTEMONE_PROMPT) return "当前为默认题面";
+  if (!value.trim()) return "已修改 · 题面为空时使用默认题面";
+  return "已修改";
+}
+
 // 服务端回的投影 -> 下拉值。宿主回半个形状时回退默认值，别让下拉变空。
 // 判定口径与 src/ov/settings.js 的 normalizeRecallGate / resolveRecallGate 一致：
 // decision 但决策服务没配 → off，别处漏过来的脏值也在这一层收掉。
@@ -769,8 +861,9 @@ export function normalizeRerankChannel(value) {
     url: typeof item.url === "string" ? item.url.trim() : "",
     model: typeof item.model === "string" ? item.model.trim() : "",
     weight: Number.isFinite(weight) && weight >= 0.1 && weight <= 10 ? weight : 1,
-    enabled: item.enabled !== false,
-    // 界面不编辑超时，但存量通道里填了要原样带回去，不能被一次保存洗掉。
+    // 语言模型那一条恒启用：精排至少要留一路，界面上那个开关本来就是禁用态。
+    enabled: type === "model" ? true : item.enabled !== false,
+    // 超时那一格用户可以留空（= 用该类型默认值），存量里填了要原样带回去。
     ...(Number.isFinite(timeout) && timeout > 0 && timeout <= 30000
       ? { timeoutMs: Math.floor(timeout) }
       : {}),
@@ -823,24 +916,27 @@ export function isCompleteRerankChannel(value) {
   }
 }
 
-/** 「添加通道」推入的空模板。默认给一个 rerank 行。 */
+/** 「添加通道」推入的空模板（只在 store 里给某一条路建配置时用，界面上没有这个按钮）。 */
 export function emptyRerankChannel(type = "rerank") {
   return normalizeRerankChannel({ type, name: "", url: "", model: "", weight: 1, enabled: true });
 }
 
-/** 一行通道的说明：给列表底部计数用。 */
-export function rerankChannelsCountText(list) {
-  const channels = normalizeRerankChannels(list);
-  const enabled = channels.filter((channel) => channel.enabled).length;
-  if (!channels.length) return "还没有通道";
-  return `${channels.length} 路通道 · ${enabled} 路启用`;
+/** 三条路下面那行计数：「N 路通道 · M 路启用」。 */
+export function rerankLanesCountText(lanes) {
+  const list = Array.isArray(lanes) ? lanes : [];
+  if (!list.length) return "还没有可用的路";
+  const enabled = list.filter((lane) => lane && lane.enabled).length;
+  return `${list.length} 路通道 · ${enabled} 路启用`;
 }
 
-/** 精排三个字段：开关、提示词模板、模型标识。 */
+/** 精排那几个字段：开关、两份提示词、通道表。 */
 export function paintRerankConfig(out) {
   return {
     rerank: normalizeRerank(out?.rerank),
     rerankPrompt: normalizeRerankPrompt(out?.rerankPrompt),
+    // 判别模型那份题面与语言模型那份分开画，谁也不会把对方盖掉。
+    rerankSystemonePrompt: normalizeRerankSystemonePrompt(out?.rerankSystemonePrompt),
+    // 存量兜底模型：界面不再用它，留着只为了让服务端投影与本地投影同形。
     rerankModel: normalizeRerankModel(out?.rerankModel),
     rerankChannels: normalizeRerankChannels(out?.rerankChannels),
   };

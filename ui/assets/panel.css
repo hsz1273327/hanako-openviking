@@ -379,32 +379,46 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .prompt-status { flex: 1; min-width: 0; font-size: 11px; opacity: 0.55; text-align: right; }
 .prompt-head .n-button { flex: none; }
 
-/* ---------- 精排通道 ---------- */
-.channel-field { min-width: 0; }
+/* ---------- 精排：三条固定的路 ---------- */
 
-/* 通道列表条目多时区内滚（NScrollbar），不把「添加通道」和名单顶出屏幕。
-   naive-ui 的滚动容器 height:100%，父级高度是 auto，所以上限要落在
-   .n-scrollbar-container 上：父级 auto + max-height 一定得到可滚动的定高盒。 */
-.channel-scroll .n-scrollbar-container { max-height: 220px; }
-.channel-stack { display: grid; gap: 8px; padding-right: 2px; }
+/* 每条路一张小卡，卡片边框默认走 naive-ui 的灰边；启用中的那一条由组件把边框色
+   换成主题里的 success 色（inline style，取的是 theme.js 的 successColor）。
+   这里只管布局，不写死颜色。 */
+.lane-stack { display: grid; gap: 8px; }
+.rerank-lane {
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(128, 128, 128, 0.18);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.02);
+}
+.rerank-lane.warn { background: rgba(184, 86, 77, 0.04); }
 
-/* 服务被清空、这条通道运行时不会生效：留着数据，只标红提醒。 */
-.channel-card.warn { border-color: rgba(194, 85, 75, 0.55); }
-.channel-head-extra { display: flex; align-items: center; gap: 8px; }
-.channel-enabled.n-checkbox,
-.channel-enabled.n-checkbox .n-checkbox__label { font-size: 11px; }
-.channel-unavailable { font-size: 11px; color: #b8564d; }
+.lane-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lane-name { font-size: 12px; font-weight: 500; }
+.lane-lock,
+.lane-warn,
+.lane-weight { font-size: 10.5px; }
+.lane-lock { opacity: 0.5; }
+.lane-warn { color: #b8564d; }
+.lane-weight { margin-left: auto; opacity: 0.5; font-variant-numeric: tabular-nums; }
+.lane-config { flex: none; }
 
-.channel-cell { display: grid; gap: 3px; min-width: 0; }
-.channel-cell > span { font-size: 10.5px; opacity: 0.5; }
-.channel-cell .n-select,
-.channel-cell .n-input,
-.channel-cell .n-input-number { width: 100%; min-width: 0; }
+.lane-body { margin-top: 10px; display: grid; gap: 8px; min-width: 0; }
+.lane-body .field { margin-bottom: 0; }
+.lane-note { margin: 0; }
 
-.channel-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
-.channel-actions .field-hint { margin-right: auto; }
+.lane-cell { display: grid; gap: 3px; min-width: 0; }
+.lane-cell > span { font-size: 10.5px; opacity: 0.5; }
+.lane-cell .n-input-number { width: 100%; min-width: 0; }
 
-.channel-result {
+.lane-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.lane-actions .prompt-status { flex: 1; min-width: 0; }
+
+/* 存量通道自带的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 */
+.lane-pair-note { font-size: 10.5px; line-height: 1.4; opacity: 0.55; margin: 0; }
+
+.rerank-test-result {
   margin: 8px 0 0;
   padding: 8px 10px;
   border-radius: 8px;
@@ -415,9 +429,6 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   overflow: auto;
   max-height: 180px;
 }
-
-/* 自己的地址与模型只填了一半：运行时那一对会整个改用服务配置，得说出来。 */
-.channel-pair-note { font-size: 10.5px; line-height: 1.4; opacity: 0.55; margin: 4px 0 0; }
 
 /* ---------- peer 名单（候选池卡内） ---------- */
 
@@ -596,7 +607,6 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   .peer-list,
   .peers-card > .n-card-content > .peer-list { flex: 0 0 auto; }
   .peer-scroll .n-scrollbar-container { max-height: 296px; }
-  .channel-scroll .n-scrollbar-container { max-height: 220px; }
   /* 日志页在这个高度下父级已经没有确定高度（.tab-panel 退回 auto），
      所以不能靠 flex 吃剩余，改成固定上限 + 自己滚，跟上面两个滚动点一致。
      权重写成 .logs .log：naive-ui 的 .n-scrollbar 也写了 height:100%，
