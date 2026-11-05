@@ -42,7 +42,7 @@ import {
   estimateTokens,
   injectMemory,
   lastUserText,
-  recallQuery,
+  recallQueryPlan,
   recentDialogue,
   trimToBudget,
 } from "../inject/plan.js";
@@ -51,6 +51,26 @@ const LOG_PREFIX = "openviking recall";
 
 /** 召回判断的上限：超过这个字数的文本一律召回。 */
 export const GATE_MAX_CHARS = 8;
+
+/**
+ * 请求失败只归一个类别，不抄原文、不抄地址。
+ *
+ * 两类够了：超时（请求发出去了，服务端没在预算内答完）与其它（连不上、代理挂了、
+ * 服务端报错）。这两类的处置完全相反——超时就该放宽 recallTimeoutMs 或缩短 queryChars，
+ * 其它该去查地址与 key——所以先分清它们，再看别的。
+ * 判据只看 code 与 message 的关键词：宿主 / 代理 / fetch 三层的超时都是这套写法。
+ */
+const TIMEOUT_HINTS = /timeout|timed out|etimedout|esockettimedout|aborted/i;
+
+export function recallErrorKind(error) {
+  const code = String(error?.code || "").toUpperCase();
+  if (code.includes("TIMEOUT")) return "timeout";
+  const name = String(error?.name || "");
+  if (name === "TimeoutError") return "timeout";
+  const message = String(error?.message || error || "");
+  if (TIMEOUT_HINTS.test(message)) return "timeout";
+  return "network";
+}
 
 /**
  * 疑问词：出现任一个就说明用户在问事，不能跳过。
@@ -2295,10 +2315,23 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
-    // 用什么去查：与上面的判断无关，按 queryMode 取。
-    const query = recallQuery(payload, switches.queryMode);
-    // 真正发出去的查询文本可能比最后一句长（context 档会拼上前几轮），字数按它算。
-    summary.query = { mode: switches.queryMode, chars: charLength(query) };
+    // 用什么去查：与上面的判断无关，按 queryMode 取。上限来自配置 queryChars（默认 600）：
+    // context 档从最近一轮往回整轮拼，装不了就停手，不切半句。
+    const planned = recallQueryPlan(payload, switches.queryMode, {
+      maxChars: conn.queryChars,
+    });
+    const query = planned.text;
+    // 字数记真正发出去的那个，不是上限。
+    // context 档额外记两笔：拼了几条（turns）、是不是因为字数上限丢了更旧的整条（truncated）。
+    summary.query =
+      switches.queryMode === "context"
+        ? {
+            mode: switches.queryMode,
+            chars: charLength(query),
+            turns: planned.turns,
+            ...(planned.truncated ? { truncated: true } : {}),
+          }
+        : { mode: switches.queryMode, chars: charLength(query) };
 
     // 排除名单只对跨门牌（all）有意义：actor 范围本来就不含别人，
     // 多带这个键只会让请求体多一个不必要的字段。
@@ -2319,9 +2352,18 @@ export function createRecallHandler(sdk, options = {}) {
         peerScope: live.recallPeerScope,
         maxTokens: budget,
         excludeUris,
+        // 召回用自己那一档超时（默认 5000），不用通用的 1500：
+        // 查询长起来服务端要好几秒，通用超时会把整轮召回掐成 recalled:0。
+        timeoutMs: conn.recallTimeoutMs,
       });
     } catch (error) {
-      log(sdk, "info", `skip: request failed (session=${sessionId}) ${reasonOf(error)}`);
+      // 面板上看不出失败原因就是什么都没记：类别进汇总（只记类别，不记地址与正文）。
+      summary.error = recallErrorKind(error);
+      log(
+        sdk,
+        "info",
+        `skip: request failed (session=${sessionId}) error=${summary.error} ${reasonOf(error)}`,
+      );
       await report();
       return undefined;
     }

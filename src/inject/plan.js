@@ -7,6 +7,8 @@
 //      "这轮说过的话"再写回去，几轮之后库里的记忆就全是关于记忆的记忆。
 //   3. 形状不认识就返回 null。宁可这轮不召回，也不能把 payload 改坏。
 
+import { QUERY_CHARS_DEFAULT } from "../ov/settings.js";
+
 export const MEMORY_TAG_OPEN = "<openviking-memory>";
 export const MEMORY_TAG_CLOSE = "</openviking-memory>";
 
@@ -72,14 +74,31 @@ export function lastUserText(payload) {
 /** context 查询最多拼几条用户文本。 */
 export const CONTEXT_MESSAGES_MAX = 3;
 
-/** context 查询的总长上限（按字符/码点算，不按 UTF-16 码元）。 */
-export const CONTEXT_CHARS_MAX = 300;
+/**
+ * context 查询的总长上限（按字符 / 码点算，不按 UTF-16 码元）。
+ *
+ * 真正生效的上限来自配置 queryChars（默认与这里同一个数），这里只是调用方不传时的缺省。
+ * 上限为什么是 600：服务端耗时约 2.3ms/字，600 字落在召回超时之内还留足余量。
+ */
+export const CONTEXT_CHARS_MAX = QUERY_CHARS_DEFAULT;
 
 function charLength(text) {
   return Array.from(text).length;
 }
 
-/** 从开头截断，保留尾部：最旧那条被截的是开头，最新那条保持完整。 */
+/** 上限归一化：拿不到正数就用缺省，不认小数（字数不取半）。 */
+function clampChars(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return CONTEXT_CHARS_MAX;
+  return Math.max(1, Math.floor(parsed));
+}
+
+/**
+ * 从开头截断、保留尾部。
+ *
+ * 只给 recentDialogue（判断前文）用：那一份是喂给模型的题面材料，不是搜索查询，
+ * 半句也能帮助判断，所以那里仍然允许裁到一半。召回查询不走这里，它停在整轮边界。
+ */
 function clipStart(text, keep) {
   if (keep <= 0) return "";
   const chars = Array.from(text);
@@ -87,22 +106,26 @@ function clipStart(text, keep) {
 }
 
 /**
- * 拼最近几条用户文本（从旧到新，换行分隔）。
+ * 拼最近几条用户文本的计划：从最新一条往回整条累加，停在**完整的一轮边界**上。
  *
  * 规则：
- *   1. 从新到旧最多取 CONTEXT_MESSAGES_MAX 条 user 消息；
- *   2. 相邻两条文本完全相同就去重；
- *   3. 总量超过 CONTEXT_CHARS_MAX 时从最旧一条的开头截断，最新一条保持完整；
- *   4. 一条都没有时返回空串，由 recallQuery 退回 last 的单条行为。
+ *   1. 从新到旧最多取 CONTEXT_MESSAGES_MAX 条 user 消息；相邻两条文本完全相同就去重；
+ *   2. 最新那一条无条件完整保留（哪怕它自己就超上限）——宁可多带一点，也不把
+ *      用户刚说的话切掉一半，更不能拼出一个空查询；
+ *   3. 再往旧加时按**整条**算：加了会超上限就停手，不截半句。
+ *      截断的做法改过一次：早先在最旧一条上按字符裁，查询尾巴上会挂着半句话，
+ *      而服务端是拿整段做检索，半句对检索没有帮助，还白白占掉字数预算；
+ *   4. 一条都没有时返回空串文本，由 recallQueryPlan 退回 last 的单条行为。
  *
- * 最新一条自己就超过上限时同样保持完整：宁可多带一点，也不把用户刚说的话切掉。
+ * 返回 { text, turns, truncated }：turns 是真正拼了几条，truncated 表示「因为字数
+ * 上限丢掉了更旧的整条」——它只记得为字数丢的，不算被条数上限挡在外面的那些。
  */
-export function contextQuery(
+export function contextQueryPlan(
   payload,
   { limit = CONTEXT_MESSAGES_MAX, maxChars = CONTEXT_CHARS_MAX } = {},
 ) {
   const messages = payload?.messages;
-  if (!Array.isArray(messages) || limit <= 0) return "";
+  if (!Array.isArray(messages) || limit <= 0) return { text: "", turns: 0, truncated: false };
 
   const picked = [];
   for (let i = messages.length - 1; i >= 0 && picked.length < limit; i -= 1) {
@@ -114,25 +137,28 @@ export function contextQuery(
     if (picked.length && picked[picked.length - 1] === text) continue;
     picked.push(text);
   }
-  if (!picked.length) return "";
+  if (!picked.length) return { text: "", turns: 0, truncated: false };
 
-  const ordered = picked.reverse();
-  const joined = ordered.join("\n");
-  if (charLength(joined) <= maxChars) return joined;
-
-  // 从最新一条往前拼；装不下的那条只保留尾部，然后停手。
-  let tail = ordered[ordered.length - 1];
-  for (let i = ordered.length - 2; i >= 0; i -= 1) {
-    const candidate = `${ordered[i]}\n${tail}`;
-    if (charLength(candidate) <= maxChars) {
-      tail = candidate;
-      continue;
+  const cap = clampChars(maxChars);
+  // picked 是新到旧；从最新一条开始往旧拼，装不下就停在整条边界上。
+  let text = picked[0];
+  let turns = 1;
+  let truncated = false;
+  for (let i = 1; i < picked.length; i += 1) {
+    const candidate = `${picked[i]}\n${text}`;
+    if (charLength(candidate) > cap) {
+      truncated = true;
+      break;
     }
-    const room = maxChars - charLength(tail) - 1;
-    if (room > 0) tail = `${clipStart(ordered[i], room)}\n${tail}`;
-    break;
+    text = candidate;
+    turns += 1;
   }
-  return tail;
+  return { text, turns, truncated };
+}
+
+/** 只要拼接结果（旧到新、换行分隔）。语义见 contextQueryPlan。 */
+export function contextQuery(payload, options = {}) {
+  return contextQueryPlan(payload, options).text;
 }
 
 /**
@@ -187,10 +213,24 @@ export function recentDialogue(payload, turns = 4, maxChars = 1200) {
   return tail;
 }
 
-/** 按配置取查询文本。context 拼不出东西时退回 last 的单条行为。 */
-export function recallQuery(payload, mode = "last") {
-  if (mode !== "context") return lastUserText(payload);
-  return contextQuery(payload) || lastUserText(payload);
+/**
+ * 按配置取查询文本与它的拼接账：{ text, turns, truncated }。
+ *
+ * context 拼不出东西（会话第一句、或者上面全是 assistant）时退回 last 的单条行为，
+ * 此时 turns=1 / truncated=false——它本来就只有一条，没拼也没截。
+ */
+export function recallQueryPlan(payload, mode = "last", options = {}) {
+  if (mode === "context") {
+    const planned = contextQueryPlan(payload, options);
+    if (planned.text) return planned;
+  }
+  const text = lastUserText(payload);
+  return { text, turns: text ? 1 : 0, truncated: false };
+}
+
+/** 按配置取查询文本。语义见 recallQueryPlan。 */
+export function recallQuery(payload, mode = "last", options = {}) {
+  return recallQueryPlan(payload, mode, options).text;
 }
 
 /** 把记忆块拼到内容前面。string 与 parts 两种形态各自处理，尽量不新增 part。 */

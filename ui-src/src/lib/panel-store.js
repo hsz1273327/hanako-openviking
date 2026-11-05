@@ -184,7 +184,11 @@ export function createPanelStore(deps = {}) {
       probe: true,
       skillRouting: false,
       requestTimeoutMs: null,
+      // 召回请求自己那一档超时（默 5000，与上面的通用超时分开）。
+      recallTimeoutMs: null,
       injectBudgetTokens: null,
+      // context 档拼查询的字数上限（默 600）。
+      queryChars: null,
     },
     // 连接三字段。apiKey 永远只是「这次要提交的新 key」，不回显旧值。
     conn: {
@@ -277,7 +281,9 @@ export function createPanelStore(deps = {}) {
     if (typeof out.probe === "boolean") state.controls.probe = out.probe;
     if (typeof out.skillRouting === "boolean") state.controls.skillRouting = out.skillRouting;
     if (out.requestTimeoutMs != null) state.controls.requestTimeoutMs = out.requestTimeoutMs;
+    if (out.recallTimeoutMs != null) state.controls.recallTimeoutMs = out.recallTimeoutMs;
     if (out.injectBudgetTokens != null) state.controls.injectBudgetTokens = out.injectBudgetTokens;
+    if (out.queryChars != null) state.controls.queryChars = out.queryChars;
   }
 
   function applyConnection(conn) {

@@ -106,9 +106,11 @@ function shapeOf(event, invocation) {
 
   // 每轮一条汇总：档位与计数，不带任何正文。
   // 少哪一段就给 null，不拿 0 或空串填坑——「没跑」与「跑了但是 0」必须分得开。
+  // error 只记类别（timeout / network），不记地址也不记响应正文。
   if (event === "recall/result") {
     return {
       gate: textOf(invocation.gate),
+      error: textOf(invocation.error),
       query: queryOf(invocation.query),
       recalled: countOf(invocation.recalled),
       rerank: rerankOf(invocation.rerank),
@@ -135,9 +137,20 @@ function countOf(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * 查询那一段：只说用什么查、发了多少字，以及 context 档的拼接账。
+ *
+ * turns / truncated 与 mode / chars 同一个口径：都是数字与布尔，不碰正文。
+ * 缺哪一项给 null（不是 0）：“没拼” 与 “拼了 0 条” 不是一回事。
+ */
 function queryOf(query) {
   if (!query || typeof query !== "object") return null;
-  return { mode: textOf(query.mode), chars: countOf(query.chars) };
+  return {
+    mode: textOf(query.mode),
+    chars: countOf(query.chars),
+    turns: countOf(query.turns),
+    truncated: typeof query.truncated === "boolean" ? query.truncated : null,
+  };
 }
 
 function rerankOf(rerank) {

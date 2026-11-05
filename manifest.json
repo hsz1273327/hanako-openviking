@@ -264,7 +264,7 @@
           "queryMode": {
             "type": "string",
             "title": "召回查询",
-            "description": "last 只用最后一条用户文本；context 拼最近三条用户文本，总长最多 300 字符、最新一条完整。",
+            "description": "last 只用最后一条用户文本；context 从最近一轮往回拼用户文本，累计到查询长度上限（默认 600 字）就停，停在完整的一轮边界上、不切半句。最新一轮总是完整带上；它自己就超上限时只用它一条。",
             "default": "last",
             "enum": [
               "last",
@@ -308,8 +308,20 @@
           "requestTimeoutMs": {
             "type": "integer",
             "title": "请求超时",
-            "description": "单次请求超时（毫秒）。连不上就短路，宜短。",
+            "description": "单次请求超时（毫秒）。连不上就短路，宜短。召回请求不吃这一项，它另有一档（recallTimeoutMs）。",
             "default": 1500
+          },
+          "queryChars": {
+            "type": "integer",
+            "title": "查询长度上限",
+            "description": "context 档拼查询的字数上限（按字符数），默认 600，可填 100 到 8000。从最近一轮往回整条累加，装不下就停手——宁可少拼一轮，不拼半句。为什么是 600：服务端耗时约 2.3ms/字，600 字约 1.4 秒，落在召回超时之内还留足余量。last 档不受这一项影响。",
+            "default": 600
+          },
+          "recallTimeoutMs": {
+            "type": "integer",
+            "title": "召回超时",
+            "description": "一次召回请求（/api/v1/search/search）的超时（毫秒），默认 5000，可填 500 到 30000。与通用请求超时分开：通用那一档（1500）只够约 600 字的查询，长查询会被提前掐断，整轮什么都不注入。精排那三个通道的超时是另一个东西，不受这一项影响。",
+            "default": 5000
           },
           "runtimePort": {
             "type": "integer",

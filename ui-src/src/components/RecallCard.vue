@@ -8,6 +8,12 @@
 //   llm         —— 展开提示词（gatePrompt）与判断模型（宿主生成式模型）；
 //   decision    —— 展开判断前文（gateContext / gateContextTurns）、提示词、召回门槛
 //                  （gateDecisionThreshold）与一行决策服务状态，判断模型下拉隐藏。
+//
+// 这张卡还有两个数值格：查询长度上限（queryChars）与召回超时（recallTimeoutMs）。
+// 它们属于宿主控制台那组数值调参（与注入预算同一个提交口 /controls → patchControls，
+// 走 store.setControlsNumber），不是召回策略那一单（setForm → saveLayers）：
+// 一个是“拼多长”，一个是“等多久”，改了立即生效，不需要整单回滚。
+//
 // 提示词是同一位置、同一套三态与「恢复默认」，但绑的键不同：llm 一份，decision 再按
 // gateContext 分「不看前文 / 带前文」两份。分开存、分开提交，改一份不动另一份，
 // 切档或切 gateContext 都不丢内容。
@@ -61,6 +67,7 @@ const {
   state,
   enabled,
   setForm,
+  setControlsNumber,
   setDecisionThreshold,
   setGateContextTurns,
   setPrompt,
@@ -132,6 +139,11 @@ function onPromptInput(value) {
 function onPromptChange(value) {
   setPrompt(promptWhich.value, value);
 }
+
+/** 数字格：n-input-number 清空给 null，收成空串走 store 的「不提交」分支。 */
+function onNumberChange(key, value) {
+  setControlsNumber(key, value === null || value === undefined ? "" : value);
+}
 </script>
 
 <template>
@@ -185,7 +197,47 @@ function onPromptChange(value) {
             :value="state.form.queryMode"
             @update:value="(value) => onSelect('queryMode', value)"
           />
-          <span class="field-hint">带上文会拼最近三条用户文本，总长最多 300 字符，最新一句保持完整。</span>
+          <span class="field-hint">带上文会从最近一轮往回拼用户文本，累计到查询长度上限就停，停在完整的一轮边界上、不切半句。</span>
+        </div>
+      </NGridItem>
+      <!-- 两个数字格：拼多长 / 等多久。提交口是 /controls（与注入预算同一条），
+           不是召回策略那一单：这两个数改了立即生效，没有整单校验要一起过。 -->
+      <NGridItem>
+        <div class="field">
+          <label for="queryChars">查询长度上限</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="100"
+            :max="8000"
+            :step="50"
+            placeholder="默认 600"
+            :input-props="{ id: 'queryChars' }"
+            :value="state.controls.queryChars ?? null"
+            @update:value="onNumberChange('queryChars', $event)"
+          />
+          <span class="field-hint">按字数算。只影响「带上文」：从最近一轮往回整条累加，装不下就少拼一轮，不会把句子切成半句。服务端耗时约随查询长度线性上升，这个数越高、召回超时就要跟着放宽。</span>
+        </div>
+      </NGridItem>
+      <NGridItem>
+        <div class="field">
+          <label for="recallTimeoutMs">召回超时（ms）</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="500"
+            :max="30000"
+            :step="500"
+            placeholder="默认 5000"
+            :input-props="{ id: 'recallTimeoutMs' }"
+            :value="state.controls.recallTimeoutMs ?? null"
+            @update:value="onNumberChange('recallTimeoutMs', $event)"
+          />
+          <span class="field-hint">召回请求自己那一档，与全局页的「请求超时」分开；精排三个通道的超时也不受它影响。当年沿用 1500 的后果是长查询被提前掐断，整轮 recalled:0。</span>
         </div>
       </NGridItem>
     </NGrid>

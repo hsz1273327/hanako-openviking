@@ -52,6 +52,30 @@ export const GATE_DECISION_THRESHOLD_MIN = 0;
 export const GATE_DECISION_THRESHOLD_MAX = 1;
 export const GATE_DECISION_THRESHOLD_STEP = 0.05;
 
+/**
+ * 召回查询的字数上限：context 档从最近一轮往回想拼，累计到这个字数就停手。
+ *
+ * 为什么要有：OpenViking 的 /api/v1/search/search 耗时随查询长度线性上升
+ * （本机实测 9 字 76ms、1350 字 3274ms、4500 字 13320ms，约 2.3ms/字）。
+ * 600 字约 1.4 秒，落在召回超时（默认 5000ms）之内还留足余量。
+ * 旧实现在 300 字处按字符截断，会把最旧那一句切成半句；现在改成整轮边界。
+ */
+export const QUERY_CHARS_DEFAULT = 600;
+export const QUERY_CHARS_MIN = 100;
+export const QUERY_CHARS_MAX = 8000;
+
+/**
+ * 召回请求自己的超时。
+ *
+ * 与 requestTimeoutMs（通用默认 1500）分开：那一个是「连不上就短路」的安全阀，
+ * 召回这一跳扛着查询文本去服务端做检索 + 组装，实测 2272 字要 5 秒。
+ * 用通用超时去掐它，结果就是整轮 recalled:0，日志里还看不出是超时。
+ * 精排那三个服务超时（SERVICE_TIMEOUT_LIMITS）是另一个东西，不受这一项影响。
+ */
+export const RECALL_TIMEOUT_DEFAULT = 5000;
+export const RECALL_TIMEOUT_MIN = 500;
+export const RECALL_TIMEOUT_MAX = 30000;
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -63,7 +87,9 @@ export const DEFAULTS = {
   readOnly: false,
   recallPeerScope: "all",
   requestTimeoutMs: 1500,
+  recallTimeoutMs: RECALL_TIMEOUT_DEFAULT,
   injectBudgetTokens: 2500,
+  queryChars: QUERY_CHARS_DEFAULT,
   skillRouting: true,
   probe: true,
   excludedPeers: "",
@@ -251,6 +277,33 @@ export function normalizeGateFallback(raw) {
 
 export function normalizeQueryMode(raw) {
   return oneOf(raw, QUERY_MODES, DEFAULTS.queryMode);
+}
+
+/**
+ * 召回查询的字数上限归一化：100–8000 的整数，其余一律回默认 600。
+ *
+ * 越界不夹边界，理由与 normalizeGateContextTurns 相同：夹成 100 会把「填错了」
+ * 静默变成「永远只拼一小段」，比回默认更难查。数字串接受，读出来是数字。
+ */
+export function normalizeQueryChars(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return QUERY_CHARS_DEFAULT;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return QUERY_CHARS_DEFAULT;
+  if (value < QUERY_CHARS_MIN || value > QUERY_CHARS_MAX) return QUERY_CHARS_DEFAULT;
+  return value;
+}
+
+/** 召回超时归一化：500–30000 的整数毫秒，其余一律回默认 5000。 */
+export function normalizeRecallTimeoutMs(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return RECALL_TIMEOUT_DEFAULT;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return RECALL_TIMEOUT_DEFAULT;
+  if (value < RECALL_TIMEOUT_MIN || value > RECALL_TIMEOUT_MAX) return RECALL_TIMEOUT_DEFAULT;
+  return value;
 }
 
 /** 判断前文：只认 none / turns，其余（缺项、类型不对、脏值）一律回 none。 */
@@ -852,8 +905,12 @@ export async function readConnection(sdk) {
     mergeMemory: await read(sdk, "mergeMemory"),
     recallPeerScope: await read(sdk, "recallPeerScope"),
     timeoutMs: Number(await read(sdk, "requestTimeoutMs")) || DEFAULTS.requestTimeoutMs,
+    // 召回请求单独一档超时：通用那一档只够约 600 字的查询，context 档拼满就会超。
+    recallTimeoutMs: normalizeRecallTimeoutMs(await read(sdk, "recallTimeoutMs")),
     injectBudgetTokens:
       Number(await read(sdk, "injectBudgetTokens")) || DEFAULTS.injectBudgetTokens,
+    // context 档拼查询的字数上限（按码点算），从最近一轮往回整轮拼。
+    queryChars: normalizeQueryChars(await read(sdk, "queryChars")),
   };
 }
 

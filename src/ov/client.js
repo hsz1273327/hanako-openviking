@@ -59,13 +59,15 @@ export function createClient({
   async function call(path, init = {}, mode = "result") {
     const url = base + path;
     const requestHeaders = headers(init.headers);
+    // 单次请求可以自带一档超时（召回那一跳要比通用默认宽）。缺省仍用客户端这一档。
+    const limitMs = Number(init.timeoutMs) > 0 ? Number(init.timeoutMs) : timeoutMs;
 
     if (doSend) {
       const result = await doSend(url, {
         method: init.method || "GET",
         headers: requestHeaders,
         body: init.body,
-        timeoutMs,
+        timeoutMs: limitMs,
       });
       return unwrap(
         path,
@@ -82,7 +84,7 @@ export function createClient({
       ...init,
       headers: requestHeaders,
       // 连不上即短路：超时极短，失败直接抛，由调用方吞掉并降级。
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(limitMs),
     });
     const data = await res.json().catch(() => null);
     return unwrap(
@@ -107,6 +109,7 @@ export function createClient({
     // 记忆召回。mode="context" 返回服务端已按 token 预算组装好的上下文块。
     // exclude_uris 只在确实有排除项时出现：空数组 / 未传都不带这个键，
     // 让请求体保持与旧版逐字节一致。
+    // timeoutMs 不传就用客户端那一档：召回随查询长度涨得很快，调用方该显式给一档更宽的。
     recall: (query, opts = {}) => {
       const excludeUris = Array.isArray(opts.excludeUris)
         ? opts.excludeUris.filter((uri) => typeof uri === "string" && uri.trim())
@@ -121,6 +124,7 @@ export function createClient({
           score_threshold: opts.scoreThreshold ?? 0.35,
           ...(excludeUris.length ? { exclude_uris: excludeUris } : {}),
         }),
+        timeoutMs: opts.timeoutMs,
       });
     },
 

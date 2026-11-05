@@ -227,6 +227,10 @@ function clockText(at) {
  *
  * 原始 JSON 能查，但扫不动：每轮都有的那一行要一眼看出“精排跑没跑、剩下几条”。
  * 精排 / 组装 / 注入没跑时那一段的括号里什么都不编，只给“—”。
+ *
+ * 请求失败那一轮在 gate 后面多一段 error=timeout / error=network：没有它，
+ * 这一行与「服务端真的一条没返回」长得一模一样，分不出是超时还是真没结果。
+ * 截断那一轮在字数后面挂一个（截断），看得出是字数上限把更旧的整条挡在外面了。
  */
 export function recallResultText(line) {
   const shape = line?.shape && typeof line.shape === "object" ? line.shape : {};
@@ -236,7 +240,9 @@ export function recallResultText(line) {
   const injected = shape.injected && typeof shape.injected === "object" ? shape.injected : null;
 
   const queryText = query
-    ? `${dashText(query.mode)}/${typeof query.chars === "number" ? `${query.chars}字` : LOG_DASH}`
+    ? `${dashText(query.mode)}/${typeof query.chars === "number" ? `${query.chars}字` : LOG_DASH}${
+        query.truncated === true ? "（截断）" : ""
+      }`
     : LOG_DASH;
   const rerankText = rerank
     ? `精排${countText(rerank.kept)}(${dashText(rerank.fallback)})`
@@ -246,15 +252,19 @@ export function recallResultText(line) {
     : `组装${LOG_DASH}`;
   const injectedText = injected ? `注入${countText(injected.tokens)}tok` : `注入${LOG_DASH}`;
 
-  return [
-    `${clockText(line?.at)} 召回`,
-    `gate=${dashText(shape.gate)}`,
+  const parts = [`${clockText(line?.at)} 召回`, `gate=${dashText(shape.gate)}`];
+  // 只有失败的那一轮才多这一段：正常轮里它什么也不说，不占位。
+  if (typeof shape.error === "string" && shape.error) {
+    parts.push(`error=${shape.error}`);
+  }
+  parts.push(
     `query=${queryText}`,
     `召回${countText(shape.recalled)}`,
     rerankText,
     assembleText,
     injectedText,
-  ].join(" · ");
+  );
+  return parts.join(" · ");
 }
 
 /** 一行日志的显示文本：汇总事件读摘要，其余照旧是原始 JSON。 */

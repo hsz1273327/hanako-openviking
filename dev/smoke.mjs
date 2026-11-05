@@ -17,6 +17,7 @@ import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
 import registerRecallModeRoutes from "../routes/recall-mode.js";
 import registerModelsRoutes from "../routes/models.js";
+import registerControlsRoutes from "../routes/controls.js";
 import {
   composePeer,
   resolvePeer,
@@ -95,6 +96,14 @@ import {
   SERVICE_TIMEOUT_LIMITS,
   ASSEMBLE_MODES,
   normalizeAssembleMode,
+  normalizeQueryChars,
+  normalizeRecallTimeoutMs,
+  QUERY_CHARS_DEFAULT,
+  QUERY_CHARS_MIN,
+  QUERY_CHARS_MAX,
+  RECALL_TIMEOUT_DEFAULT,
+  RECALL_TIMEOUT_MIN,
+  RECALL_TIMEOUT_MAX,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { maskOf, maskString } from "../src/ov/mask.js";
@@ -103,8 +112,10 @@ import {
   stripInjected,
   lastUserText,
   contextQuery,
+  contextQueryPlan,
   recentDialogue,
   recallQuery,
+  recallQueryPlan,
   injectMemory,
   estimateTokens,
   trimToBudget,
@@ -177,6 +188,7 @@ import {
   gateContextPromptOf,
   gateDecisionPromptOf,
   gateDecisionThresholdOf,
+  recallErrorKind,
   DECISION_GATE_CRITERIA,
   DECISION_GATE_CONTEXT_CRITERIA,
   DECISION_GATE_THRESHOLD,
@@ -768,6 +780,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "API Key 不在 runtime.fetch 的别的参数里",
     !JSON.stringify({ runtimeId: calls[0].runtimeId, path: calls[0].path }).includes("secret-key"),
   );
+
+  // ---- 单次请求自带超时：召回那一跳要比客户端默认那一档宽 ----
+  const wide = mockRuntimeFetch({ result: { status: "ok", result: { rendered: "x" } } });
+  const wideClient = createClient({
+    serverUrl: "http://h:1",
+    apiKey: "k",
+    timeoutMs: 1500,
+    send: createRuntimeTransport({ runtimeFetch: wide.runtimeFetch, token: "tk", runtimeId: "rt-1" })
+      .sendJson,
+  });
+  await wideClient.recall("长查询", { timeoutMs: 5000 });
+  await wideClient.recall("短查询");
+  eq(
+    "recall 带了 timeoutMs 就用它（5000）；不带才回客户端默认（1500）",
+    [JSON.parse(wide.calls[0].init.body).timeoutMs, JSON.parse(wide.calls[1].init.body).timeoutMs],
+    [5000, 1500],
+  );
 }
 
 {
@@ -1062,6 +1091,58 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   resetRuntimeTransport();
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= routes: /controls 的两个新数字 =================
+{
+  // 面板上多两个格子，就得有两个能存的地方：/controls 是它们唯一的提交口，
+  // 与注入预算同一条。没配过时回默认值，越界值夹到边界上（面板其它数字格同一口径）。
+  const handlers = {};
+  const store = {};
+  const app = {
+    get: (route, handler) => {
+      handlers[`GET ${route}`] = handler;
+    },
+    post: (route, handler) => {
+      handlers[`POST ${route}`] = handler;
+    },
+  };
+  registerControlsRoutes(app, {
+    config: {
+      get: async (key) => store[key],
+      set: async (key, value) => {
+        store[key] = value;
+      },
+    },
+  });
+  const read = () =>
+    handlers["GET /controls"]({ json: (body, status) => ({ body, status }) });
+  const write = (body) =>
+    handlers["POST /controls"]({
+      json: (payload, status) => ({ body: payload, status }),
+      req: { json: async () => body },
+    });
+
+  const defaults = await read();
+  eq(
+    "没配过时 /controls 回两个新数字的默认值（查询上限 600 / 召回超时 5000）",
+    [defaults.body.queryChars, defaults.body.recallTimeoutMs],
+    [600, 5000],
+  );
+
+  const written = await write({ queryChars: 1200, recallTimeoutMs: 9000 });
+  eq(
+    "写入后原样回显，applied 里两个键都算上了",
+    [written.body.queryChars, written.body.recallTimeoutMs, written.body.applied.sort()],
+    [1200, 9000, ["queryChars", "recallTimeoutMs"]],
+  );
+
+  const bounded = await write({ queryChars: 5, recallTimeoutMs: 999999 });
+  eq(
+    "越界值被夹到边界上（100 / 30000），不把脏值存进去",
+    [bounded.body.queryChars, bounded.body.recallTimeoutMs],
+    [100, 30000],
+  );
 }
 
 // ================= ui: 服务端检查项摘要 =================
@@ -1743,13 +1824,65 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const trimmed = await readConnection(sdkWith({ serverUrl: "http://x:9///" }));
   const swEnabled = await readSwitches(sdkWith({ enabled: true }));
   eq(
-    "连接三项与开关的默认值；配置里的尾斜杠去掉",
+    "连接三项与开关的默认值；配置里的尾斜杠去掉；召回超时与查询上限各有自己的默认（5000 / 600）",
     [
       [conn.serverUrl, conn.timeoutMs, conn.injectBudgetTokens],
+      [conn.recallTimeoutMs, conn.queryChars],
       [swEnabled.enabled, swEnabled.readOnly],
       trimmed.serverUrl,
     ],
-    [[DEFAULTS.serverUrl, 1500, 2500], [true, false], "http://x:9"],
+    [
+      [DEFAULTS.serverUrl, 1500, 2500],
+      [RECALL_TIMEOUT_DEFAULT, QUERY_CHARS_DEFAULT],
+      [true, false],
+      "http://x:9",
+    ],
+  );
+  eq(
+    "召回超时 5000 / 查询上限 600 是默认值，也与 DEFAULTS 一致",
+    [RECALL_TIMEOUT_DEFAULT, QUERY_CHARS_DEFAULT, DEFAULTS.recallTimeoutMs, DEFAULTS.queryChars],
+    [5000, 600, 5000, 600],
+  );
+  eq(
+    "查询上限归一化：合法整数字符串照收 / 越界与小数与非数回 600",
+    [
+      normalizeQueryChars(800),
+      normalizeQueryChars("1200"),
+      normalizeQueryChars(QUERY_CHARS_MIN),
+      normalizeQueryChars(QUERY_CHARS_MAX),
+      normalizeQueryChars(20),
+      normalizeQueryChars(QUERY_CHARS_MAX + 1),
+      normalizeQueryChars(600.5),
+      normalizeQueryChars(""),
+      normalizeQueryChars(null),
+      normalizeQueryChars("abc"),
+    ],
+    [800, 1200, QUERY_CHARS_MIN, QUERY_CHARS_MAX, 600, 600, 600, 600, 600, 600],
+  );
+  eq(
+    "召回超时归一化：合法整数照收 / 越界与小数与非数回 5000",
+    [
+      normalizeRecallTimeoutMs(8000),
+      normalizeRecallTimeoutMs("9000"),
+      normalizeRecallTimeoutMs(RECALL_TIMEOUT_MIN),
+      normalizeRecallTimeoutMs(RECALL_TIMEOUT_MAX),
+      normalizeRecallTimeoutMs(100),
+      normalizeRecallTimeoutMs(RECALL_TIMEOUT_MAX + 1),
+      normalizeRecallTimeoutMs(5000.5),
+      normalizeRecallTimeoutMs(""),
+      normalizeRecallTimeoutMs(undefined),
+    ],
+    [8000, 9000, RECALL_TIMEOUT_MIN, RECALL_TIMEOUT_MAX, 5000, 5000, 5000, 5000, 5000],
+  );
+  eq(
+    "两项都能从配置里读到（不当默认值用）",
+    await (async () => {
+      const configured = await readConnection(
+        sdkWith({ recallTimeoutMs: 9000, queryChars: 1200 }),
+      );
+      return [configured.recallTimeoutMs, configured.queryChars];
+    })(),
+    [9000, 1200],
   );
 
   // ---- 排除名单：逗号切、trim、去空、按大小写精确去重、非法条目整条丢、最多 50 ----
@@ -3136,6 +3269,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       recallResultText({ event: "recall/result" }),
       "— 召回 · gate=— · query=— · 召回— · 精排— · 组装— · 注入—",
     );
+    // 超时那一轮：面板必须看得出是超时，而不是“服务端真没结果”。
+    eq(
+      "请求失败那一轮在 gate 后多一段 error=timeout，其余字段照旧念「—」",
+      recallResultText({
+        at: new Date(2026, 10, 5, 14, 37).toISOString(),
+        event: "recall/result",
+        shape: {
+          gate: "passed",
+          error: "timeout",
+          query: { mode: "context", chars: 2272, turns: 3, truncated: true },
+          recalled: 0,
+          rerank: null,
+          assemble: null,
+          injected: null,
+        },
+      }),
+      "14:37 召回 · gate=passed · error=timeout · query=context/2272字（截断） · 召回0 · 精排— · 组装— · 注入—",
+    );
+    check(
+      "正常那一轮不出现 error= 段（没失败就不占位）",
+      !recallResultText(summaryLine).includes("error="),
+      recallResultText(summaryLine),
+    );
     eq(
       "计数条照旧按事件名数：recall/result 也会占一格",
       logChips([summaryLine, summaryLine]).map((chip) => chip.text),
@@ -3231,6 +3387,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       skillRouting: false,
       requestTimeoutMs: 1500,
       injectBudgetTokens: 2500,
+      queryChars: 600,
+      recallTimeoutMs: 5000,
     },
     "/conn": {
       serverUrl: "http://127.0.0.1:8000",
@@ -3351,10 +3509,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 读：状态 / 检查项 / 开关 / 连接 / 召回 ----
   eq(
-    "药丸跟着 /status 走 / 检查项摘要（只说比例 / 灰档 / 明细只列问题项） / /controls 与 /status、/conn 读回的值（开关 / 超时预算 / 地址 / key 占位 / 门牌前缀 / 三个下拉） / 提示词框里坐的是默认全文（值是 value 不是 placeholder） / 打分服务读回：地址 / 模型 / 超时留空仍是空 / 密钥框坐掩码（GET 不回明文）/ 没配的为空 / 通道草稿按服务端投影 / 模型目录进来了",
+    "药丸跟着 /status 走 / 检查项摘要（只说比例 / 灰档 / 明细只列问题项） / /controls 与 /status、/conn 读回的值（开关 / 超时预算 / 召回超时与查询上限 / 地址 / key 占位 / 门牌前缀 / 三个下拉） / 提示词框里坐的是默认全文（值是 value 不是 placeholder） / 打分服务读回：地址 / 模型 / 超时留空仍是空 / 密钥框坐掩码（GET 不回明文）/ 没配的为空 / 通道草稿按服务端投影 / 模型目录进来了",
     [[state.status.view.pillText, state.status.view.pillTone], [state.status.checksSummary.text, state.status.checksSummary.tone, state.status.checksSummary.problems], [
       [state.controls.enabled, state.controls.probe, state.controls.skillRouting],
       [state.controls.requestTimeoutMs, state.controls.injectBudgetTokens],
+      [state.controls.queryChars, state.controls.recallTimeoutMs],
       state.conn.serverUrl,
       state.conn.apiKeyPlaceholder,
       state.conn.peerPrefix,
@@ -3370,6 +3529,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [["已连接", "ok"], ["服务端 1/2 就绪", "muted", [{ name: "ollama", status: "not_configured", label: "未配置" }]], [
       [true, true, false],
       [1500, 2500],
+      [600, 5000],
       "http://127.0.0.1:8000",
       "已填写（留空表示不改）",
       "lab",
@@ -3548,6 +3708,30 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       cards.some((code) => code.includes(needle)),
     );
     eq("RecallCard / RerankCard / AssembleCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
+
+    // 召回页两个数字格：标签逐字、id 就是配置键、提交口是 setControlsNumber（与注入预算同一条）。
+    const recallCard = cards[0];
+    check(
+      "召回页有两个数字格：查询长度上限（默认 600）与召回超时（默认 5000，单位 ms）",
+      recallCard.includes('<label for="queryChars">查询长度上限</label>') &&
+        recallCard.includes('<label for="recallTimeoutMs">召回超时（ms）</label>') &&
+        recallCard.includes('placeholder="默认 600"') &&
+        recallCard.includes('placeholder="默认 5000"'),
+      recallCard.slice(recallCard.indexOf("queryChars") - 120, recallCard.indexOf("queryChars") + 500),
+    );
+    check(
+      "两个格子都走 setControlsNumber（/controls 的那一条），没有自己拼请求也没有走召回策略那一单",
+      recallCard.includes("setControlsNumber") &&
+        ["queryChars", "recallTimeoutMs"].every((key) =>
+          recallCard.includes(`onNumberChange('${key}', $event)`),
+        ),
+      recallCard.slice(recallCard.indexOf("onNumberChange"), recallCard.indexOf("onNumberChange") + 200),
+    );
+    check(
+      "带上文那句说明跟着上限走：写的是查询长度上限与整轮边界，不再是写死的 300 字符",
+      recallCard.includes("累计到查询长度上限就停") && !recallCard.includes("最多 300"),
+      recallCard.slice(recallCard.indexOf("带上文会"), recallCard.indexOf("带上文会") + 120),
+    );
   }
 
   // ---- 记忆页子页签：切到精排改个值，切回召回，再切回精排，值还在 ----
@@ -4024,6 +4208,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const afterClear = backend["/controls"].requestTimeoutMs;
     await ui.setControlsNumber("requestTimeoutMs", "abc");
     eq("清空数字框 / 非数字都不提交（保留旧值）", [afterClear, backend["/controls"].requestTimeoutMs], [3000, 3000]);
+
+    // 召回页那两个新格子与注入预算同一个提交口（/controls），读回也跟着走。
+    await ui.setControlsNumber("queryChars", 1200);
+    await ui.setControlsNumber("recallTimeoutMs", 9000);
+    eq(
+      "查询长度上限与召回超时也走 /controls，服务端回值写回控件",
+      [backend["/controls"].queryChars, backend["/controls"].recallTimeoutMs],
+      [1200, 9000],
+    );
+    eq(
+      "store 里那两个格子的值就是服务端确认过的值",
+      [state.controls.queryChars, state.controls.recallTimeoutMs],
+      [1200, 9000],
+    );
+    await ui.setControlsNumber("queryChars", "");
+    eq("查询长度上限清空同样不提交", backend["/controls"].queryChars, 1200);
   }
 
   // ---- peer 名单：整单提交 + 乐观回滚（行为第 7 条） ----
@@ -5253,14 +5453,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .map((line) => JSON.parse(line));
 
   eq(
-    "recall/result 的形状：档位 / 查询 / 召回数 / 精排 / 组装 / 注入，没跑的那几段是 null",
+    "recall/result 的形状：档位 / 失败类别 / 查询 / 召回数 / 精排 / 组装 / 注入，没跑的那几段是 null",
     [lines.length, lines[0].event, lines[0].shape, lines[1].shape],
     [
       3,
       "recall/result",
       {
         gate: "skipped:llm",
-        query: { mode: "last", chars: 4 },
+        error: null,
+        query: { mode: "last", chars: 4, turns: null, truncated: null },
         recalled: 0,
         rerank: null,
         assemble: null,
@@ -5268,7 +5469,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       },
       {
         gate: "passed",
-        query: { mode: "context", chars: 120 },
+        error: null,
+        query: { mode: "context", chars: 120, turns: null, truncated: null },
         recalled: 10,
         rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
@@ -5289,9 +5491,38 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [null, null, null, null, null, null],
   );
   eq(
-    "recall/result 只收档位与计数：查询那一段只有 mode / chars，没地方放正文",
+    "recall/result 只收档位与计数：查询那一段只有 mode / chars / turns / truncated，没地方放正文",
     Object.keys(lines[1].shape.query),
-    ["mode", "chars"],
+    ["mode", "chars", "turns", "truncated"],
+  );
+
+  // 失败那一轮：只记类别（timeout / network），不记地址也不记正文。
+  await probe("recall/result", {
+    session,
+    gate: "passed",
+    error: "timeout",
+    query: { mode: "context", chars: 2272, turns: 3, truncated: true },
+    recalled: 0,
+    rerank: null,
+    assemble: null,
+    injected: null,
+  });
+  const failed = fs
+    .readFileSync(path.join(dir, "probe.log"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .at(-1);
+  eq(
+    "失败那一轮：error 只给类别 / 拼接账（turns、truncated）原样落盘",
+    [failed.shape.error, failed.shape.query, failed.shape.recalled],
+    ["timeout", { mode: "context", chars: 2272, turns: 3, truncated: true }, 0],
+  );
+  check(
+    "error 那一段没有任何地址或路径",
+    !JSON.stringify(failed.shape).includes("http") &&
+      !JSON.stringify(failed.shape).includes("/api/"),
+    JSON.stringify(failed.shape),
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -5323,11 +5554,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["第二句", "原话"],
   );
 
-  // ---- context 查询：去重 / 3 条上限 / 300 字截断方向 / 空退回 last ----
+  // ---- context 查询：去重 / 3 条上限 / 600 字整轮边界 / 空退回 last ----
   eq(
-    "context 最多拼 3 条 / context 总长上限 300",
-    [CONTEXT_MESSAGES_MAX, CONTEXT_CHARS_MAX],
-    [3, 300],
+    "context 最多拼 3 条 / context 字数上限默认 600（与配置同一份数）",
+    [CONTEXT_MESSAGES_MAX, CONTEXT_CHARS_MAX, QUERY_CHARS_DEFAULT],
+    [3, 600, 600],
   );
 
   eq(
@@ -5367,16 +5598,67 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "第二句\n第三句\n第四句",
   );
 
-  const oldest = `起点${"旧".repeat(398)}`;
-  const clipped = contextQuery({
-    messages: [
-      { role: "user", content: oldest },
-      { role: "user", content: "最新一句" },
-    ],
-  });
-  eq("超长时总长正好收到 300", Array.from(clipped).length, CONTEXT_CHARS_MAX);
-  check("最新一条完整保留", clipped.endsWith("\n最新一句"));
-  check("最旧一条被截掉的是开头", clipped.startsWith("旧".repeat(295)) && !clipped.includes("起点"));
+  // 字数上限：从最近一条往回整条累加，装不下就停在整条边界上。
+  {
+    const a = "甲".repeat(200);
+    const b = "乙".repeat(200);
+    const c = "丙".repeat(200);
+    const overCap = contextQueryPlan({
+      messages: [
+        { role: "user", content: a },
+        { role: "user", content: b },
+        { role: "user", content: c },
+      ],
+    });
+    eq(
+      "拼到 600 字上限就停了：只剩最近两条、停在整条边界上、不切半句（更旧的那条一个字也没漏进查询）",
+      [overCap.text, overCap.turns, overCap.truncated, Array.from(overCap.text).length],
+      [`${b}\n${c}`, 2, true, 401],
+    );
+    check(
+      "截断发生在整轮边界上：查询里没有最旧那一条的半句",
+      overCap.text.includes("甲") === false && overCap.text.endsWith(c),
+      overCap.text.slice(0, 20),
+    );
+
+    // 最后一句自己就超上限：只用它，完整保留，不能拼成空查询。
+    const long = "长".repeat(700);
+    const lastOver = contextQueryPlan({
+      messages: [
+        { role: "user", content: "旧".repeat(10) },
+        { role: "user", content: long },
+      ],
+    });
+    eq(
+      "最后一句本身超 600：查询就是那一句（完整、不为空），更旧的整条被丢",
+      [lastOver.text, lastOver.turns, lastOver.truncated, Array.from(lastOver.text).length],
+      [long, 1, true, 700],
+    );
+    eq(
+      "只有这一条且它超上限时不算截断（没有更旧的整条被丢）",
+      contextQueryPlan({ messages: [{ role: "user", content: long }] }),
+      { text: long, turns: 1, truncated: false },
+    );
+
+    // 上限可配：把上限改成 200 就是这个数的行为，不是写死的。
+    eq(
+      "上限可配：maxChars=200 时只装下最新一条（两条加一起就 401 了）",
+      contextQueryPlan(
+        { messages: [{ role: "user", content: b }, { role: "user", content: c }] },
+        { maxChars: 200 },
+      ),
+      { text: c, turns: 1, truncated: true },
+    );
+
+    // last 档不受上限影响。
+    eq(
+      "last 档不受字数上限影响：700 字的那一句原样发出去",
+      recallQueryPlan({ messages: [{ role: "user", content: long }] }, "last", {
+        maxChars: 600,
+      }),
+      { text: long, turns: 1, truncated: false },
+    );
+  }
 
   eq(
     "context 也剥掉既往注入块",
@@ -11549,7 +11831,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     texts.map((text, index) => ({ text, score: 1 - index * 0.1 }));
 
   // 跑一轮召回，把探针整份收下来。values 覆盖默认配置，服务端返回的候选由调用方给。
-  const run = async ({ values = {}, entries, sessionId, text = TEXT, models } = {}) => {
+  // messages / fetchImpl 两个可选口用来验 context 拼接与请求失败那两路。
+  const run = async ({
+    values = {},
+    entries,
+    sessionId,
+    text = TEXT,
+    models,
+    messages,
+    fetchImpl,
+  } = {}) => {
     const probes = [];
     const mock = mockFetch({
       body: { status: "ok", result: entries ? { entries } : {} },
@@ -11557,14 +11848,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const handler = createRecallHandler(
       recallSdk({
         values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true, ...values },
-        fetchImpl: mock.fetchImpl,
+        fetchImpl: fetchImpl || mock.fetchImpl,
         dataDir: dir,
         models,
       }),
       { probe: async (event, invocation) => probes.push({ event, invocation }) },
     );
     const result = await handler({
-      payload: { messages: [{ role: "user", content: text }] },
+      payload: { messages: messages || [{ role: "user", content: text }] },
       session: { sessionId },
     });
     return {
@@ -11572,6 +11863,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       probes,
       rows: probes.filter((probe) => probe.event === "recall/result").map((p) => p.invocation),
       requests: mock.calls.length,
+      calls: mock.calls,
     };
   };
 
@@ -11739,7 +12031,162 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [0, 1, true],
   );
 
-  // ---- 8. 整链：recall.js 交出去的字段名，与 probe.js 认的字段名必须对得上 ----
+  // ---- 8. context 拼接账：实际字数 / 拼了几条 / 是不是被字数上限挡了 ----
+  // 实测背景：服务端耗时随查询长度线性上升，拼满历史的查询会把 1500ms 耗完。
+  {
+    const a = "甲".repeat(200);
+    const b = "乙".repeat(200);
+    const c = "丙".repeat(200);
+    const history = [
+      { role: "user", content: a },
+      { role: "assistant", content: "好" },
+      { role: "user", content: b },
+      { role: "assistant", content: "好" },
+      { role: "user", content: c },
+    ];
+    const ctx = await run({
+      values: { queryMode: "context" },
+      sessionId: "result-context",
+      entries: entriesOf("甲"),
+      messages: history,
+    });
+    eq(
+      "context 档：query.chars 是实际发出去的字数（401，不是上限 600）/ turns 记拼了几条 / 被上限挡了就 truncated",
+      [ctx.rows[0]?.query, ctx.rows[0]?.recalled],
+      [{ mode: "context", chars: 401, turns: 2, truncated: true }, 1],
+    );
+    eq(
+      "真正发出去的查询就是那两条整条（停在整轮边界，最旧那条一个字都没进来）",
+      JSON.parse(ctx.calls[0].init.body).query,
+      `${b}\n${c}`,
+    );
+
+    const capped = await run({
+      values: { queryMode: "context", queryChars: 200 },
+      sessionId: "result-context-capped",
+      entries: entriesOf("甲"),
+      messages: [
+        { role: "user", content: b },
+        { role: "user", content: c },
+      ],
+    });
+    eq(
+      "上限可配（queryChars=200）：只发最新一条，字数记 200 而不是默认的 600",
+      [capped.rows[0]?.query, JSON.parse(capped.calls[0].init.body).query],
+      [{ mode: "context", chars: 200, turns: 1, truncated: true }, c],
+    );
+
+    const single = await run({
+      values: { queryMode: "context", queryChars: 200 },
+      sessionId: "result-context-single",
+      entries: entriesOf("甲"),
+      messages: [{ role: "user", content: c }],
+    });
+    eq(
+      "一条都没被上限挡掉时不带 truncated（查询仍完整、不空）",
+      [single.rows[0]?.query, JSON.parse(single.calls[0].init.body).query],
+      [{ mode: "context", chars: 200, turns: 1 }, c],
+    );
+  }
+
+  // ---- 9. 请求失败：只记类别（timeout / network），面板看得见 ----
+  {
+    const timingOut = async () => {
+      const error = new Error("The operation was aborted due to timeout");
+      error.name = "TimeoutError";
+      throw error;
+    };
+    const timedOut = await run({
+      sessionId: "result-timeout",
+      entries: entriesOf("甲"),
+      fetchImpl: timingOut,
+    });
+    eq(
+      "超时那一轮：error=timeout、召回 0、注入 null、本轮不干预（不返回 payload）",
+      [
+        timedOut.result,
+        timedOut.rows[0]?.gate,
+        timedOut.rows[0]?.error,
+        timedOut.rows[0]?.recalled,
+        timedOut.rows[0]?.injected,
+      ],
+      [undefined, "off", "timeout", 0, null],
+    );
+    const broken = await run({
+      sessionId: "result-network",
+      entries: entriesOf("甲"),
+      fetchImpl: async () => {
+        throw new Error("connect ECONNREFUSED 127.0.0.1:8000");
+      },
+    });
+    eq("连不上那一轮：error=network（不是超时）", broken.rows[0]?.error, "network");
+    check(
+      "失败那一轮也不把地址、响应正文或底层错误原文交给探针",
+      !JSON.stringify(timedOut.rows[0]).includes("http") &&
+        !JSON.stringify(broken.rows[0]).includes("http") &&
+        !JSON.stringify(broken.rows[0]).includes("ECONNREFUSED"),
+      JSON.stringify(broken.rows[0]),
+    );
+  }
+
+  // ---- 10. 召回用自己那一档超时，精排那三个超时不动 ----
+  {
+    // 走运行时出口才能看到真正交给传输层的 timeoutMs：直连那一档只看得到 AbortSignal。
+    const envelopes = [];
+    setRuntimeTransport({
+      send: async (url, init) => {
+        envelopes.push(JSON.parse(JSON.stringify(init)));
+        return {
+          status: 200,
+          ok: true,
+          headers: {},
+          data: { status: "ok", result: { entries: entriesOf("甲") } },
+        };
+      },
+      runtimeId: "rt-t",
+    });
+    try {
+      const handler = createRecallHandler(
+        recallSdk({
+          values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true },
+          dataDir: dir,
+        }),
+      );
+      await handler({
+        payload: { messages: [{ role: "user", content: "什么时候交稿？" }] },
+        session: { sessionId: "timeout-default" },
+      });
+      const configured = createRecallHandler(
+        recallSdk({
+          values: {
+            enabled: true,
+            apiKey: "k",
+            serverUrl: "http://h:1",
+            recallTimeoutMs: 9000,
+          },
+          dataDir: dir,
+        }),
+      );
+      await configured({
+        payload: { messages: [{ role: "user", content: "换个问题" }] },
+        session: { sessionId: "timeout-configured" },
+      });
+      eq(
+        "召回那一跳默认 5000ms / 配了 recallTimeoutMs 就用它（9000），不再是通用的 1500",
+        [envelopes[0].timeoutMs, envelopes[1].timeoutMs],
+        [5000, 9000],
+      );
+    } finally {
+      resetRuntimeTransport();
+    }
+    eq(
+      "精排通道那三个超时不受影响（800 / 1500 / 3500）",
+      [RERANK_CHANNEL_TIMEOUT_MS, RERANK_MODEL_CHANNEL_TIMEOUT_MS, SYSTEMONE_CHANNEL_TIMEOUT_MS],
+      [800, 1500, 3500],
+    );
+  }
+
+  // ---- 11. 整链：recall.js 交出去的字段名，与 probe.js 认的字段名必须对得上 ----
   // 上面几段分别验两端，但“交出去”与“认下来”是两份对象：名字对不上会静静地变 null。
   // 这一段把中间的真实探针接上，再交给日志页的渲染函数。
   {
@@ -11780,7 +12227,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         2,
         { mode: "rules", kept: 2, droppedCredential: 0 },
         "number",
-        { mode: "last", chars: 7 },
+        { mode: "last", chars: 7, turns: null, truncated: null },
       ],
     );
     check(
