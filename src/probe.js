@@ -13,6 +13,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_TEXT = 120;
+// 精排分数表最多记这么多条：与 src/memory/recall.js 的 RERANK_SCORES_MAX 同一个数，
+// 但不去 import 它：探针只依赖自己，日志形状不跟着召回模块改动而变。
+const SCORE_ROWS_MAX = 10;
 
 export function createProbe({ dataDir, logger } = {}) {
   const file = path.join(dataDir || ".", "probe.log");
@@ -104,6 +107,20 @@ function shapeOf(event, invocation) {
     };
   }
 
+  // 精排：三个数摆在一起才知道减在哪一步（候选 → 条数上限 → 保留），
+  // scores 只记身份与分数（合并后降序，最多 10 条），正文与端点都不进来。
+  if (event === "recall/rerank") {
+    return {
+      candidates: countOf(invocation.candidates),
+      enabledChannels: countOf(invocation.enabledChannels),
+      kept: countOf(invocation.kept),
+      droppedByKeep: countOf(invocation.droppedByKeep),
+      fallback: textOf(invocation.fallback),
+      elapsedMs: countOf(invocation.elapsedMs),
+      scores: scoreRowsOf(invocation.scores),
+    };
+  }
+
   // 每轮一条汇总：档位与计数，不带任何正文。
   // 少哪一段就给 null，不拿 0 或空串填坑——「没跑」与「跑了但是 0」必须分得开。
   // error 只记类别（timeout / network），不记地址也不记响应正文。
@@ -159,8 +176,18 @@ function rerankOf(rerank) {
     mode: textOf(rerank.mode),
     lanes: countOf(rerank.lanes),
     kept: countOf(rerank.kept),
+    droppedByKeep: countOf(rerank.droppedByKeep),
     fallback: textOf(rerank.fallback),
   };
+}
+
+/** 分数表：只留 uri 与分数两项，条目数再卡一次（调用方已经卡过，探针不靠上游）。 */
+function scoreRowsOf(rows) {
+  if (!Array.isArray(rows)) return null;
+  return rows.slice(0, SCORE_ROWS_MAX).map((row) => ({
+    uri: typeof row?.uri === "string" ? row.uri : "",
+    score: countOf(row?.score),
+  }));
 }
 
 function assembleOf(assemble) {

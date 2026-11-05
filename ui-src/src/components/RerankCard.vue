@@ -1,5 +1,5 @@
 <script setup>
-// 精排卡：「查回来之后怎么排序」——开关，加三条路，顺序固定。
+// 精排卡：「查回来之后怎么排序」——开关、保留条数，加三条路，顺序固定。
 //
 //   判别模型    配了决策服务才出现，吃 rerankSystemonePrompt 那份逐条题面；
 //   rerank 模型 配了精排服务才出现，交叉编码器成对打分，没有提示词可配；
@@ -12,15 +12,20 @@
 //
 // 一条路只有一行头（类型 + 启用开关 + 权重 + 「配置」），点开才显示规则区：
 // 提示词 / 题面是大块文本，权重与超时是数字，收起时不该占着一屏。
+// 通道表上面单独一格「保留条数」：合并后按分降序只留前 N 条，留空 = 不限。
+// 全 0 分那条全票否决与这一格无关（它不是「超编」，是「一条都不要」）。
 // 启用中的那条边框走绿（颜色取主题里的 success 色，不写死色值），停用的保持默认灰边。
 //
-// 提交仍然是**整单**：本卡只调 store 的动作（setForm / setPrompt / setLane*），
+// 提交仍然是**整单**：本卡只调 store 的动作（setForm / setPrompt / setLane* / setRerankKeep），
 // 请求体由 lib/panel-store.js 的 readLayers() 整份拼。组件里不出现任何 post / fetch。
 import { computed, ref } from "vue";
 import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSwitch, NTag } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 import {
   RERANK_FALLBACK_TAG,
+  RERANK_KEEP_MAX,
+  RERANK_KEEP_MIN,
+  RERANK_KEEP_STEP,
   RERANK_LANE_NO_PROMPT_NOTE,
   RERANK_LANE_PARTICIPATE_NOTE,
 } from "../lib/recall-layers.js";
@@ -30,6 +35,7 @@ const {
   state,
   enabled,
   setForm,
+  setRerankKeep,
   setPrompt,
   touchPrompt,
   resetPrompt,
@@ -88,6 +94,11 @@ function onTimeout(type, value) {
   setLaneTimeout(type, value === null || value === undefined ? "" : value);
 }
 
+// 保留条数：清空（null）= 不限，要真的提交（不是「还没填完」）。
+function onKeep(value) {
+  setRerankKeep(value === null || value === undefined ? null : value);
+}
+
 function borderStyle(lane) {
   return lane.enabled && ACTIVE_BORDER ? { borderColor: ACTIVE_BORDER } : undefined;
 }
@@ -118,6 +129,25 @@ function borderStyle(lane) {
     </div>
 
     <div id="rerankAdvanced" class="gate-advanced" :class="{ dim: !enabled }" :hidden="!rerankOpen">
+      <!-- 保留条数：通道表上面一格数字，与通道表同一单提交（/recall-mode）。
+           留空是「不限」，不是「0 条」：所以发给服务端的是 0，而不是把它当成没填完。 -->
+      <div class="field rerank-keep">
+        <label for="rerankKeep">保留条数</label>
+        <NInputNumber
+          size="small"
+          :show-button="false"
+          :update-value-on-input="false"
+          :min="RERANK_KEEP_MIN"
+          :max="RERANK_KEEP_MAX"
+          :step="RERANK_KEEP_STEP"
+          placeholder="不限"
+          :input-props="{ id: 'rerankKeep' }"
+          :value="state.form.rerankKeep > 0 ? state.form.rerankKeep : null"
+          @update:value="onKeep"
+        />
+        <span class="field-hint">保留几条：合并后按分数降序，只留前 N 条。留空表示不限，超出的按分数从低到高丢掉。全 0 分仍然是全票否决（一条不留），这一格管不着它。</span>
+      </div>
+
       <div id="rerankLanes" class="lane-stack">
         <div
           v-for="lane in lanes"

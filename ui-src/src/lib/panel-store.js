@@ -29,6 +29,7 @@ import {
   GATE_CONTEXT_DEFAULT,
   GATE_CONTEXT_TURNS_DEFAULT,
   GATE_DECISION_THRESHOLD_DEFAULT,
+  RERANK_KEEP_DEFAULT,
   SCORING_SERVICES,
   SYSTEMONE_TIMEOUT_MAX,
   channelPairNote,
@@ -49,6 +50,7 @@ import {
   normalizeGateFallback,
   normalizeGatePrompt,
   normalizeRerankPrompt,
+  normalizeRerankKeep,
   normalizeRerankSystemonePrompt,
   normalizeServiceTimeout,
   paintRecallConfig,
@@ -213,6 +215,8 @@ export function createPanelStore(deps = {}) {
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
       rerank: "off",
+      // 精排保留条数：初始值就是默认 5。0 是另一回事（= 不限），由归一化给出。
+      rerankKeep: RERANK_KEEP_DEFAULT,
       // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
       assembleMode: "rules",
       gateModel: "",
@@ -346,6 +350,7 @@ export function createPanelStore(deps = {}) {
     "gateDecisionThreshold",
     "queryMode",
     "rerank",
+    "rerankKeep",
     "assembleMode",
     "gateModel",
   ];
@@ -372,6 +377,10 @@ export function createPanelStore(deps = {}) {
       }
       if (key === "gateContextTurns") {
         return normalizeGateContextTurns(live) !== normalizeGateContextTurns(sent);
+      }
+      // 保留条数也是「数字存成串」：不归一化就会把同一个值看成飞行期间又改了一笔。
+      if (key === "rerankKeep") {
+        return normalizeRerankKeep(live) !== normalizeRerankKeep(sent);
       }
       return live !== sent;
     };
@@ -496,6 +505,8 @@ export function createPanelStore(deps = {}) {
       gateContextPrompt: normalizeGateContextPrompt(state.prompts.context),
       gateModel: state.form.gateModel,
       rerank: state.form.rerank,
+      // 精排保留条数：归一化后序列化成字符串再发（0 = 不限），与门槛 / 轮数同口径。
+      rerankKeep: String(normalizeRerankKeep(state.form.rerankKeep)),
       assembleMode: normalizeAssembleMode(state.form.assembleMode),
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
       rerankSystemonePrompt: normalizeRerankSystemonePrompt(state.prompts.systemone),
@@ -529,7 +540,7 @@ export function createPanelStore(deps = {}) {
           before: state.layers,
           next,
           send: (body) => {
-            const { rerankChannels, gateDecisionThreshold, gateContextTurns, ...rest } = body;
+            const { rerankChannels, gateDecisionThreshold, gateContextTurns, rerankKeep, ...rest } = body;
             return post("/recall-mode", {
               ...rest,
               // commitLayers 的 normalize（paintRecallConfig）会把门槛与轮数收成数字给界面用，
@@ -538,6 +549,7 @@ export function createPanelStore(deps = {}) {
               gateDecisionThreshold: String(
                 normalizeGateDecisionThreshold(gateDecisionThreshold),
               ),
+              rerankKeep: String(normalizeRerankKeep(rerankKeep)),
               rerankChannels: rerankChannelsText(rerankChannels),
             });
           },
@@ -567,6 +579,7 @@ export function createPanelStore(deps = {}) {
     "gateContextPrompt",
     "gateModel",
     "rerank",
+    "rerankKeep",
     "rerankPrompt",
     "rerankSystemonePrompt",
     "rerankChannels",
@@ -599,6 +612,11 @@ export function createPanelStore(deps = {}) {
           normalizeGateContextTurns(a?.[key]) ===
           normalizeGateContextTurns(b?.[key])
         );
+      }
+      // 保留条数存的是数字串、界面上是数字：同样归一化再比，否则 "5" !== 5
+      // 会让一单永远看起来「有变化」。
+      if (key === "rerankKeep") {
+        return normalizeRerankKeep(a?.[key]) === normalizeRerankKeep(b?.[key]);
       }
       return a?.[key] === b?.[key];
     });
@@ -669,6 +687,19 @@ export function createPanelStore(deps = {}) {
       return undefined;
     }
     state.form.gateContextTurns = normalizeGateContextTurns(value);
+    return saveLayers();
+  }
+
+  /**
+   * 精排保留条数：一个数字格，与通道表同一单提交。
+   *
+   * 清空（null / undefined）= 不限（存 0）：这是这一格自己的语义，不是「还没填完」，
+   * 所以与门槛 / 轮数那两格不同：清空要真的提交，不能回填已确认的值。
+   */
+  function setRerankKeep(value) {
+    state.form.rerankKeep = normalizeRerankKeep(
+      value === null || value === undefined ? 0 : value,
+    );
     return saveLayers();
   }
 
@@ -1069,6 +1100,7 @@ export function createPanelStore(deps = {}) {
     setForm,
     setDecisionThreshold,
     setGateContextTurns,
+    setRerankKeep,
     setControlsNumber,
     saveConnection,
     saveLayers,

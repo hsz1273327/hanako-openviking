@@ -620,6 +620,30 @@ export function recallPromptField(recallGate, gateContext) {
   return "gateDecisionPrompt";
 }
 
+/** 精排保留条数：默认 / 边界 / 步长与 src/ov/settings.js 的 RERANK_KEEP_* 同值（0 = 不限）。 */
+export const RERANK_KEEP_DEFAULT = 5;
+export const RERANK_KEEP_MIN = 1;
+export const RERANK_KEEP_MAX = 20;
+export const RERANK_KEEP_STEP = 1;
+
+/**
+ * 与 src/ov/settings.js 的 normalizeRerankKeep 同口径：1–20 的整数给数字，0 = 不限。
+ *
+ * 缺省（undefined，服务端回包里没这一项）回默认 5；
+ * 其余非法的（空串 / 0 / null / 小数 / 负数 / 越界）一律回 0 = 不限。
+ * 两种「不生效」分开：没配过是没意见，填错了是填错了。
+ */
+export function normalizeRerankKeep(value) {
+  if (value === undefined) return RERANK_KEEP_DEFAULT;
+  let parsed;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && value.trim()) parsed = Number(value.trim());
+  else return 0;
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return 0;
+  if (parsed < RERANK_KEEP_MIN || parsed > RERANK_KEEP_MAX) return 0;
+  return parsed;
+}
+
 /** 带前文的轮数：默认 / 边界 / 步长与 src/ov/settings.js 同值。 */
 export const GATE_CONTEXT_TURNS_DEFAULT = 4;
 export const GATE_CONTEXT_TURNS_MIN = 1;
@@ -947,10 +971,12 @@ export function rerankLanesCountText(lanes) {
   return `${list.length} 路通道 · ${enabled} 路启用`;
 }
 
-/** 精排那几个字段：开关、两份提示词、通道表。 */
+/** 精排那几个字段：开关、保留条数、两份提示词、通道表。 */
 export function paintRerankConfig(out) {
   return {
     rerank: normalizeRerank(out?.rerank),
+    // 保留条数：脏值 / 缺项一律画（缺项画默认 5，填错的画 0 = 不限，与运行时同口径）。
+    rerankKeep: normalizeRerankKeep(out?.rerankKeep),
     rerankPrompt: normalizeRerankPrompt(out?.rerankPrompt),
     // 判别模型那份题面与语言模型那份分开画，谁也不会把对方盖掉。
     rerankSystemonePrompt: normalizeRerankSystemonePrompt(out?.rerankSystemonePrompt),

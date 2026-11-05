@@ -381,6 +381,10 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* ---------- 精排：三条固定的路 ---------- */
 
+/* 保留条数那一格：与通道表同一单提交，放在通道表上面，留一点间隙。
+   其它样式走 .field（标签 / 输入框 / 小字三行）。 */
+.rerank-keep { margin-bottom: 10px; }
+
 /* 每条路一张小卡，卡片边框默认走 naive-ui 的灰边；启用中的那一条由组件把边框色
    换成主题里的 success 色（inline style，取的是 theme.js 的 successColor）。
    这里只管布局，不写死颜色。 */

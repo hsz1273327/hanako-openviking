@@ -54,6 +54,12 @@ import {
   normalizeRerankModel,
   normalizeRerankPrompt,
   normalizeRerankSystemonePrompt,
+  normalizeRerankKeep,
+  RERANK_KEEP_DEFAULT,
+  RERANK_KEEP_MIN,
+  RERANK_KEEP_MAX,
+  RERANK_KEEP_STEP,
+  serializeRerankKeep,
   dedupeRerankChannels,
   ensureModelChannel,
   migrateRerankChannels,
@@ -162,6 +168,10 @@ import {
   squashRerankScores,
   mergeRerankScores,
   rankRerankIndexes,
+  dropByKeepIndexes,
+  rerankKeepOf,
+  rerankScoreRows,
+  RERANK_SCORES_MAX,
   runRerankChannels,
   dropRejectedIndexes,
   writeRerankSample,
@@ -333,6 +343,11 @@ import {
   GATE_DECISION_THRESHOLD_MAX as UI_GATE_DECISION_THRESHOLD_MAX,
   GATE_DECISION_THRESHOLD_STEP as UI_GATE_DECISION_THRESHOLD_STEP,
   GATE_DECISION_THRESHOLD_HINT as UI_GATE_DECISION_THRESHOLD_HINT,
+  normalizeRerankKeep as uiNormalizeRerankKeep,
+  RERANK_KEEP_DEFAULT as UI_RERANK_KEEP_DEFAULT,
+  RERANK_KEEP_MIN as UI_RERANK_KEEP_MIN,
+  RERANK_KEEP_MAX as UI_RERANK_KEEP_MAX,
+  RERANK_KEEP_STEP as UI_RERANK_KEEP_STEP,
   gateContextOptions,
   gateFallbackOptions,
   gateHasFailurePath,
@@ -2708,6 +2723,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
 
+  // 精排保留条数：默认 / 边界 / 步长 / 归一化两端同值；manifest 声明成字符串并默认 "5"。
+  eq(
+    "保留条数两端同值：默认 5 / 边界 1–20 / 步长 1 / 缺省 5、脏值与越界都回 0 = 不限；manifest 声明为 string、默认 \"5\"",
+    [
+      [RERANK_KEEP_DEFAULT, UI_RERANK_KEEP_DEFAULT],
+      [RERANK_KEEP_MIN, UI_RERANK_KEEP_MIN],
+      [RERANK_KEEP_MAX, UI_RERANK_KEEP_MAX],
+      [RERANK_KEEP_STEP, UI_RERANK_KEEP_STEP],
+      [undefined, "", 0, "abc", 25, 2, "7"].map(normalizeRerankKeep),
+      [undefined, "", 0, "abc", 25, 2, "7"].map(uiNormalizeRerankKeep),
+      [props.rerankKeep?.type, props.rerankKeep?.default],
+    ],
+    [
+      [5, 5],
+      [1, 1],
+      [20, 20],
+      [1, 1],
+      [5, 0, 0, 0, 0, 2, 7],
+      [5, 0, 0, 0, 0, 2, 7],
+      ["string", "5"],
+    ],
+  );
+
   // 召回门槛：默认值 / 边界 / 步长 / 归一化两端同值；manifest 里声明成字符串并默认 "0.45"。
   eq(
     "召回门槛两端同值：默认 0.45 / 边界 0–1 / 步长 0.05 / 非法值都回 0.45；manifest 声明为 string、默认 \"0.45\"",
@@ -3565,7 +3603,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         gate: "passed",
         query: { mode: "context", chars: 120 },
         recalled: 10,
-        rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+        rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
         injected: { chars: 3000, tokens: 900 },
       },
@@ -3999,6 +4037,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
     // 复位：后面几段按「精排关着」的草稿走。
     await ui.setForm("rerank", "off");
+  }
+  {
+    // 精排保留条数：改了就进同一单；清空（留空）= 不限，要真的提交，不能像门槛那样回填旧值。
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    await ui.setRerankKeep(8);
+    let body = saves().at(-1).body;
+    eq(
+      "保留条数 8 落整单：body 里是数字串 \"8\"，界面上是数字 8，同时带着通道表",
+      [body.rerankKeep, typeof body.rerankKeep, state.form.rerankKeep, typeof body.rerankChannels],
+      ["8", "string", 8, "string"],
+    );
+    await ui.setRerankKeep(null);
+    body = saves().at(-1).body;
+    eq(
+      "清空就提交 0（= 不限），不回填旧值",
+      [body.rerankKeep, state.form.rerankKeep],
+      ["0", 0],
+    );
+    await ui.setRerankKeep(5);
   }
   {
     // 组装卡：开关落 recall-mode 那一单（与精排同一套整单提交），预算仍落 /controls。
@@ -4960,6 +5017,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gateDecisionThreshold: 0.45,
     gateFallback: "recall",
     rerank: "off",
+    rerankKeep: 5,
     rerankPrompt: "",
     rerankSystemonePrompt: "",
     rerankModel: "",
@@ -4990,6 +5048,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ]],
     [{
       rerank: "off",
+      rerankKeep: 5,
       rerankPrompt: "字".repeat(RERANK_PROMPT_MAX),
       rerankSystemonePrompt: "",
       rerankModel: "p1/m1",
@@ -5766,7 +5825,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gate: "passed",
     query: { mode: "context", chars: 120 },
     recalled: 10,
-    rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+    rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
     assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
     injected: { chars: 3000, tokens: 900 },
   });
@@ -5776,7 +5835,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gate: "",
     query: { mode: "context", chars: "120" },
     recalled: "10",
-    rerank: { mode: "llm", lanes: 1, kept: null, fallback: "none" },
+    rerank: { mode: "llm", lanes: 1, kept: null, droppedByKeep: null, fallback: "none" },
     assemble: null,
     injected: { chars: 3000 },
   });
@@ -5807,7 +5866,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         error: null,
         query: { mode: "context", chars: 120, turns: null, truncated: null },
         recalled: 10,
-        rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+        rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
         injected: { chars: 3000, tokens: 900 },
       },
@@ -5858,6 +5917,60 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     !JSON.stringify(failed.shape).includes("http") &&
       !JSON.stringify(failed.shape).includes("/api/"),
     JSON.stringify(failed.shape),
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // recall/rerank：候选 / 条数上限截掉几条 / 保留三个数摆在一起，才知道减在哪一步。
+  // scores 只记 uri 与分数：查询正文、候选正文、端点都不进日志。
+  const dir = path.join(import.meta.dirname, ".tmp-probe-rerank");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const probe = createProbe({ dataDir: dir });
+  const session = { sessionId: "s-k" };
+
+  await probe("recall/rerank", {
+    session,
+    query: "这一轮的查询正文",
+    candidates: 10,
+    enabledChannels: 2,
+    kept: 5,
+    droppedByKeep: 5,
+    fallback: "none",
+    elapsedMs: 42,
+    channels: [{ type: "rerank", url: "http://127.0.0.1:9999", model: "bge", scores: [0.1, 0.9] }],
+    scores: [
+      { uri: "viking://user/default/m/1.md", score: 0.9 },
+      { uri: "viking://user/default/m/0.md", score: 0.2 },
+    ],
+  });
+
+  const line = JSON.parse(fs.readFileSync(path.join(dir, "probe.log"), "utf8").trim());
+  eq(
+    "recall/rerank 的形状：候选 / 截掉几条 / 保留都进日志；scores 只留 uri 与分数（正文与端点都不进）",
+    [
+      line.shape,
+      JSON.stringify(line).includes("这一轮的查询正文"),
+      JSON.stringify(line).includes("127.0.0.1"),
+    ],
+    [
+      {
+        candidates: 10,
+        enabledChannels: 2,
+        kept: 5,
+        droppedByKeep: 5,
+        fallback: "none",
+        elapsedMs: 42,
+        scores: [
+          { uri: "viking://user/default/m/1.md", score: 0.9 },
+          { uri: "viking://user/default/m/0.md", score: 0.2 },
+        ],
+      },
+      false,
+      false,
+    ],
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -6587,8 +6700,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [400, 0, "0.45"],
   );
   await post({ gateDecisionThreshold: "0.7" });
-  const noKeyThreshold = await post({ queryMode: "last" });
-  eq(
+  const noKeyThreshold = await post({ queryMode: "last" });  eq(
     "提交里不带这个键时已有值不动（applied 里也不列它）",
     [
       store.gateDecisionThreshold,
@@ -6596,6 +6708,51 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       noKeyThreshold.body.applied.includes("gateDecisionThreshold"),
     ],
     ["0.7", "0.7", false],
+  );
+
+  // ---- 精排保留条数：GET 投影成数字串（"0" = 不限），POST 归一化后落库 ----
+  eq(
+    "GET 没配过 rerankKeep 时投影成 \"5\"（默认值，字符串）",
+    defaults.body.rerankKeep,
+    "5",
+  );
+  const projectedKeeps = [];
+  for (const stored of [7, "3", "", 0, "abc", 25, -3, null]) {
+    store.rerankKeep = stored;
+    projectedKeeps.push((await get()).body.rerankKeep);
+  }
+  eq(
+    "GET 投影统一是数字串：存 7 / \"3\" 照给；留空 / 0 / abc / 越界 / null 一律 \"0\"（不限）",
+    projectedKeeps,
+    ["7", "3", "0", "0", "0", "0", "0", "0"],
+  );
+  writes.length = 0;
+  const keepSaved = await post({ rerankKeep: 4 });
+  eq(
+    "rerankKeep=4（数字）能落库并回显 / applied 里带它 / 存的是字符串 \"4\"",
+    [
+      keepSaved.status,
+      store.rerankKeep,
+      typeof store.rerankKeep,
+      keepSaved.body.rerankKeep,
+      keepSaved.body.applied.includes("rerankKeep"),
+      writes.length,
+    ],
+    [200, "4", "string", "4", true, 1],
+  );
+  writes.length = 0;
+  const keepCleared = await post({ rerankKeep: null });
+  eq(
+    "清空（null）就是 \"不限\"：落库 \"0\"，不报错",
+    [keepCleared.status, store.rerankKeep, keepCleared.body.rerankKeep],
+    [200, "0", "0"],
+  );
+  writes.length = 0;
+  const keepBadType = await post({ rerankKeep: { v: 1 } });
+  eq(
+    "类型不对（对象）整单被拒 400，零写入，旧值不动",
+    [keepBadType.status, writes.length, store.rerankKeep],
+    [400, 0, "0"],
   );
 
   const saved = await post({ recallGate: "rules", queryMode: "context" });
@@ -12153,6 +12310,259 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   }
 }
 
+// ================= 精排：保留条数上限（rerankKeep） =================
+{
+  // 实测背景：recalled=10 / kept=10 / fallback=none。精排跑通了却一条没筛：唯一的丢弃
+  // 规则是「全 0 分才全丢」，而实际 sigmoid 分是 0.007 这种，离 0 很远。十条里大部分
+  // 跟当前话题无关，照样注入 1200+ token。这一节守的就是「按分降序只留前 N 条」。
+
+  // ---- 归一化：1–20 的整数给数字，0 = 不限 ----
+  eq(
+    "保留条数归一化：缺省 5；留空 / 0 / 非数字 / 小数 / 负数 / 越界 / 类型不对一律 0 = 不限；数字串接受",
+    [
+      [undefined, null, "", "  ", 0, "0", "abc", 1.5, -1, 21, 25, true].map(normalizeRerankKeep),
+      [1, 5, 20, "7", " 12 "].map(normalizeRerankKeep),
+      [undefined, "", 0, "abc", 25].map(serializeRerankKeep),
+    ],
+    [
+      [5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      [1, 5, 20, 7, 12],
+      ["5", "0", "0", "0", "0"],
+    ],
+  );
+  eq(
+    "rerankKeepOf：配置里有就用配置，没有（undefined）回默认 5，留空回 0 = 不限",
+    [
+      rerankKeepOf({}),
+      rerankKeepOf(undefined),
+      rerankKeepOf({ rerankKeep: 3 }),
+      rerankKeepOf({ rerankKeep: "" }),
+    ],
+    [5, 5, 3, 0],
+  );
+
+  // ---- 截断：从排好序的索引表里取前 N 条，被截掉几条要单独数出来 ----
+  eq(
+    "dropByKeepIndexes：留前 N 条且 dropped 数得对；limit 不是正整数 / 条数不够时原样全留",
+    [
+      dropByKeepIndexes([1, 5, 3, 8, 9, 0, 6, 4, 2, 7], 5),
+      dropByKeepIndexes([0, 1, 2], 5),
+      [0, -1, 2.9, "x", undefined, null].map((limit) => dropByKeepIndexes([0, 1, 2], limit)),
+      dropByKeepIndexes(null, 2),
+    ],
+    [
+      { indexes: [1, 5, 3, 8, 9], dropped: 5 },
+      { indexes: [0, 1, 2], dropped: 0 },
+      [
+        { indexes: [0, 1, 2], dropped: 0 },
+        { indexes: [0, 1, 2], dropped: 0 },
+        { indexes: [0, 1, 2], dropped: 0 },
+        { indexes: [0, 1, 2], dropped: 0 },
+        { indexes: [0, 1, 2], dropped: 0 },
+        { indexes: [0, 1, 2], dropped: 0 },
+      ],
+      { indexes: [], dropped: 0 },
+    ],
+  );
+
+  // ---- 分数表：合并后的分、降序、最多 10 条、只带 uri ----
+  eq(
+    "rerankScoreRows：按分数降序、只带 uri 与分数、条数卡在 RERANK_SCORES_MAX，没分数时是空表",
+    [
+      rerankScoreRows(
+        [0.2, 0.9, 0.5],
+        [{ uri: "a" }, { uri: "b" }, { uri: "c" }],
+      ),
+      rerankScoreRows(
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99],
+        Array.from({ length: 12 }, (_, index) => ({ uri: `u${index}`, text: "正文不该进来" })),
+      ).length,
+      rerankScoreRows(null, [{ uri: "a" }]),
+      rerankScoreRows([], []),
+      RERANK_SCORES_MAX,
+    ],
+    [
+      [
+        { uri: "b", score: 0.9 },
+        { uri: "c", score: 0.5 },
+        { uri: "a", score: 0.2 },
+      ],
+      10,
+      [],
+      [],
+      10,
+    ],
+  );
+
+  // ---- 真跑一轮：10 条候选、上限 5，留的必须是分最高的那 5 条 ----
+  const KEEP_DIR = path.join(import.meta.dirname, ".tmp-rerank-keep");
+  fs.rmSync(KEEP_DIR, { recursive: true, force: true });
+  resetRuntimeTransport();
+  // 假分数故意打乱顺序：最高分不在前面，按「前 5 条」截会留错人。
+  const KEEP_SCORES = [0.4, 0.9, 0.1, 0.7, 0.2, 0.85, 0.3, 0.05, 0.6, 0.5];
+  const KEEP_ITEMS = KEEP_SCORES.map((_, index) => ({
+    text: `候选${index}`,
+    uri: `viking://user/default/m/${index}.md`,
+  }));
+  const rerankLaneOf = (scores) => async (url) => {
+    if (!String(url).includes("/v1/rerank")) throw new Error("这一轮不该再打别的端点");
+    return new Response(
+      JSON.stringify({
+        results: scores.map((score, index) => ({ index, relevance_score: score })),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  const KEEP_LANE = { type: "rerank", url: "http://127.0.0.1:9999", model: "bge", weight: 1, enabled: true };
+  const runKeep = async ({ values = {}, scores = KEEP_SCORES, items = KEEP_ITEMS, channels, models, fetchImpl } = {}) =>
+    runRerankChannels({
+      sdk: recallSdk({
+        values,
+        dataDir: KEEP_DIR,
+        fetchImpl: fetchImpl || rerankLaneOf(scores),
+        models,
+      }),
+      switches: values,
+      query: "保留条数上限",
+      items,
+      channels: channels || [KEEP_LANE],
+    });
+
+  const cappedRun = await runKeep({ values: { rerankKeep: 5 } });
+  eq(
+    "候选 10 条、上限 5：只留 5 条，而且是分数最高的那 5 条（按合并分降序，不是取前 5 条）",
+    [cappedRun.indexes, cappedRun.kept.map((item) => item.text), cappedRun.droppedByKeep],
+    [[1, 5, 3, 8, 9], ["候选1", "候选5", "候选3", "候选8", "候选9"], 5],
+  );
+  eq(
+    "scores 记的是这一轮合并后的分：降序、带 uri、条数就是候选数",
+    [
+      cappedRun.scores.map((row) => row.uri),
+      cappedRun.scores.length,
+      Object.keys(cappedRun.scores[0] || {}),
+      cappedRun.scores.every(
+        (row, index, list) => index === 0 || list[index - 1].score >= row.score,
+      ),
+    ],
+    [
+      // 降序对应的 uri：分数 0.9/0.85/0.7/0.6/0.5/0.4/0.3/0.2/0.1/0.05 分别是第 1/5/3/8/9/0/6/4/2/7 条
+      [1, 5, 3, 8, 9, 0, 6, 4, 2, 7].map((index) => `viking://user/default/m/${index}.md`),
+      10,
+      ["uri", "score"],
+      true,
+    ],
+  );
+
+  const unlimitedRuns = await Promise.all(
+    ["", 0, "abc", 25, -3].map((rerankKeep) => runKeep({ values: { rerankKeep } })),
+  );
+  eq(
+    "留空 / 0 / 非数字 / 越界：一律不限，10 条全留，droppedByKeep 是 0",
+    unlimitedRuns.map((outcome) => [outcome.kept.length, outcome.droppedByKeep]),
+    [[10, 0], [10, 0], [10, 0], [10, 0], [10, 0]],
+  );
+
+  const smallRun = await runKeep({ values: { rerankKeep: 5 }, items: KEEP_ITEMS.slice(0, 3) });
+  eq(
+    "候选比上限少：全留，droppedByKeep 是 0",
+    [smallRun.kept.length, smallRun.droppedByKeep],
+    [3, 0],
+  );
+
+  // ---- 全 0 分：全票否决优先于条数上限 ----
+  {
+    const fake = modelSdk({ utility: () => ({ text: "1" }) });
+    const outcome = await runKeep({
+      values: { rerankKeep: 5 },
+      scores: KEEP_SCORES.map(() => 0),
+      models: fake.models,
+      channels: [KEEP_LANE, { type: "model", weight: 1, enabled: false }],
+    });
+    eq(
+      "全 0 分仍然全票否决：一条不留、不走兜底、droppedByKeep 是 0（全丢不是「超编」）",
+      [outcome.kept.length, outcome.fallback, outcome.droppedByKeep, fake.calls.utility.length],
+      [0, RERANK_FALLBACK_NONE, 0, 0],
+    );
+  }
+
+  // ---- 兜底产出也受上限约束 ----
+  {
+    // 主路这一路打不通 → 走兜底；兜底一次挑中 8 条，上限照样要管住它。
+    const fake = modelSdk({ utility: () => ({ text: "1,2,3,4,6,7,8,9" }) });
+    const outcome = await runKeep({
+      values: { rerankKeep: 5 },
+      models: fake.models,
+      channels: [KEEP_LANE, { type: "model", weight: 1, enabled: false }],
+      fetchImpl: async () => {
+        throw new Error("精排服务没起来");
+      },
+    });
+    eq(
+      "兜底产出的结果同样受上限：兜底挑中 8 条、上限 5 → 留 5 条，droppedByKeep=3",
+      [outcome.fallback, outcome.kept.length, outcome.droppedByKeep, fake.calls.utility.length],
+      [RERANK_FALLBACK_MODEL, 5, 3, 1],
+    );
+  }
+
+  // ---- 端到端：探针与汇总行都要看得到 ----
+  {
+    const probes = [];
+    const entries = KEEP_ITEMS.map((item) => ({ ...item }));
+    const rerankFetch = rerankLaneOf(KEEP_SCORES);
+    const recallFetch = mockFetch({ body: { status: "ok", result: { entries } } }).fetchImpl;
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          probe: true,
+          rerank: "llm",
+          rerankKeep: 5,
+          rerankLaneSchema: String(RERANK_LANE_SCHEMA),
+          rerankChannels: JSON.stringify([
+            { type: "rerank", url: "http://127.0.0.1:9999", model: "bge", weight: 1, enabled: true },
+          ]),
+        },
+        fetchImpl: (url, init) =>
+          String(url).includes("/v1/rerank") ? rerankFetch(url, init) : recallFetch(url, init),
+        dataDir: KEEP_DIR,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上一轮那条稿子改到哪了？" }] },
+      session: { sessionId: "rerank-keep-e2e" },
+    });
+    const summaryRow = probes.find((probe) => probe.event === "recall/result")?.invocation;
+    const detail = probes.find((probe) => probe.event === "recall/rerank")?.invocation;
+    const injected = asText(asList(result?.payload?.messages)[0]?.content);
+    eq(
+      "端到端：10 条候选、上限 5 → 汇总行与细节探针都记 kept=5 / droppedByKeep=5",
+      [
+        summaryRow?.recalled,
+        summaryRow?.rerank?.kept,
+        summaryRow?.rerank?.droppedByKeep,
+        detail?.kept,
+        detail?.droppedByKeep,
+        detail?.scores?.length,
+      ],
+      [10, 5, 5, 5, 5, 10],
+    );
+    eq(
+      "注入的正是分最高的那 5 条（最低的那几条一个字都没进来）",
+      [
+        ["候选1", "候选5", "候选3", "候选8", "候选9"].every((text) => injected.includes(text)),
+        ["候选7", "候选2", "候选4"].some((text) => injected.includes(text)),
+      ],
+      [true, false],
+    );
+  }
+
+  fs.rmSync(KEEP_DIR, { recursive: true, force: true });
+  resetRuntimeTransport();
+}
+
 // ================= 每轮一条 recall/result：正常那轮也得有记录 =================
 {
   // 为什么要这一节：探针原来只有三个点，全是异常分支（跳过 / 精排跑过 / 组装跑过）。
@@ -12299,7 +12709,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "精排跑过：rerank 记 mode / 这一轮真跑了几路 / 保留条数 / 兜底走了哪条（默认只跑兜底那一路）",
     reranked.rows[0]?.rerank,
-    { mode: "llm", lanes: 1, kept: 1, fallback: "model" },
+    { mode: "llm", lanes: 1, kept: 1, droppedByKeep: 0, fallback: "model" },
   );
   check(
     "精排那轮仍有一条 recall/rerank 细节记录",
@@ -12321,7 +12731,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "主路跑通时 fallback=none：“兜底接的”与“主路算的”在日志里分得开",
     rerankedMain.rows[0]?.rerank,
-    { mode: "llm", lanes: 1, kept: 1, fallback: "none" },
+    { mode: "llm", lanes: 1, kept: 1, droppedByKeep: 0, fallback: "none" },
   );
 
   // ---- 6. 凭据：只记条数，不记内容 ----

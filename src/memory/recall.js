@@ -27,6 +27,7 @@ import {
   normalizeGateContextTurns,
   normalizeGateDecisionThreshold,
   normalizeGateFallback,
+  normalizeRerankKeep,
   normalizeServiceTimeout,
   parseRerankChannels,
   readConnection,
@@ -1482,6 +1483,54 @@ export function rankRerankIndexes(scores) {
     .map((entry) => entry.index);
 }
 
+/** 探针里 scores 最多记这么多条：够看出分布，又不至于把日志撑爆。 */
+export const RERANK_SCORES_MAX = 10;
+
+/**
+ * 这一轮的保留条数上限：0 表示不限。
+ *
+ * 配置里留空 / 0 / 脏值 / 越界都读成 0（见 normalizeRerankKeep），缺省是 5。
+ * 放在这里而不是调用方：面板复跑（/recall-mode/test）与本轮召回必须用同一个判据。
+ */
+export function rerankKeepOf(switches) {
+  return normalizeRerankKeep(switches?.rerankKeep);
+}
+
+/**
+ * 条数上限：从**已经排好序**的索引表里取前 limit 条。
+ *
+ * limit 不是正整数（0 / 负数 / 非数字 / undefined）= 不限，原样全留。
+ * 这是加这一层之前的行为，也是面板里「留空」的语义。
+ * 返回 { indexes, dropped }：被截掉多少条要单独记，否则探针里只看到 kept 变小，
+ * 分不清是分数取舍掉的还是条数上限截掉的。
+ */
+export function dropByKeepIndexes(indexes, limit) {
+  const list = Array.isArray(indexes) ? indexes : [];
+  // 只认正整数：归一化那边也只会给出整数或 0，这里再卡一次是因为这个函数是导出的，
+  // 测试会直接喂脏值。2.9 不截成 2——那是「填错了」，不是「只要两条」。
+  const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
+  if (!cap || list.length <= cap) return { indexes: list, dropped: 0 };
+  return { indexes: list.slice(0, cap), dropped: list.length - cap };
+}
+
+/**
+ * 探针里的分数表：合并后的分数、降序、最多 RERANK_SCORES_MAX 条，只带 uri。
+ *
+ * 记的是**这一轮真正合并出来的分**（不是排序前的、也不是服务端原始分）：下一轮要看的
+ * 就是它到底长什么样，「分数阈值」这件事才有依据。正文一个字都不来，探针只记身份与数字。
+ */
+export function rerankScoreRows(scores, candidates, max = RERANK_SCORES_MAX) {
+  if (!Array.isArray(scores) || !scores.length) return [];
+  const list = Array.isArray(candidates) ? candidates : [];
+  const cap = Number.isInteger(max) && max > 0 ? max : RERANK_SCORES_MAX;
+  return rankRerankIndexes(scores)
+    .slice(0, cap)
+    .map((index) => ({
+      uri: typeof list[index]?.uri === "string" ? list[index].uri : "",
+      score: Number(scores[index]),
+    }));
+}
+
 /**
  * 丢掉“所有成功通道的原始分都是 0”的候选。
  *
@@ -1652,10 +1701,20 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   }
 
   const fallback = mainMerged === null ? RERANK_FALLBACK_MODEL : RERANK_FALLBACK_NONE;
-  const indexes =
-    merged === null
-      ? candidates.map((_, index) => index)
-      : dropRejectedIndexes(rankRerankIndexes(merged), results);
+  // 取舍的三步：先按合并分降序排，再让「全 0 分」那一路全票否决，最后才按条数上限截。
+  //
+  // 条数上限放在取舍之后：被否决掉的候选本来就不该占名额，也不该算进 droppedByKeep。
+  // 全 0 分那条路（indexes 空）与上限无关：全票否决是「一条都不要」，不是「超编」。
+  // 合并不出结果（主路全垮且兜底也垮）时原样保留全部候选，上限同样不掺和：
+  // 没有任何分数可排的时候，按条数砍人等于瞎砍。
+  const keepLimit = rerankKeepOf(switches);
+  const capped = merged === null
+    ? { indexes: candidates.map((_, index) => index), dropped: 0 }
+    : dropByKeepIndexes(dropRejectedIndexes(rankRerankIndexes(merged), results), keepLimit);
+  const indexes = capped.indexes;
+  const droppedByKeep = capped.dropped;
+  // 分数表只在有合并结果时才有意义；没结果就是空表，不拿 null 填坑。
+  const scores = merged === null ? [] : rerankScoreRows(merged, candidates);
 
   return {
     // 探针把两段数字都留下：原始分数看量纲，标准化分数看实际贡献。
@@ -1687,6 +1746,10 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
     merged,
     indexes,
     kept: indexes.map((index) => candidates[index]),
+    // 这一轮被条数上限截掉几条（全 0 分否决、合并失败原样保留都不算）。
+    droppedByKeep,
+    // 合并后的分数分布：降序、只带 uri，最多 RERANK_SCORES_MAX 条。
+    scores,
     fallback,
     // 兜底没能给出结果的原因（只有在 fallback=model 时才会有）。日志靠它分两句。
     ...(fallbackError ? { fallbackError } : {}),
@@ -2410,6 +2473,8 @@ export function createRecallHandler(sdk, options = {}) {
         mode: switches.rerank,
         lanes: outcome.channelCount,
         kept: kept.length,
+        // 被条数上限截掉几条：与 kept 一起看才知道减少是分数取舍还是超编。
+        droppedByKeep: outcome.droppedByKeep,
         fallback: outcome.fallback,
       };
 
@@ -2447,6 +2512,10 @@ export function createRecallHandler(sdk, options = {}) {
             enabledChannels: outcome.laneCount,
             channels: outcome.channels,
             kept: kept.length,
+            // 这一轮被条数上限截掉几条（全 0 分否决与合并失败都不算）。
+            droppedByKeep: outcome.droppedByKeep,
+            // 合并后的分数分布（降序、只带 uri）：只记身份与数字，不记正文。
+            scores: outcome.scores,
             fallback: outcome.fallback,
             elapsedMs: outcome.elapsedMs,
           });

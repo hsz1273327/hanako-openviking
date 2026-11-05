@@ -51,6 +51,7 @@ import {
   resolveRecallGate,
   serializeGateContextTurns,
   serializeGateDecisionThreshold,
+  serializeRerankKeep,
   serializeServiceTimeout,
   servicePairError,
   serviceTimeoutOrDefault,
@@ -198,6 +199,9 @@ async function current(ctx) {
     ),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
     rerank: normalizeRerank(await ctx.config.get("rerank")),
+    // 保留条数：存的是数字串，投影也是串（与门槛 / 轮数同口径），"0" = 不限。
+    // 没配过时 normalizeRerankKeep(undefined) 给默认 5。
+    rerankKeep: serializeRerankKeep(await ctx.config.get("rerankKeep")),
     // 组装：脏值 / 缺项一律画成 rules（与 readSwitches 同口径）。
     assembleMode: normalizeAssembleMode(await ctx.config.get("assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
@@ -372,6 +376,16 @@ export default function registerRecallModeRoutes(app, ctx) {
         );
       }
       changes.push(["rerankSystemonePrompt", body.rerankSystemonePrompt]);
+    }
+
+    // 保留条数：数字 / 数字串 / null 都收（null = 面板清空 = 不限），一律归一化后存数字串。
+    // 与超时那一组同一取舍：填错了不打断整单，也不把脏值留在配置里。
+    if (has(body, "rerankKeep")) {
+      const raw = body.rerankKeep;
+      if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+        return c.json({ ok: false, error: "rerankKeep 必须是数字、字符串或 null" }, 400);
+      }
+      changes.push(["rerankKeep", serializeRerankKeep(raw)]);
     }
 
     if (has(body, "rerankModel")) {

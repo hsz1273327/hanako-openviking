@@ -76,6 +76,21 @@ export const RECALL_TIMEOUT_DEFAULT = 5000;
 export const RECALL_TIMEOUT_MIN = 500;
 export const RECALL_TIMEOUT_MAX = 30000;
 
+/**
+ * 精排的保留条数上限：合并后按分降序，只留前 N 条。
+ *
+ * 0 是「不限」的写法，不是「一条都不留」：留空 / 0 / 非数字 / 越界一律落到 0，
+ * 也就是保留加这一项之前的行为（只按分数取舍，不按条数截）。缺省（从没配过）给 5。
+ *
+ * 为什么不把越界值夹回边界：把 25 夹成 20 会让「填错了」静默变成一个具体的数；
+ * 回落到不限更好查——探针里 kept 与 droppedByKeep 摆在一起，上限有没有生效一眼就看得出来。
+ * 面板另存一份逐字相同的常量，见 ui-src/src/lib/recall-layers.js。
+ */
+export const RERANK_KEEP_DEFAULT = 5;
+export const RERANK_KEEP_MIN = 1;
+export const RERANK_KEEP_MAX = 20;
+export const RERANK_KEEP_STEP = 1;
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -104,6 +119,8 @@ export const DEFAULTS = {
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
   rerank: "off",
+  // 精排保留条数上限。缺省 5；存 0 / 空串 / 脏值都读成「不限」（见 normalizeRerankKeep）。
+  rerankKeep: RERANK_KEEP_DEFAULT,
   assembleMode: "rules",
   rerankPrompt: "",
   // 判别模型（systemone）那一路的题面。空串 = 用内置那句默认问法。
@@ -319,6 +336,29 @@ export function normalizeRerank(raw) {
 
 export function normalizeAssembleMode(raw) {
   return oneOf(raw, ASSEMBLE_MODES, DEFAULTS.assembleMode);
+}
+
+/**
+ * 保留条数归一化：1–20 的整数给数字，0 表示不限。
+ *
+ * 缺省（undefined = 从没配过）回默认 5；其余非法的（空串 / 0 / 小数 / 负数 / 越界 /
+ * 类型不对）一律回 0 = 不限。这两种「不生效」要分开：没配过是没意见，填错了是填错了，
+ * 而两者都不该变成「一条都不留」。
+ */
+export function normalizeRerankKeep(raw) {
+  if (raw === undefined) return RERANK_KEEP_DEFAULT;
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return 0;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return 0;
+  if (value < RERANK_KEEP_MIN || value > RERANK_KEEP_MAX) return 0;
+  return value;
+}
+
+/** 写回配置的形状：一律存数字串（与门槛 / 超时同一口径，0 = 不限）。 */
+export function serializeRerankKeep(raw) {
+  return String(normalizeRerankKeep(raw));
 }
 
 /** 提示词按字符截断，不把代理对切成两半。空串表示“没有提示词，不拦截”。 */
@@ -828,6 +868,8 @@ export async function readSwitches(sdk) {
     gateDecisionThreshold: normalizeGateDecisionThreshold(await read(sdk, "gateDecisionThreshold")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
     rerank: normalizeRerank(await read(sdk, "rerank")),
+    // 0 = 不限。read() 把缺失项换成默认 5，所以「从没配过」与「填了空串」在这里分得开。
+    rerankKeep: normalizeRerankKeep(await read(sdk, "rerankKeep")),
     assembleMode: normalizeAssembleMode(await read(sdk, "assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
     rerankSystemonePrompt: normalizeRerankSystemonePrompt(
