@@ -74,6 +74,18 @@ export function gateHasFailurePath(gate) {
 
 export const QUERY_MODES = Object.freeze(["last", "context"]);
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
+
+/**
+ * 组装的两档：off 原样拼（与加这一层之前一致）/ rules 去重 + 按分精排。
+ * 与 src/ov/settings.js 的 ASSEMBLE_MODES 同值；模型档没做，所以没有第三个值。
+ */
+export const ASSEMBLE_MODES = Object.freeze(["off", "rules"]);
+
+/** 与 src/ov/settings.js 的 normalizeAssembleMode 同口径：认不出的值回 rules（默认开着）。 */
+export function normalizeAssembleMode(value) {
+  return oneOf(value, ASSEMBLE_MODES, "rules");
+}
+
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 export const RERANK_CHANNELS_MAX = 8;
 export const RERANK_CHANNEL_LABELS = Object.freeze({
@@ -834,6 +846,11 @@ export function paintRerankConfig(out) {
   };
 }
 
+/** 组装自己的字段（一个开关）。脏值 / 缺项一律画成 rules。 */
+export function paintAssembleConfig(out) {
+  return { assembleMode: normalizeAssembleMode(out?.assembleMode) };
+}
+
 /** 模型下拉的首项：空值代表“用宿主辅助模型”，也就是 utility 通道。 */
 export const DEFAULT_MODEL_OPTION = Object.freeze({
   value: "",
@@ -863,7 +880,7 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 精排配置 + 打分服务。 */
+/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 精排 + 组装 + 打分服务。 */
 export function paintRecallConfig(out) {
   return {
     ...paintLayers(out),
@@ -871,6 +888,7 @@ export function paintRecallConfig(out) {
     ...paintDecisionConfig(out),
     ...paintGateFallbackConfig(out),
     ...paintRerankConfig(out),
+    ...paintAssembleConfig(out),
     ...paintScoringConfig(out),
   };
 }

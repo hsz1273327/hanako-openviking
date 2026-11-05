@@ -2,7 +2,10 @@
 // 中枢 + 身份两块，上下各占整行（.hub-stack 纵向，间距 12px）。
 //
 // 中枢：地址 / API Key / 往返·版本·出口·检查摘要 / 检查项 / 错误行 / 提示位。
-// 身份：门牌前缀 / 超时 / 注入预算。
+// 身份：门牌前缀 / 超时。
+//
+// 注入预算不在这里：它决定拼好的记忆段留多少，是组装那一步的事，已搬到记忆页的
+// 组装子页签（AssembleCard.vue）。
 //
 // 行为约定：
 //   - 三个连接字段改完就提交（change 或回车），没有保存按钮；
@@ -23,7 +26,7 @@
 // 而且每栏只有一半宽，字段只能竖排（标签一行、控件一行）。各占整行之后字段可以
 // 横着并排，每块只剩「一行字段 + 一行信息」，总高反而更低。
 // 栅格仍交给 n-grid：中枢 cols="1 700:2"（地址 : API Key = 1:1），
-// 身份 cols="1 700:4" + 门牌前缀 span 2（= 2:1:1），700px 以下各自收成一列。
+// 身份 cols="1 700:2"（门牌前缀 : 超时 = 1:1），700px 以下各自收成一列。
 import { computed } from "vue";
 import {
   NCard,
@@ -207,9 +210,9 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
 
     <NCard size="small" title="身份" :bordered="false" header-style="padding: 4px 16px" content-style="padding: 12px">
       <NForm class="fields" label-placement="top" size="small" :show-feedback="false">
-        <!-- 四个等宽列里门牌前缀占两份（= 2:1:1）；700px 以下收成一列。 -->
-        <NGrid cols="1 700:4" responsive="screen" :x-gap="8" :y-gap="0">
-          <NGridItem span="1 700:2">
+        <!-- 两栏等宽（门牌前缀 : 超时 = 1:1）；700px 以下收成一列。 -->
+        <NGrid cols="1 700:2" responsive="screen" :x-gap="8" :y-gap="0">
+          <NGridItem>
             <NFormItem label="门牌前缀" :label-props="{ for: 'peerPrefix' }">
               <NInput
                 size="small"
@@ -239,22 +242,6 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
                 :input-props="{ id: 'timeoutMs' }"
                 :value="state.controls.requestTimeoutMs ?? null"
                 @update:value="onNumberChange('requestTimeoutMs', $event)"
-              />
-            </NFormItem>
-          </NGridItem>
-          <NGridItem>
-            <NFormItem label="注入预算（token）" :label-props="{ for: 'budgetTokens' }">
-              <NInputNumber
-                size="small"
-                :show-button="false"
-                :update-value-on-input="false"
-                :min="200"
-                :max="32000"
-                :step="100"
-                placeholder="默认 2500"
-                :input-props="{ id: 'budgetTokens' }"
-                :value="state.controls.injectBudgetTokens ?? null"
-                @update:value="onNumberChange('injectBudgetTokens', $event)"
               />
             </NFormItem>
           </NGridItem>

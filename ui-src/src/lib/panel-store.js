@@ -44,6 +44,7 @@ import {
   emptyRerankChannel,
   isCompleteRerankChannel,
   modelOptions,
+  normalizeAssembleMode,
   normalizeGateContext,
   normalizeGateContextPrompt,
   normalizeGateContextTurns,
@@ -202,6 +203,8 @@ export function createPanelStore(deps = {}) {
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
       rerank: "off",
+      // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
+      assembleMode: "rules",
       gateModel: "",
       rerankModel: "",
     },
@@ -330,6 +333,7 @@ export function createPanelStore(deps = {}) {
     "gateDecisionThreshold",
     "queryMode",
     "rerank",
+    "assembleMode",
     "gateModel",
     "rerankModel",
   ];
@@ -480,6 +484,7 @@ export function createPanelStore(deps = {}) {
       gateContextPrompt: normalizeGateContextPrompt(state.prompts.context),
       gateModel: state.form.gateModel,
       rerank: state.form.rerank,
+      assembleMode: normalizeAssembleMode(state.form.assembleMode),
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
       rerankModel: state.form.rerankModel,
       // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
@@ -553,6 +558,9 @@ export function createPanelStore(deps = {}) {
     "rerankPrompt",
     "rerankModel",
     "rerankChannels",
+    // 组装开关与召回策略同一单，所以也得进「这一单有没有变化」的比较：
+    // 漏在这里，切开关会看起来“没改”，一单都不发。
+    "assembleMode",
     ...SCORING_SERVICES.flatMap((service) => [
       service.urlKey,
       service.modelKey,

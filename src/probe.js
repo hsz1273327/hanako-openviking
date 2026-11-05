@@ -88,6 +88,20 @@ function shapeOf(event, invocation) {
     };
   }
 
+  // 组装：回指表要真的落进 probe.log，否则「refs 只进探针与日志」等于什么都没记。
+  // 一项只有 index / uri / peer / score，原样带过去；不猜别的字段。
+  if (event === "recall/assemble") {
+    const assemble =
+      invocation.assemble && typeof invocation.assemble === "object" ? invocation.assemble : {};
+    const refs = Array.isArray(assemble.refs) ? assemble.refs : [];
+    return {
+      mode: typeof assemble.mode === "string" ? assemble.mode : null,
+      kept: Number.isFinite(Number(assemble.kept)) ? Number(assemble.kept) : null,
+      segments: refs.length,
+      refs,
+    };
+  }
+
   // 事件类（agent/settled 等）：只记键名
   return { keys: Object.keys(invocation) };
 }

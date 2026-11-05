@@ -30,6 +30,7 @@ import {
   serviceTimeoutOrDefault,
 } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
+import { assembleCandidates, peerOfUri } from "./assemble.js";
 import {
   MEMORY_TAG_CLOSE,
   MEMORY_TAG_OPEN,
@@ -1719,33 +1720,66 @@ function textOf(value) {
 }
 
 /**
+ * 候选的元信息：uri / 分数 / 时间 / 来源门牌。
+ *
+ * 四个字段都可能没有：字符串形态的返回值、别的服务实现、自己的假数据。
+ * 缺一个字段就整条丢掉是不行的——文本还在，就还是一条可用候选。
+ * 所以一律降级成空值（空串 / null），不报错、不猜字段。
+ *
+ * score 不能用 Number() 一把梭：Number(null) 是 0，那会把「没给分」静默写成「零分」，
+ * 后面的按分精排会把它当成最不相关的一条。
+ */
+export function recallMetaOf(entry) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const uri = typeof source.uri === "string" ? source.uri.trim() : "";
+  const rawScore = source.score;
+  const score =
+    rawScore === null || rawScore === undefined || rawScore === ""
+      ? null
+      : Number.isFinite(Number(rawScore))
+        ? Number(rawScore)
+        : null;
+  // 时间是给人看的定位信息（只进探针 / 日志），数字时间戳也留成串，不在这里做格式化。
+  const rawTime = source.modTime ?? source.timestamp;
+  const time =
+    typeof rawTime === "string" ? rawTime.trim() : typeof rawTime === "number" ? String(rawTime) : "";
+  return { uri, score, time, peer: peerOfUri(uri) };
+}
+
+/** 一条候选：文本 + 元信息。 */
+function recallItem(text, entry) {
+  return { text, ...recallMetaOf(entry) };
+}
+
+/**
  * 从召回响应里读出候选条目，只认实测过的三处，按服务端"最省事到最原始"排列：
  *   1. rendered —— mode=context 时服务端拼好的扁平 XML 块，视为单条；
  *   2. digest   —— 摘要，视为单条；
  *   3. entries[].text —— 原始命中条目，逐条保留，跳过空项。
  * 其余形状一律给空数组（调用方据此 return undefined 并告警一次），不猜字段名。
  *
- * 精排必须在拼成一段文本之前做，所以这里保留条目边界；
+ * 精排与组装都必须在拼成一段文本之前做，所以这里保留条目边界；
+ * 元信息（uri / 分数 / 时间 / 门牌）尽量带上，缺失降级成空值，不会因此丢条目。
  * extractRecallText 只是把它按原有规则拼回去。
  */
 export function extractRecallItems(value) {
   if (typeof value === "string") {
     const text = value.trim();
-    return text ? [{ text }] : [];
+    return text ? [recallItem(text)] : [];
   }
   if (!value || typeof value !== "object") return [];
 
   const rendered = textOf(value.rendered);
-  if (rendered) return [{ text: rendered }];
+  if (rendered) return [recallItem(rendered)];
 
   const digest = textOf(value.digest);
-  if (digest) return [{ text: digest }];
+  if (digest) return [recallItem(digest)];
 
   if (Array.isArray(value.entries)) {
     return value.entries
-      .map((entry) => (entry && typeof entry === "object" ? textOf(entry.text) : ""))
-      .filter(Boolean)
-      .map((text) => ({ text }));
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => recallItem(textOf(entry.text), entry))
+      .filter((item) => item.text);
   }
 
   return [];
@@ -2063,10 +2097,37 @@ export function createRecallHandler(sdk, options = {}) {
       }
     }
 
-    const text = kept
-      .map((item) => item.text)
-      .join("\n\n")
-      .trim();
+    // 组装：精排之后、拼成一段文本之前的最后一步。
+    //
+    // 这个位置不能再往下：再往下一步就只剩一个字符串，去重与按分精排只能靠猜。
+    // off 档原样拼（与加这一层之前逐字一致）；rules 档去重 + 按分精排。
+    // 预算裁剪仍然在下面的 memoryBlock 里做（按拼好之后的文本算 token）。
+    const assembled = assembleCandidates(kept, switches.assembleMode);
+    const text = assembled.text;
+
+    // 回指表只进探针与日志，不进注入文本：目标是「这一轮拼了谁」可查，不是把元信息喂给模型。
+    log(
+      sdk,
+      "info",
+      `assemble: mode=${switches.assembleMode} kept=${kept.length} segments=${
+        assembled.refs.length
+      } (session=${sessionId})`,
+    );
+    if (switches.probe && typeof options.probe === "function") {
+      try {
+        await options.probe("recall/assemble", {
+          session,
+          query: lastText,
+          assemble: {
+            mode: switches.assembleMode,
+            kept: kept.length,
+            refs: assembled.refs,
+          },
+        });
+      } catch {
+        /* 探针写不进去不能影响本轮对话 */
+      }
+    }
 
     const block = memoryBlock(text, budget);
     if (!block) {

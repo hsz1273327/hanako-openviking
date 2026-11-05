@@ -8,6 +8,7 @@
 // 写入前先整单校验：同一次提交里只要有一个值不合法，一个字段都不写。
 
 import {
+  ASSEMBLE_MODES,
   DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
   GATE_CONTEXT_MODES,
@@ -21,6 +22,7 @@ import {
   RERANK_PROMPT_MAX,
   SERVICE_KINDS,
   SERVICE_MODEL_MAX,
+  normalizeAssembleMode,
   normalizeGateContext,
   normalizeGateContextPrompt,
   normalizeGateContextTurns,
@@ -60,6 +62,7 @@ const SPECS = Object.freeze({
   gateContext: GATE_CONTEXT_MODES,
   queryMode: QUERY_MODES,
   rerank: RERANK_MODES,
+  assembleMode: ASSEMBLE_MODES,
 });
 
 /** 打分服务的四字段：两组（精排 / 决策）的地址与模型。 */
@@ -184,6 +187,8 @@ async function current(ctx) {
     ),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
     rerank: normalizeRerank(await ctx.config.get("rerank")),
+    // 组装：脏值 / 缺项一律画成 rules（与 readSwitches 同口径）。
+    assembleMode: normalizeAssembleMode(await ctx.config.get("assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
     rerankModel: normalizeRerankModel(await ctx.config.get("rerankModel")),
     rerankChannels: parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {

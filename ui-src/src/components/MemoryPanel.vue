@@ -1,19 +1,20 @@
 <script setup>
-// 记忆配置页：按会话说明 → [召回 / 精排 / 候选池] 三个子页签 → 页面级提示位。
+// 记忆配置页：按会话说明 → [召回 / 精排 / 组装 / 候选池] 四个子页签 → 页面级提示位。
 //
-// 这一页没有按会话的开关：召回判断 / 查询 / 精排跟上面两个开关一样按整台机器算，
+// 这一页没有按会话的开关：召回判断 / 查询 / 精排 / 组装跟上面两个开关一样按整台机器算，
 // 改了即时生效；按会话的那几项（召回范围等）在对话右侧的 OpenViking 卡片里。
 //
 // 拆卡是有意的：召回管「查不查、拿什么查」，精排管「查回来之后怎么排序」，
-// 候选池管「谁能进来」——三件事三张卡，但竖排一屏放不下，所以改成同页三个子页签。
+// 组装管「拼成哪一段、留多少」，候选池管「谁能进来」——四件事四张卡，
+// 但竖排一屏放不下，所以改成同页四个子页签。
 // 整单提交靠 lib/panel-store.js 的 readLayers()（每个组件都只调 store 的
 // setForm / setPrompt，各卡各发各的那是错）。
 //
-// 三块**始终挂载**，只用 hidden 切显隐（与 App.vue 的四个主页面签同一做法）：
+// 四块**始终挂载**，只用 hidden 切显隐（与 App.vue 的四个主页面签同一做法）：
 // 切走再切回来，输入中的草稿、已填未提交的值、提示位都还在。
 // 子页签本身只是本页视图状态（lib/memory-tabs.js），不进 store、不落 storage。
 //
-// 高度：子页容器吃满剩余高度。召回 / 精排的内容比一屏高时由子页自己滚，
+// 高度：子页容器吃满剩余高度。召回 / 精排 / 组装的内容比一屏高时由子页自己滚，
 // 候选池卡的滚动交给卡内的 PeerList（见 panel.css 的 .memory-pane 那组规则）。
 import { nextTick, ref } from "vue";
 import { NCard, NTab, NTabs } from "naive-ui";
@@ -29,6 +30,7 @@ import {
 } from "../lib/memory-tabs.js";
 import RecallCard from "./RecallCard.vue";
 import RerankCard from "./RerankCard.vue";
+import AssembleCard from "./AssembleCard.vue";
 import PeerList from "./PeerList.vue";
 
 const { state } = useConfig();
@@ -58,7 +60,7 @@ function onTabKeydown(event, name) {
     记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
   </p>
 
-  <!-- 三个子页签：line + small，不叠第三层容器；aria 由这里补（n-tabs 不输出语义）。 -->
+  <!-- 四个子页签：line + small，不叠第三层容器；aria 由这里补（n-tabs 不输出语义）。 -->
   <NTabs
     class="memory-tabs"
     type="line"
@@ -85,7 +87,7 @@ function onTabKeydown(event, name) {
     </NTab>
   </NTabs>
 
-  <!-- 三块始终挂载：切页签只切 hidden，草稿与提示位不会因为重建而丢。 -->
+  <!-- 四块始终挂载：切页签只切 hidden，草稿与提示位不会因为重建而丢。 -->
   <div class="memory-tabs-body">
     <div
       id="memory-panel-recall"
@@ -104,6 +106,15 @@ function onTabKeydown(event, name) {
       :hidden="!memoryPaneVisible(activeTab, 'rerank')"
     >
       <RerankCard />
+    </div>
+    <div
+      id="memory-panel-assemble"
+      class="memory-pane"
+      role="tabpanel"
+      aria-labelledby="memory-tab-assemble"
+      :hidden="!memoryPaneVisible(activeTab, 'assemble')"
+    >
+      <AssembleCard />
     </div>
     <div
       id="memory-panel-peers"

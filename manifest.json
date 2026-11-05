@@ -305,6 +305,22 @@
             "description": "受管代理进程监听的本地编译端口。默认 47821，与其它程序冲突时才改，改后需重载 App。",
             "default": 47821
           },
+          "assembleMode": {
+            "type": "string",
+            "title": "组装",
+            "description": "精排之后、把候选拼成一段上下文之前的那一步。off 原样拼（与加这一层之前一致）；rules 按来源去重、按分数精排，再按预算裁剪。认不出的值归一化成 rules。模型档（让模型合并重写这一段）还没做，所以只有两档。",
+            "default": "rules",
+            "enum": [
+              "off",
+              "rules"
+            ],
+            "ui": {
+              "enumLabels": [
+                "关",
+                "规则档"
+              ]
+            }
+          },
           "injectBudgetTokens": {
             "type": "integer",
             "title": "注入预算",

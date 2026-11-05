@@ -80,6 +80,8 @@ import {
   SERVICE_MODEL_MAX,
   SERVICE_KEY_MAX,
   SERVICE_TIMEOUT_LIMITS,
+  ASSEMBLE_MODES,
+  normalizeAssembleMode,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { maskOf, maskString } from "../src/ov/mask.js";
@@ -103,6 +105,7 @@ import {
   candidateSummary,
   extractRecallItems,
   extractRecallText,
+  recallMetaOf,
   fingerprint,
   isShortOperationCommand,
   memoryBlock,
@@ -170,6 +173,15 @@ import {
   GATE_QUESTION_WORDS,
   MEMORY_MAX_TOKENS,
 } from "../src/memory/recall.js";
+// 组装：精排之后、拼成一段上下文之前的那一步（去重 / 按分精排 / 回指表）。
+import {
+  assembleCandidates,
+  candidateKey,
+  dedupeCandidates,
+  peerOfUri,
+  scoreOf,
+  sortByScore,
+} from "../src/memory/assemble.js";
 import {
   readSession,
   patchSession,
@@ -236,6 +248,9 @@ import {
   RECALL_GATE_LABELS as UI_RECALL_GATE_LABELS,
   RECALL_GATE_FALLBACKS as UI_RECALL_GATE_FALLBACKS,
   RECALL_GATE_FALLBACK_LABELS as UI_RECALL_GATE_FALLBACK_LABELS,
+  ASSEMBLE_MODES as UI_ASSEMBLE_MODES,
+  normalizeAssembleMode as uiNormalizeAssembleMode,
+  paintAssembleConfig,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SCORING_SERVICES,
@@ -2348,12 +2363,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     selectTabBody,
   );
 }
-// ================= 记忆页：三个子页签 =================
+// ================= 记忆页：四个子页签 =================
 {
   eq(
-    "记忆页子页签的名字逐字是 召回 / 精排 / 候选池",
+    "记忆页子页签的名字逐字是 召回 / 精排 / 组装 / 候选池",
     MEMORY_TABS.map((name) => MEMORY_TAB_LABELS[name]),
-    ["召回", "精排", "候选池"],
+    ["召回", "精排", "组装", "候选池"],
   );
   eq(
     "记忆页默认停在召回；非法页名回落到召回",
@@ -2361,9 +2376,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["recall", "recall"],
   );
   eq(
-    "任一时刻只有一个子页可见（另外两块只靠 hidden 隐藏，不卸载）",
+    "任一时刻只有一个子页可见（剩下三块只靠 hidden 隐藏，不卸载）",
     MEMORY_TABS.map((active) => MEMORY_TABS.filter((name) => memoryPaneVisible(active, name))),
-    [["recall"], ["rerank"], ["peers"]],
+    [["recall"], ["rerank"], ["assemble"], ["peers"]],
   );
   eq(
     "子页签键盘换页：左右循环 / Home / End / 其它键不接管",
@@ -2380,15 +2395,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const panel = uiCode("components/MemoryPanel.vue");
   const paneTags = [...panel.matchAll(/<div\b[^>]*class="memory-pane"[^>]*>/g)].map((m) => m[0]);
-  eq("记忆页里三个子页容器都在 DOM 里（不靠 v-if 重建组件）", paneTags.length, 3);
+  eq("记忆页里四个子页容器都在 DOM 里（不靠 v-if 重建组件）", paneTags.length, 4);
   check(
-    "三个子页容器都不用 v-if / v-show / 动态 :key 重建",
+    "四个子页容器都不用 v-if / v-show / 动态 :key 重建",
     paneTags.every((tag) => !/v-if|v-show|:key/.test(tag)),
     paneTags.join("\n"),
   );
   for (const [name, label] of [
     ["recall", "召回"],
     ["rerank", "精排"],
+    ["assemble", "组装"],
     ["peers", "候选池"],
   ]) {
     check(
@@ -2402,11 +2418,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
   eq(
-    "三个子组件各挂一次（RecallCard / RerankCard / PeerList 都不在条件分支里）",
-    ["RecallCard", "RerankCard", "PeerList"].map(
+    "四个子组件各挂一次（RecallCard / RerankCard / AssembleCard / PeerList 都不在条件分支里）",
+    ["RecallCard", "RerankCard", "AssembleCard", "PeerList"].map(
       (name) => (panel.match(new RegExp(`<${name}\\b`, "g")) || []).length,
     ),
-    [1, 1, 1],
+    [1, 1, 1, 1],
   );
   check(
     "子页签是 NTabs line + small，不是卡片式（不与四个主页面签抢层次）",
@@ -2435,6 +2451,373 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         (name) => selectTabBody.includes(name) === false,
       ),
     selectTabBody,
+  );
+}
+// ================= 组装：精排之后把候选拼成一段上下文 =================
+{
+  // ---- 配置：只有两档，认不出的值回 rules（默认开着），前后端两份枚举同值 ----
+  const dirtyAssemble = ["off", "rules", "bogus", "", null, 1, "RULES", "llm"];
+  eq(
+    "组装三态：off / rules / 脏值（含缺项、类型不对、大写变体、没做的模型档）都回 rules；前后端两份枚举、默认值三处同值",
+    [
+      dirtyAssemble.map(normalizeAssembleMode),
+      dirtyAssemble.map(uiNormalizeAssembleMode),
+      [ASSEMBLE_MODES, UI_ASSEMBLE_MODES],
+      DEFAULTS.assembleMode,
+    ],
+    [
+      ["off", "rules", "rules", "rules", "rules", "rules", "rules", "rules"],
+      ["off", "rules", "rules", "rules", "rules", "rules", "rules", "rules"],
+      [["off", "rules"], ["off", "rules"]],
+      "rules",
+    ],
+  );
+  {
+    const properties = JSON.parse(
+      fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+    ).contributes.settings.schema.properties;
+    eq(
+      "manifest 声明 assembleMode：string / 默认 rules / 两档 enum + 文案「关 / 规则档」",
+      [
+        properties.assembleMode?.type,
+        properties.assembleMode?.default,
+        properties.assembleMode?.enum,
+        properties.assembleMode?.ui?.enumLabels,
+      ],
+      ["string", "rules", ["off", "rules"], ["关", "规则档"]],
+    );
+  }
+
+  eq(
+    "面板投影把服务端的 assembleMode 收进表单（缺项画成 rules）",
+    [
+      paintAssembleConfig({ assembleMode: "off" }).assembleMode,
+      paintAssembleConfig({}).assembleMode,
+      paintRecallConfig({ recallGate: "off" }).assembleMode,
+    ],
+    ["off", "rules", "rules"],
+  );
+
+  // ---- 元信息：uri / 分数 / 时间 / 门牌，缺字段降级成空值，不丢条目 ----
+  const richItems = extractRecallItems({
+    entries: [
+      {
+        text: "带来源的条目",
+        uri: "viking://user/default/peers/mbp-01/memories/a.md",
+        score: 0.62,
+        modTime: "2026-02-03T10:00:00Z",
+      },
+      { text: "只有文本" },
+      { text: "用 timestamp", timestamp: 1770000000, uri: "viking://user/default/memories/b.md" },
+      { text: "两个时间字段", modTime: "2026-05-06", timestamp: 1 },
+      { text: "分数是脏值", score: "abc" },
+    ],
+  });
+  eq(
+    "元信息提取：uri / score / time / peer 都取到（modTime 优先于 timestamp）；缺字段降级成空串与 null，五条一条不丢",
+    [richItems.map((item) => [item.uri, item.score, item.time, item.peer]), richItems.length],
+    [
+      [
+        ["viking://user/default/peers/mbp-01/memories/a.md", 0.62, "2026-02-03T10:00:00Z", "mbp-01"],
+        ["", null, "", ""],
+        ["viking://user/default/memories/b.md", null, "1770000000", ""],
+        ["", null, "2026-05-06", ""],
+        ["", null, "", ""],
+      ],
+      5,
+    ],
+  );
+  eq(
+    "rendered / digest / 字符串形态仍视为单条：没有 uri 与分数，元信息全是空值",
+    [extractRecallItems({ rendered: "渲染块" }), extractRecallItems("一段记忆").length],
+    [[{ text: "渲染块", uri: "", score: null, time: "", peer: "" }], 1],
+  );
+  eq(
+    "peer 从 uri 的 /peers/<name>/ 解出来；不在 peers 下 / 没有 uri / 只有前缀没有尾斜杠都给空串",
+    [
+      peerOfUri("viking://user/default/peers/mbp-01/memories/a.md"),
+      peerOfUri("viking://user/default/memories/a.md"),
+      peerOfUri("viking://user/default/peers/mbp-01"),
+      peerOfUri(""),
+      peerOfUri(null),
+    ],
+    ["mbp-01", "", "", "", ""],
+  );
+  eq(
+    "没有分数不能算成零分（Number(null) 是 0 的坑）",
+    [scoreOf({ score: null }), scoreOf({}), scoreOf({ score: 0 }), scoreOf({ score: "abc" })],
+    [null, null, 0, null],
+  );
+
+  // ---- 去重 ----
+  eq(
+    "同 uri 两条只留一条，且留分数高的那条",
+    dedupeCandidates([
+      { text: "旧的低分", uri: "viking://user/default/m/a.md", score: 0.2 },
+      { text: "新的高分", uri: "viking://user/default/m/a.md", score: 0.8 },
+    ]).map((item) => item.text),
+    ["新的高分"],
+  );
+  eq(
+    "同 uri 且同分：留靠前的那条",
+    dedupeCandidates([
+      { text: "前", uri: "viking://user/default/m/a.md", score: 0.4 },
+      { text: "后", uri: "viking://user/default/m/a.md", score: 0.4 },
+    ]).map((item) => item.text),
+    ["前"],
+  );
+  eq(
+    "无 uri 时按文本指纹：首尾空白与连续空白不算不同，真的不同不合并",
+    dedupeCandidates([{ text: "同一段  话" }, { text: "  同一段 话  " }, { text: "另一段话" }]).map(
+      (item) => item.text,
+    ),
+    ["同一段  话", "另一段话"],
+  );
+  eq(
+    "一条有 uri 一条没有：字面一样也不合并（没有来源的那条不知道是哪儿来的）",
+    dedupeCandidates([
+      { text: "同一段", uri: "viking://user/default/m/a.md" },
+      { text: "同一段" },
+    ]).length,
+    2,
+  );
+  eq(
+    "身份键：有 uri 只认 uri（与文本无关），没 uri 认压平空白后的文本",
+    [
+      candidateKey({ text: "甲", uri: "viking://u" }) === candidateKey({ text: "乙", uri: "viking://u" }),
+      candidateKey({ text: " 甲  乙 " }) === candidateKey({ text: "甲 乙" }),
+    ],
+    [true, true],
+  );
+
+  // ---- 按分精排（稳定） ----
+  eq(
+    "按分精排：有分数的降序 / 没分数的排在有分数的后面 / 同分与都没分数时保持原相对顺序",
+    sortByScore([
+      { text: "无分甲" },
+      { text: "低分", score: 0.2 },
+      { text: "无分乙", score: null },
+      { text: "高分", score: 0.9 },
+      { text: "同分靠后", score: 0.2 },
+    ]).map((item) => item.text),
+    ["高分", "低分", "同分靠后", "无分甲", "无分乙"],
+  );
+
+  eq(
+    "规则档确实过一遍去重（不是只把函数摆在那儿）：同一批候选进去，只有一段出来",
+    assembleCandidates(
+      [
+        { text: "重复的那段", uri: "viking://user/default/m/a.md", score: 0.2 },
+        { text: "重复的那段", uri: "viking://user/default/m/a.md", score: 0.9 },
+      ],
+      "rules",
+    ).refs.length,
+    1,
+  );
+  eq(
+    "按分精排也真的接在去重后面：低分在前、高分在后进去，文本里高分在前",
+    assembleCandidates([{ text: "低", score: 0.1 }, { text: "高", score: 0.9 }], "rules").text,
+    "高\n\n低",
+  );
+
+  // ---- off 档：与改动前逐字一致 ----
+  const offItems = [
+    { text: "第一条", score: 0.1 },
+    { text: "第二条", score: 0.9 },
+    { text: "第一条", score: 0.5 },
+  ];
+  const offAssembled = assembleCandidates(offItems, "off");
+  eq(
+    "off 档行为与改动前完全一致：顺序、条数、拼法都不动（不去重、不按分精排）",
+    [
+      offAssembled.text,
+      offAssembled.text.split("\n\n").length,
+      offAssembled.refs.map((ref) => ref.index),
+    ],
+    [offItems.map((item) => item.text).join("\n\n").trim(), 3, [1, 2, 3]],
+  );
+
+  // ---- rules 档：一段文本 + 回指表 ----
+  const rulesAssembled = assembleCandidates(
+    [
+      { text: "甲", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.3 },
+      { text: "乙", score: 0.8 },
+      { text: "丙", uri: "viking://user/default/memories/c.md" },
+    ],
+    "rules",
+  );
+  eq(
+    "rules 档：文本按分精排拼起来，refs 与段落一一对应、序号从 1 开始、带 uri / peer / score",
+    [rulesAssembled.text, rulesAssembled.refs],
+    [
+      "乙\n\n甲\n\n丙",
+      [
+        { index: 1, uri: "", peer: "", score: 0.8 },
+        { index: 2, uri: "viking://user/default/peers/mbp-01/memories/a.md", peer: "mbp-01", score: 0.3 },
+        { index: 3, uri: "viking://user/default/memories/c.md", peer: "", score: null },
+      ],
+    ],
+  );
+  eq(
+    "refs 与最终文本的段落数一致",
+    rulesAssembled.refs.length,
+    rulesAssembled.text.split("\n\n").length,
+  );
+  eq(
+    "脏 mode 不静默走原样拼：认不出的值一律按规则档跑",
+    assembleCandidates([{ text: "低", score: 0.1 }, { text: "高", score: 0.9 }], "model").text,
+    "高\n\n低",
+  );
+
+  // ---- 端到端：注入文本与探针里的回指表 ----
+  {
+    const dir = path.join(import.meta.dirname, ".tmp-recall-assemble");
+    fs.rmSync(dir, { recursive: true, force: true });
+    const infos = [];
+    const probes = [];
+    const mock = mockFetch({
+      body: {
+        status: "ok",
+        result: {
+          entries: [
+            {
+              text: "低分的旧版本",
+              uri: "viking://user/default/peers/mbp-01/memories/a.md",
+              score: 0.2,
+            },
+            { text: "没分数的一条" },
+            {
+              text: "高分的新版本",
+              uri: "viking://user/default/peers/mbp-01/memories/a.md",
+              score: 0.9,
+            },
+          ],
+        },
+      },
+    });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        logger: { info: (message) => infos.push(message) },
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "组装这一轮" }] },
+      session: { sessionId: "assemble-rules" },
+    });
+    const injected = asText(asList(result?.payload?.messages)[0]?.content);
+    check(
+      "注入文本走的是规则档：同 uri 只留一条、留高分那条，没分数的排后面",
+      injected.includes("高分的新版本\n\n没分数的一条") && !injected.includes("低分的旧版本"),
+      injected,
+    );
+    const assembleProbe = probes.find((probe) => probe.event === "recall/assemble");
+    eq(
+      "探针里有一份回指表：mode / kept / refs（序号从 1 开始、带 peer）",
+      [
+        assembleProbe?.invocation.assemble.mode,
+        assembleProbe?.invocation.assemble.kept,
+        assembleProbe?.invocation.assemble.refs,
+      ],
+      [
+        "rules",
+        3,
+        [
+          { index: 1, uri: "viking://user/default/peers/mbp-01/memories/a.md", peer: "mbp-01", score: 0.9 },
+          { index: 2, uri: "", peer: "", score: null },
+        ],
+      ],
+    );
+    check(
+      "refs 不进注入文本（正文里没有 uri 与分数）",
+      !injected.includes("viking://") && !injected.includes("0.9"),
+      injected,
+    );
+    check(
+      "日志有一行 assemble: mode / kept / segments",
+      infos.some((message) => message.includes("assemble: mode=rules kept=3 segments=2")),
+      infos.join(" | "),
+    );
+
+    // off 档：同一批候选不再去重，按服务端给的顺序拼。
+    const mockOff = mockFetch({
+      body: {
+        status: "ok",
+        result: {
+          entries: [
+            { text: "低分的旧版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.2 },
+            { text: "高分的新版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.9 },
+          ],
+        },
+      },
+    });
+    const offHandler = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          assembleMode: "off",
+        },
+        fetchImpl: mockOff.fetchImpl,
+        dataDir: dir,
+      }),
+    );
+    const offResult = await offHandler({
+      payload: { messages: [{ role: "user", content: "off 档这一轮" }] },
+      session: { sessionId: "assemble-off" },
+    });
+    const offInjected = asText(asList(offResult?.payload?.messages)[0]?.content);
+    check(
+      "off 档：同 uri 两条都在、顺序按服务端给的来（与改动前的拼法一致）",
+      offInjected.includes("低分的旧版本\n\n高分的新版本"),
+      offInjected,
+    );
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ---- 页签与控件位置 ----
+  const assembleCard = uiCode("components/AssembleCard.vue");
+  const identity = uiCode("components/HubIdentity.vue");
+  check(
+    "注入预算控件在组装页：文案逐字、id 仍是 budgetTokens、提交口仍是 setControlsNumber",
+    assembleCard.includes('label="注入预算（token）"') &&
+      assembleCard.includes("'budgetTokens'") &&
+      assembleCard.includes("setControlsNumber"),
+    assembleCard.slice(0, 1800),
+  );
+  check(
+    "全局页的身份卡不再有注入预算（挪走之后不留两份控件）",
+    identity.includes("budgetTokens") === false && identity.includes("注入预算") === false,
+    identity.slice(0, 900),
+  );
+  check(
+    "组装开关是 NSwitch（开 / 关）而不是下拉；一句说明里写清规则档做什么",
+    assembleCard.includes("<NSwitch") &&
+      assembleCard.includes('setForm("assembleMode"') &&
+      assembleCard.includes(
+        "规则档按来源去重、按分数精排、再按预算裁剪；模型档（合并重写）还没做。",
+      ),
+    assembleCard.slice(assembleCard.indexOf("<template>")),
+  );
+  check(
+    "组装页自己不反思请求（与其它子卡一样只调 store）",
+    ["post(", "fetch(", "createPanelStore"].every((needle) => assembleCard.includes(needle) === false),
+    assembleCard.slice(0, 1800),
+  );
+  check(
+    "这几处新写的代码里没有「重排」（链路那一步统一叫精排）",
+    [
+      fs.readFileSync(path.join(import.meta.dirname, "../src/memory/assemble.js"), "utf8"),
+      assembleCard,
+      uiCode("components/MemoryPanel.vue"),
+      uiCode("lib/memory-tabs.js"),
+      panelCss({ keepComments: true }),
+    ].every((code) => code.includes("重排") === false),
   );
 }
 // ================= 一屏高度链（样式只留这一节） =================
@@ -2897,14 +3280,48 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await ui.setForm("rerank", "off");
   }
   {
-    // 拆的是视图，不是提交：两张卡都只调 store 的动作，谁都不自己发请求。
-    const cards = ["components/RecallCard.vue", "components/RerankCard.vue"].map((name) =>
-      uiCode(name),
+    // 组装卡：开关落 recall-mode 那一单（与精排同一套整单提交），预算仍落 /controls。
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    const before = saves().length;
+    await ui.setForm("assembleMode", "off");
+    const body = saves().at(-1).body;
+    eq(
+      "改组装开关也是整单一单：带 assembleMode，同时带 recallGate / queryMode / rerank",
+      [
+        saves().length - before,
+        body.assembleMode,
+        body.rerank,
+        body.recallGate,
+        body.queryMode,
+        state.form.assembleMode,
+      ],
+      [1, "off", "off", "rules", "context", "off"],
     );
+    // 脏值在发出前归一化（服务端整单校验会直接 400）。
+    state.form.assembleMode = "bogus";
+    await ui.setForm("assembleMode", "bogus");
+    eq("assembleMode 的脏值发出前归一化回 rules", saves().at(-1).body.assembleMode, "rules");
+    await ui.setForm("assembleMode", "rules");
+
+    const controls = () => calls.filter((call) => call.method === "POST" && call.path === "/controls");
+    await ui.setControlsNumber("injectBudgetTokens", 3000);
+    eq(
+      "注入预算搬到组装页后仍走 /controls（换位置不换提交口）",
+      [controls().at(-1).body.injectBudgetTokens, state.controls.injectBudgetTokens],
+      [3000, 3000],
+    );
+  }
+  {
+    // 拆的是视图，不是提交：三张卡都只调 store 的动作，谁都不自己发请求。
+    const cards = [
+      "components/RecallCard.vue",
+      "components/RerankCard.vue",
+      "components/AssembleCard.vue",
+    ].map((name) => uiCode(name));
     const offenders = ["post(", "fetch(", "createPanelStore"].filter((needle) =>
       cards.some((code) => code.includes(needle)),
     );
-    eq("RecallCard / RerankCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
+    eq("RecallCard / RerankCard / AssembleCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
   }
 
   // ---- 记忆页子页签：切到精排改个值，切回召回，再切回精排，值还在 ----
@@ -3659,7 +4076,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- llm 的提示词与判断模型：归一化 + 整单收笔 ----
   eq(
-    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、精排配置、通道与打分服务",
+    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、精排与组装配置、通道与打分服务",
     [paintGateConfig({
       gatePrompt: "字".repeat(GATE_PROMPT_MAX + 10),
       gateModel: "  p1/m1  ",
@@ -3682,6 +4099,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankPrompt: "",
     rerankModel: "",
     rerankChannels: [],
+    assembleMode: "rules",
     rerankServiceUrl: "",
     rerankServiceModel: "",
     rerankServiceTimeoutMs: null,
@@ -4324,6 +4742,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     reason: "short-operation-command",
   });
 
+  // 组装那一步：回指表必须真的写进 probe.log，否则「refs 只进探针与日志」是空话。
+  await probe("recall/assemble", {
+    session,
+    query: "组装一下",
+    assemble: {
+      mode: "rules",
+      kept: 3,
+      refs: [
+        { index: 1, uri: "viking://user/default/peers/mbp-01/m/a.md", peer: "mbp-01", score: 0.9 },
+        { index: 2, uri: "", peer: "", score: null },
+      ],
+    },
+  });
+
   const lines = fs
     .readFileSync(path.join(dir, "probe.log"), "utf8")
     .trim()
@@ -4331,9 +4763,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .map((line) => JSON.parse(line));
 
   eq(
-    "四行记录 / 第一个事件名 / before-start 记了 prompt 长度 / 同一会话第二次计数为 2 / payload 里数出 messages / payload 顶层键 / gate 事件名 / gate 记了查询长度 / gate 记了查询头部 / gate 记了原因",
-    [lines.length, lines[0].event, lines[0].shape.promptChars, lines[2].count, lines[1].shape.messageCount, lines[1].shape.payloadKeys, lines[3].event, lines[3].shape.queryChars, lines[3].shape.queryHead, lines[3].shape.reason],
-    [4, "agent/before-start", 8, 2, 2, ["system", "messages"], "recall/gate-skip", 4, "运行测试", "short-operation-command"],
+    "五行记录 / 第一个事件名 / before-start 记了 prompt 长度 / 同一会话第二次计数为 2 / payload 里数出 messages / payload 顶层键 / gate 事件名 / gate 记了查询长度 / gate 记了查询头部 / gate 记了原因 / 组装事件名 / 组装记了 mode与目录数 / 回指表原样落盘",
+    [lines.length, lines[0].event, lines[0].shape.promptChars, lines[2].count, lines[1].shape.messageCount, lines[1].shape.payloadKeys, lines[3].event, lines[3].shape.queryChars, lines[3].shape.queryHead, lines[3].shape.reason, lines[4].event, [lines[4].shape.mode, lines[4].shape.kept, lines[4].shape.segments], lines[4].shape.refs],
+    [5, "agent/before-start", 8, 2, 2, ["system", "messages"], "recall/gate-skip", 4, "运行测试", "short-operation-command", "recall/assemble", ["rules", 3, 2], [{ index: 1, uri: "viking://user/default/peers/mbp-01/m/a.md", peer: "mbp-01", score: 0.9 }, { index: 2, uri: "", peer: "", score: null }]],
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -4924,6 +5356,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "gateFallback 不在枚举里（off）时整单被拒 400，零写入",
     [badFallback.status, store.gateFallback, writes.length],
     [400, "rules", 0],
+  );
+
+  // ---- 组装：一个两档枚举，GET 投影 + POST 整单校验 ----
+  eq("GET 没配过 assembleMode 时投影成 rules（默认开着）", defaults.body.assembleMode, "rules");
+  store.assembleMode = "bogus";
+  eq("GET 把存量非法 assembleMode 收敛成 rules", (await get()).body.assembleMode, "rules");
+  writes.length = 0;
+  const assembleSaved = await post({ assembleMode: "off" });
+  eq(
+    "assembleMode=off 能落库并回显 / applied 里带它",
+    [
+      assembleSaved.status,
+      store.assembleMode,
+      assembleSaved.body.assembleMode,
+      assembleSaved.body.applied.includes("assembleMode"),
+      writes.length,
+    ],
+    [200, "off", "off", true, 1],
+  );
+  writes.length = 0;
+  const badAssemble = await post({ assembleMode: "llm" });
+  eq(
+    "assembleMode=llm（没做的模型档）整单被拒 400，零写入",
+    [badAssemble.status, store.assembleMode, writes.length],
+    [400, "off", 0],
   );
 
   // ---- 召回门槛：一个字符串项，GET 投影 + POST 归一化后落库（存数字串，与超时同口径）----
@@ -8067,12 +8524,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 // ================= recall rerank: 纯函数 =================
 {
-  // ---- 候选条目：保留边界，extractRecallText 仍按旧规则拼回去 ----
-  eq(
-    "条目：rendered 视为单条 / 条目：空 rendered 让位给 digest（仍是单条） / 条目：entries 逐条保留并跳过空项 / 条目：字符串也是一条 / 条目：未知形状给空数组 / 条目：null 给空数组 / extractRecallText 语义未变（entries 用空行连接）",
-    [extractRecallItems({ rendered: "渲染块", digest: "摘要", entries: [{ text: "条目" }] }), extractRecallItems({ rendered: "  ", digest: "只有摘要", entries: [{ text: "条目" }] }), extractRecallItems({ entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }] }), extractRecallItems("  一段记忆  "), extractRecallItems({ total: 0 }), extractRecallItems(null), extractRecallText({ entries: [{ text: "甲" }, { text: "" }, { text: "乙" }] })],
-    [[{ text: "渲染块" }], [{ text: "只有摘要" }], [{ text: "第一条" }, { text: "第二条" }], [{ text: "一段记忆" }], [], [], "甲\n\n乙"],
-  );
+  // ---- 候选条目：保留边界（与元信息），extractRecallText 仍按旧规则拼回去 ----
+  {
+    const bare = { uri: "", score: null, time: "", peer: "" };
+    eq(
+      "条目：rendered 视为单条 / 条目：空 rendered 让位给 digest（仍是单条） / 条目：entries 逐条保留并跳过空项 / 条目：字符串也是一条 / 条目：未知形状给空数组 / 条目：null 给空数组 / 条目：没有元信息的形状降级成空值 / extractRecallText 语义未变（entries 用空行连接）",
+      [extractRecallItems({ rendered: "渲染块", digest: "摘要", entries: [{ text: "条目" }] }), extractRecallItems({ rendered: "  ", digest: "只有摘要", entries: [{ text: "条目" }] }), extractRecallItems({ entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }] }), extractRecallItems("  一段记忆  "), extractRecallItems({ total: 0 }), extractRecallItems(null), extractRecallText({ entries: [{ text: "甲" }, { text: "" }, { text: "乙" }] })],
+      [[{ text: "渲染块", ...bare }], [{ text: "只有摘要", ...bare }], [{ text: "第一条", ...bare }, { text: "第二条", ...bare }], [{ text: "一段记忆", ...bare }], [], [], "甲\n\n乙"],
+    );
+  }
 
   // ---- 渲染：两个占位符、缺 candidates、空模板 ----
   eq(
@@ -8183,16 +8643,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         req.messages[0].content.includes("1. 第一条") &&
         req.messages[0].content.includes("3. 第三条"),
     );
+    // 组装那一步另有一条 recall/assemble 探针，这里只看精排那一条。
+    const rerankProbes = probes.filter((probe) => probe.event === "recall/rerank");
     eq(
       "rerank 探针（一次 / 事件名 / 候选数 / 保留数 / 正常解析不算兜底 / 有耗时 / 模型通道 scoreScale=probability）",
       [
-        probes.length,
-        probes[0].event,
-        probes[0].invocation.candidates,
-        probes[0].invocation.kept,
-        probes[0].invocation.fallback,
-        typeof probes[0].invocation.elapsedMs === "number",
-        probes[0].invocation.channels[0].scoreScale,
+        rerankProbes.length,
+        rerankProbes[0].event,
+        rerankProbes[0].invocation.candidates,
+        rerankProbes[0].invocation.kept,
+        rerankProbes[0].invocation.fallback,
+        typeof rerankProbes[0].invocation.elapsedMs === "number",
+        rerankProbes[0].invocation.channels[0].scoreScale,
       ],
       [1, "recall/rerank", 3, 2, false, true, "probability"],
     );
@@ -8240,9 +8702,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       payload: { messages: [{ role: "user", content: "精排服务返回 logit" }] },
       session: { sessionId: "rerank-logit-probe" },
     });
+    const logitProbes = probes.filter((probe) => probe.event === "recall/rerank");
     eq(
       "rerank 探针记一次（logit） / 精排通道的探针 scoreScale 是 logit",
-      [probes.length, probes[0].invocation.channels[0].scoreScale],
+      [logitProbes.length, logitProbes[0].invocation.channels[0].scoreScale],
       [1, "logit"],
     );
   }

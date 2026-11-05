@@ -78,6 +78,7 @@ export const DEFAULTS = {
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
   rerank: "off",
+  assembleMode: "rules",
   rerankPrompt: "",
   rerankModel: "",
   rerankChannels: "",
@@ -118,6 +119,18 @@ export const QUERY_MODES = Object.freeze(["last", "context"]);
 
 /** 结果精排：off 原样注入，llm 按 rerankChannels 跑配置好的通道。 */
 export const RERANK_MODES = Object.freeze(["off", "llm"]);
+
+/**
+ * 组装：精排之后、拼成一段上下文之前的那一步。
+ *
+ *   off    原样拼，与加这一层之前逐字一致
+ *   rules  按来源去重、按分数精排，再交给 memoryBlock 按预算裁剪
+ *
+ * 只有两档。模型档（让模型合并重写这一段）还没做，所以不留空枚举值：
+ * 一个选了不生效的档位，比看不到这一档更难查。
+ * 认不出的值归一化回 rules：去重与精排不花时间，默认开着是纯收益。
+ */
+export const ASSEMBLE_MODES = Object.freeze(["off", "rules"]);
 
 /** 精排通道类型：OpenAI 兼容 rerank、llama.cpp systemone、宿主模型。 */
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
@@ -196,6 +209,10 @@ export function normalizeGateContext(raw) {
 
 export function normalizeRerank(raw) {
   return oneOf(raw, RERANK_MODES, DEFAULTS.rerank);
+}
+
+export function normalizeAssembleMode(raw) {
+  return oneOf(raw, ASSEMBLE_MODES, DEFAULTS.assembleMode);
 }
 
 /** 提示词按字符截断，不把代理对切成两半。空串表示“没有提示词，不拦截”。 */
@@ -578,6 +595,7 @@ export async function readSwitches(sdk) {
     gateDecisionThreshold: normalizeGateDecisionThreshold(await read(sdk, "gateDecisionThreshold")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
     rerank: normalizeRerank(await read(sdk, "rerank")),
+    assembleMode: normalizeAssembleMode(await read(sdk, "assembleMode")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
     rerankModel: normalizeRerankModel(await read(sdk, "rerankModel")),
     rerankChannels: parseRerankChannels(await read(sdk, "rerankChannels"), (message) => {
