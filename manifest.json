@@ -348,8 +348,8 @@
           "probe": {
             "type": "boolean",
             "title": "探针日志",
-            "description": "把钩子的调用频率与载荷形状写进 probe.log。装上先开一天。",
-            "default": false
+            "description": "把钩子的调用频率与载荷形状写进 probe.log，面板的日志页读的就是它。关掉之后日志页会一直是空的。",
+            "default": true
           }
         }
       }

@@ -181,7 +181,7 @@ export function createPanelStore(deps = {}) {
     // GET /controls 的镜像。enabled 是三页置灰的唯一依据。
     controls: {
       enabled: false,
-      probe: false,
+      probe: true,
       skillRouting: false,
       requestTimeoutMs: null,
       injectBudgetTokens: null,

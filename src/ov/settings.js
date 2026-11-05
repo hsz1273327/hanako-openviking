@@ -65,7 +65,7 @@ export const DEFAULTS = {
   requestTimeoutMs: 1500,
   injectBudgetTokens: 2500,
   skillRouting: true,
-  probe: false,
+  probe: true,
   excludedPeers: "",
   recallGate: "off",
   gateFallback: "recall",
