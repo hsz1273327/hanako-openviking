@@ -11,7 +11,7 @@ import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { normalizeReady } from "./src/ov/ready.js";
-import { createRuntimeTransport, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
+import { activateRuntime, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
 import {
   agentDirFromSessionPath,
   peerForSession,
@@ -26,8 +26,15 @@ export const name = "hanako-openviking";
 
 const DEFAULT_RUNTIME_PORT = 47821;
 
+// 重启只试一次：降级之后可以回头拉一把，但不能变成每轮都去捅一个死服务。
+let restartAttempted = false;
+
 /**
  * 起受管运行时（native + external network），并把它的 sendJson 记成进程级出口。
+ *
+ * 拿到 runtimeId 不等于服务活着：宿主可能先把 id 交出来，进程却没起、端口也没监听。
+ * 所以这里必须再探一次 /health，探不通就不设 send（transportFor 自然走直连），
+ * 否则 transportFor 只看「send 是不是函数」，一条死路会被当成出口用到底。
  *
  * 失败不阻断装载：记一条 warning，退回 ctx.network.fetch（受 manifest 白名单）。
  * /status 的 transport 字段据此显示 runtime / direct / down。
@@ -55,20 +62,66 @@ async function startManagedRuntime(sdk) {
       throw new Error("runtime.start 没有返回 runtimeId");
     }
 
-    const transport = createRuntimeTransport({
-      runtimeFetch: sdk.runtime.fetch.bind(sdk.runtime),
+    const runtimeFetch = sdk.runtime.fetch.bind(sdk.runtime);
+    // 探活走宿主自己的 runtime.fetch：它只放行「已注册且 ready」的服务，
+    // 所以这一发能不能成，就是宿主眼里这个 runtime 到底活不活。
+    // 超时用 transport 里那一档探活预算（单次 300ms × 最多 3 次，最坏约 1.1s），
+    // 不要拿请求的 1500ms：一个已经卡死的宿主要把这 1500ms 乘三遍，装载就被拖成好几秒。
+    // 请求中撞上「服务没 ready」时：降级由 transport 自己完成，
+    // 这里趁机在后台重启一次；失败就维持直连，不再重试。
+    const out = await activateRuntime({
+      runtimeFetch,
       runtimeId,
       token,
-      timeoutMs: 1500,
+      port,
       logger: sdk.logger,
+      onNotReady: (detail) => scheduleRuntimeRestart(sdk, runtimeId, detail),
     });
-    setRuntimeTransport({ send: transport.sendJson, runtimeId, port, error: null });
+    // 探活失败已经在 activateRuntime 里 warn 过一条（带 runtimeId / port），
+    // 这里不再重复同一句话。
+    if (!out.ok) return out;
     sdk.logger.info(`openviking runtime ready (runtimeId=${runtimeId}, port=${port})`);
+    return { ok: true, runtimeId, port };
   } catch (error) {
     const message = String(error?.message || error);
     setRuntimeTransport({ send: null, runtimeId: null, port, error: message });
     sdk.logger.warn(`openviking runtime unavailable, falling back to ctx.network: ${message}`);
+    return { ok: false, error: message };
   }
+}
+
+/**
+ * 降级后的后台重启：最多一次，全程在后台，不挡住当前这一轮请求。
+ *
+ * 旧 runtime 可能还占着端口 / 服务名（服务没 ready，进程却未必已经退出）。
+ * 不先 stop 就直接 start，新进程大概率 EADDRINUSE，这次重启就白试了——
+ * 所以这里先尽力停一次，停不掉也继续起（失败会落在探活上，维持直连）。
+ */
+function scheduleRuntimeRestart(sdk, runtimeId, reason) {
+  if (restartAttempted) return;
+  restartAttempted = true;
+  sdk.logger.warn(`openviking runtime demoted to direct, retrying startup once: ${reason}`);
+  Promise.resolve()
+    .then(async () => {
+      if (runtimeId && typeof sdk.runtime?.stop === "function") {
+        try {
+          await sdk.runtime.stop(runtimeId);
+        } catch (error) {
+          sdk.logger.warn(`openviking runtime stop before restart failed: ${error?.message || error}`);
+        }
+      }
+      return startManagedRuntime(sdk);
+    })
+    .then((out) => {
+      // 成功时 startManagedRuntime 已经报过 ready；失败时 activateRuntime 也报过一次，
+      // 这里只在“重启这一件事本身失败”时补一句，明确说清留在直连。
+      if (!out?.ok) {
+        sdk.logger.warn(`openviking runtime restart failed, staying on ctx.network: ${out?.error}`);
+      }
+    })
+    .catch((error) => {
+      sdk.logger.warn(`openviking runtime restart threw: ${error?.message || error}`);
+    });
 }
 
 export default defineApp(async (sdk) => {

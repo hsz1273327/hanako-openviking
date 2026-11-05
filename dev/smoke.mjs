@@ -5,12 +5,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "../src/ov/client.js";
 import {
+  activateRuntime,
   createRuntimeTransport,
+  PROBE_ATTEMPTS,
+  PROBE_INTERVAL_MS,
+  PROBE_TIMEOUT_MS,
+  probeRuntime,
+  RUNTIME_HEALTH_PATH,
   resetRuntimeTransport,
+  runtimeTransportState,
   setRuntimeTransport,
   transportFor,
 } from "../src/ov/transport.js";
-import { normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
+import { HEALTH_PATH, normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
 import registerStatusRoutes from "../routes/status.js";
 import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
@@ -862,7 +869,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   } catch (error) {
     caught = error;
   }
-  eq("桥本身失败时保留宿主 code", caught?.code, "APP_RUNTIME_NOT_READY");
+  eq(
+    "桥本身失败时归一到 RUNTIME_NOT_READY（宿主 code 留在 hostCode 上）",
+    [caught?.code, caught?.hostCode],
+    ["RUNTIME_NOT_READY", "APP_RUNTIME_NOT_READY"],
+  );
 
   const timeout = async () =>
     new Response(JSON.stringify({ error: { code: "TIMEOUT", message: "too slow" } }), {
@@ -878,6 +889,247 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     caught = error;
   }
   eq("代理超时的 code", caught?.code, "TIMEOUT");
+}
+
+{
+  // ---- 启动探活：runtimeId 回来了不等于服务活着（本次卡死全链的根因）----
+  // 只认 runtimeId 时，一个进程不在、端口不监听的 runtime 也会把 send 设上，
+  // transportFor 就再也轮不到 ctx.network。下面两半验证“探活失败就不设 send”。
+  const notReady = () => {
+    const error = new Error('Managed runtime "rt-dead" does not have a ready service.');
+    error.code = "APP_RUNTIME_NOT_READY";
+    return error;
+  };
+  const reachable = { network: { fetch: async () => new Response("{}", { status: 200 }) } };
+
+  eq(
+    "探活路径两侧一致：service 提供的 /health 就是 transport 探的那个",
+    [HEALTH_PATH, RUNTIME_HEALTH_PATH],
+    ["/health", "/health"],
+  );
+  check(
+    "探活总预算在 1 秒量级（否则一个卡死的宿主要把 App 装载拖成好几秒）",
+    PROBE_TIMEOUT_MS * PROBE_ATTEMPTS + PROBE_INTERVAL_MS * (PROBE_ATTEMPTS - 1) <= 1500,
+    `${PROBE_TIMEOUT_MS} × ${PROBE_ATTEMPTS} + ${PROBE_INTERVAL_MS} × ${PROBE_ATTEMPTS - 1}`,
+  );
+
+  // init.timeoutMs 只是“请宿主超时”，不保证宿主一定兑现。
+  // 本地再加一层硬上限，保证一条永不回话的探测不会把装载挂住。
+  const hungStarted = Date.now();
+  const hung = await probeRuntime({
+    runtimeFetch: () => new Promise(() => {}),
+    runtimeId: "rt-hung",
+    token: "tk-test",
+    timeoutMs: 40,
+    attempts: 2,
+    intervalMs: 10,
+  });
+  const hungElapsed = Date.now() - hungStarted;
+  eq(
+    "宿主不兑现 timeoutMs 时，探活仍按预算返回（硬上限生效）",
+    [hung.ok, typeof hung.error === "string" && hung.error.length > 0, hungElapsed < 500],
+    [false, true, true],
+  );
+
+  resetRuntimeTransport();
+  const probeCalls = [];
+  const warnings = [];
+  const failed = await activateRuntime({
+    runtimeFetch: async (runtimeId, pathname, init) => {
+      probeCalls.push({ runtimeId, pathname, init });
+      throw notReady();
+    },
+    runtimeId: "rt-dead",
+    token: "tk-test",
+    port: 47821,
+    logger: { warn: (message) => warnings.push(message) },
+  });
+  const deadState = runtimeTransportState();
+  const firstProbe = probeCalls[0] || {};
+  eq(
+    "探活失败：不设 send、出口是 direct、状态里留着原因、探的是 GET /health",
+    [
+      failed.ok,
+      deadState.send,
+      transportFor(reachable).mode,
+      typeof deadState.error === "string" && deadState.error.length > 0,
+      [probeCalls.length > 0, firstProbe.runtimeId, firstProbe.pathname, firstProbe.init?.method],
+    ],
+    [false, null, "direct", true, [true, "rt-dead", "/health", "GET"]],
+  );
+  check(
+    "降级要 warn 一条，且日志不带 token",
+    warnings.length === 1 && !warnings.join(" ").includes("tk-test"),
+    warnings.join(" | "),
+  );
+
+  resetRuntimeTransport();
+  const alive = mockRuntimeFetch();
+  const live = await activateRuntime({
+    runtimeFetch: alive.runtimeFetch,
+    runtimeId: "rt-live",
+    token: "tk-test",
+    port: 47821,
+  });
+  const liveState = runtimeTransportState();
+  eq(
+    "探活成功：照旧走托管 runtime，状态清空",
+    [live.ok, transportFor(reachable).mode, typeof liveState.send, liveState.error, liveState.runtimeId],
+    [true, "runtime", "function", null, "rt-live"],
+  );
+
+  // ---- 请求中撞到 NOT_READY：这一次失败，但不能让后面每一轮都陪葬 ----
+  resetRuntimeTransport();
+  const restarts = [];
+  const broken = createRuntimeTransport({
+    runtimeFetch: async () => {
+      throw notReady();
+    },
+    runtimeId: "rt-dead",
+    token: "tk-test",
+    onNotReady: (detail) => restarts.push(detail),
+  });
+  setRuntimeTransport({ send: broken.sendJson, runtimeId: "rt-dead", port: 47821, error: null });
+  let firstFailure = null;
+  try {
+    await broken.sendJson("http://h:1/api/v1/search/search", { method: "POST" });
+  } catch (error) {
+    firstFailure = error;
+  }
+  eq(
+    "请求中撞到 NOT_READY：抛 RUNTIME_NOT_READY、下一次自动走直连、状态里留着原因、后台只重启一次",
+    [firstFailure?.code, transportFor(reachable).mode, Boolean(runtimeTransportState().error), restarts.length],
+    ["RUNTIME_NOT_READY", "direct", true, 1],
+  );
+  let secondFailure = null;
+  try {
+    await broken.sendJson("http://h:1/api/v1/search/search", { method: "POST" });
+  } catch (error) {
+    secondFailure = error;
+  }
+  eq(
+    "同一条死链路再失败：不重复重启、也不被悄悄换回 runtime",
+    [secondFailure?.code, restarts.length, transportFor(reachable).mode],
+    ["RUNTIME_NOT_READY", 1, "direct"],
+  );
+
+  // 旧链路失败时，后台重启可能已经带着新出口上任了。
+  // 这时不能把新出口拆掉，更不能为一条旧链路去重启一个健康的 runtime。
+  resetRuntimeTransport();
+  const staleRestarts = [];
+  const stale = createRuntimeTransport({
+    runtimeFetch: async () => {
+      throw notReady();
+    },
+    runtimeId: "rt-old",
+    token: "tk-test",
+    onNotReady: (detail) => staleRestarts.push(detail),
+  });
+  setRuntimeTransport({
+    send: async () => ({ status: 200, ok: true, data: {} }),
+    runtimeId: "rt-new",
+    port: 47821,
+    error: null,
+  });
+  let staleFailure = null;
+  try {
+    await stale.sendJson("http://h:1/api/v1/search/search", { method: "POST" });
+  } catch (error) {
+    staleFailure = error;
+  }
+  eq(
+    "旧链路失败不去拆已上任的新出口，也不再触发重启",
+    [
+      staleFailure?.code,
+      transportFor(reachable).mode,
+      runtimeTransportState().runtimeId,
+      staleRestarts.length,
+    ],
+    ["RUNTIME_NOT_READY", "runtime", "rt-new", 0],
+  );
+
+  resetRuntimeTransport();
+  const proxySaysNotReady = async () =>
+    new Response(JSON.stringify({ error: { code: "APP_RUNTIME_NOT_READY", message: "服务未 ready" } }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+  let payloadCaught = null;
+  try {
+    await createRuntimeTransport({
+      runtimeFetch: proxySaysNotReady,
+      runtimeId: "rt-1",
+      token: "tk-test",
+    }).sendJson("http://h:1/health", {});
+  } catch (error) {
+    payloadCaught = error;
+  }
+  eq("代理自己在响应体里报 NOT_READY 也归一到 RUNTIME_NOT_READY", payloadCaught?.code, "RUNTIME_NOT_READY");
+
+  eq(
+    "错误分类：托管服务没 ready → runtime / 真网络错 → network / 超时 → timeout（宿主原始 code 也认）",
+    [
+      recallErrorKind(
+        Object.assign(
+          new Error(
+            'RUNTIME_NOT_READY: managed runtime bridge: Managed runtime "x" does not have a ready service.',
+          ),
+          { code: "RUNTIME_NOT_READY" },
+        ),
+      ),
+      recallErrorKind(Object.assign(new Error("fetch failed"), { code: "ECONNREFUSED" })),
+      recallErrorKind(Object.assign(new Error("TIMEOUT 5000ms"), { code: "TIMEOUT" })),
+      recallErrorKind(Object.assign(new Error("bridge failed"), { code: "APP_RUNTIME_NOT_READY" })),
+      // 显式 code 比 message 里的关键词可信：宿主给的就是 RUNTIME_NOT_READY。
+      recallErrorKind(
+        Object.assign(new Error("TIMEOUT while waiting for a ready service"), {
+          code: "RUNTIME_NOT_READY",
+        }),
+      ),
+    ],
+    ["runtime", "network", "timeout", "runtime", "runtime"],
+  );
+
+  // ---- 直连路径：降级之后它才是真正在干活的那条，得能完整发出去 ----
+  resetRuntimeTransport();
+  const { calls: directCalls, fetchImpl } = mockFetch({
+    body: { status: "ok", result: { rendered: "一条记忆" } },
+  });
+  const direct = transportFor({ network: { fetch: fetchImpl } });
+  const directClient = createClient({
+    serverUrl: "http://hub:8000/",
+    apiKey: "k-direct",
+    peer: "mbp-hanako",
+    timeoutMs: 1500,
+    ...direct,
+  });
+  const directResult = await directClient.recall("昨天那件事", {
+    peerScope: "self",
+    maxTokens: 800,
+    timeoutMs: 5000,
+  });
+  const directBody = JSON.parse(directCalls[0].init.body);
+  eq(
+    "直连路径能完整发一次召回：URL / method / API Key 头 / 请求体字段都对",
+    [
+      direct.mode,
+      directResult,
+      directCalls.length,
+      directCalls[0].url,
+      directCalls[0].init.method,
+      directCalls[0].init.headers["X-API-Key"],
+      [directBody.query, directBody.peer_scope, directBody.max_tokens, directBody.mode],
+    ],
+    [
+      "direct",
+      { rendered: "一条记忆" },
+      1,
+      "http://hub:8000/api/v1/search/search",
+      "POST",
+      "k-direct",
+      ["昨天那件事", "actor", 800, "context"],
+    ],
+  );
 }
 
 {
@@ -936,7 +1188,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   setRuntimeTransport({ send: async () => ({ status: 200, ok: true, data: {} }), token: "tk-test", runtimeId: "rt-9" });
   const viaRuntime = await invoke();
-  eq("运行时就绪时 /status 报 runtime", viaRuntime.body.transport, "runtime");
+  eq(
+    "运行时就绪时 /status 报 runtime，且不挂降级原因（旧 reason 不该混进当前口）",
+    [viaRuntime.body.transport, viaRuntime.body.transportError],
+    ["runtime", null],
+  );
+
+  // 降级：出口回到直连，但原因要留在 /status 里，面板才分得清“服务死了”与“网络不通”。
+  resetRuntimeTransport();
+  setRuntimeTransport({
+    send: null,
+    runtimeId: "rt-9",
+    port: 47821,
+    error: "APP_RUNTIME_NOT_READY: does not have a ready service",
+  });
+  const degradedStatus = await invoke();
+  eq(
+    "托管不可用时 /status 报 direct 并把原因带出去",
+    [degradedStatus.body.transport, degradedStatus.body.transportError],
+    ["direct", "APP_RUNTIME_NOT_READY: does not have a ready service"],
+  );
 
   resetRuntimeTransport();
   const down = await invoke();
@@ -3147,9 +3418,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 这些是从已删除的手写面板里搬出来的字符串 / 档位逻辑（lib/panel-view.js）。
   // 组件不再各自拼一遍文案，所以它们必须能单独验。
   eq(
-    "出口念法（受管代理 / 直连 / 其它一律不可用） / 版本号念法（带 v 原样、不带 v 补一个且不出现 vv、空就不编） / 圆点与 key 占位文案",
+    "出口念法（托管 runtime / 直连 / 其它一律不可用） / 版本号念法（带 v 原样、不带 v 补一个且不出现 vv、空就不编） / 圆点与 key 占位文案",
     [["runtime", "direct", "down"].map((mode) => transportTextOf(mode)), [versionTextOf("v0.4.16"), versionTextOf("0.4.16"), versionTextOf("")], [dotClassOf("ok"), dotClassOf("down"), dotClassOf("idle"), apiKeyPlaceholder(false), apiKeyPlaceholder(true)]],
-    [["受管代理", "直连（仅白名单）", "不可用"], ["v0.4.16", "v0.4.16", ""], ["dot ok", "dot down", "dot idle", "未填写", "已填写（留空表示不改）"]],
+    [["托管 runtime", "直连", "不可用"], ["v0.4.16", "v0.4.16", ""], ["dot ok", "dot down", "dot idle", "未填写", "已填写（留空表示不改）"]],
   );
 
   const okStatus = {
@@ -3165,7 +3436,46 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "已连接：药丸绿、副标题是「出口 · 版本 · 往返」、往返与版本单独成格、检查项从 ready.checks 取",
     [view.pillText, view.pillTone, view.subLine, view.latency, view.version, view.checks.length],
-    ["已连接", "ok", "受管代理 · v0.4.16 · 42 ms", "42 ms", "v0.4.16", 1],
+    ["已连接", "ok", "托管 runtime · v0.4.16 · 42 ms", "42 ms", "v0.4.16", 1],
+  );
+  // 降级到直连：副标题必须说清是直连、托管那边没就绪；原因原文单独一行，
+  // 不能被直连自己的连接错误盖掉。
+  const degraded = statusView(
+    { ...okStatus, transport: "direct", transportError: "APP_RUNTIME_NOT_READY: 服务未 ready" },
+    17,
+  );
+  eq(
+    "走直连时副标题带「直连 · 托管 runtime 未就绪」，降级原因单独成行",
+    [degraded.transport, degraded.subLine, degraded.transportNote, degraded.error],
+    [
+      "直连",
+      "直连 · 托管 runtime 未就绪 · v0.4.16 · 17 ms",
+      "托管 runtime 不可用：APP_RUNTIME_NOT_READY: 服务未 ready",
+      "",
+    ],
+  );
+  const degradedDown = statusView(
+    {
+      ...okStatus,
+      transport: "direct",
+      reach: "down",
+      error: "ECONNREFUSED",
+      transportError: "APP_RUNTIME_NOT_READY: 服务未 ready",
+    },
+    null,
+  );
+  eq(
+    "直连也失败时，网络错与「托管不可用」两件事都保留",
+    [degradedDown.error, degradedDown.transportNote],
+    ["ECONNREFUSED", "托管 runtime 不可用：APP_RUNTIME_NOT_READY: 服务未 ready"],
+  );
+  eq(
+    "走托管时不带降级那句（状态里就算留着上次的旧原因也不显示）",
+    [
+      statusView({ ...okStatus, transport: "runtime", transportError: "旧原因" }, 42).subLine,
+      statusView({ ...okStatus, transport: "runtime", transportError: "旧原因" }, 42).transportNote,
+    ],
+    ["托管 runtime · v0.4.16 · 42 ms", ""],
   );
   check("总闸开着时说明是「已开启」且不标红", view.masterHint === MASTER_HINT_ON && view.masterHintWarn === false);
   const offView = statusView({ ...okStatus, enabled: false }, 42);
@@ -12127,6 +12437,56 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         !JSON.stringify(broken.rows[0]).includes("ECONNREFUSED"),
       JSON.stringify(broken.rows[0]),
     );
+  }
+
+  // ---- 9b. 托管运行时没 ready：归到 runtime 而不是 network，降级后下一轮照常召回 ----
+  {
+    try {
+      // 用真的 createRuntimeTransport：撞到 NOT_READY 就自己把出口切成直连是它的行为，
+      // 换成 mock 的 send 就看不到降级了。
+      const notReady = async () => {
+        const error = new Error('Managed runtime "ov" does not have a ready service.');
+        error.code = "APP_RUNTIME_NOT_READY";
+        throw error;
+      };
+      setRuntimeTransport({
+        send: createRuntimeTransport({
+          runtimeFetch: notReady,
+          token: "tk-test",
+          runtimeId: "rt-result",
+        }).sendJson,
+        runtimeId: "rt-result",
+      });
+
+      const runtimeFailed = await run({ sessionId: "result-runtime", entries: entriesOf("甲") });
+      eq(
+        "运行时没 ready 那一轮：error=runtime（不是 network）、召回 0、本轮不返回 payload",
+        [
+          runtimeFailed.rows[0]?.error,
+          runtimeFailed.rows[0]?.error === "network",
+          runtimeFailed.rows[0]?.recalled,
+          runtimeFailed.result,
+        ],
+        ["runtime", false, 0, undefined],
+      );
+
+      // 上一轮已经证明了服务是死的，send 被切成 null：这一轮必须自己走回 ctx.network。
+      const recovered = await run({
+        sessionId: "result-runtime-recovered",
+        entries: entriesOf("甲", "乙"),
+      });
+      eq(
+        "撞过 NOT_READY 之后出口自动降级：下一轮记录里不带 error 字段、召回数照旧、出口是 direct",
+        [
+          Object.hasOwn(recovered.rows[0], "error"),
+          recovered.rows[0]?.recalled,
+          transportFor({ network: { fetch: async () => {} } }).mode,
+        ],
+        [false, 2, "direct"],
+      );
+    } finally {
+      resetRuntimeTransport();
+    }
   }
 
   // ---- 10. 召回用自己那一档超时，精排那三个超时不动 ----

@@ -11,13 +11,16 @@ import { RERANK_LANE_LABELS } from "./recall-layers.js";
 
 /* ---------------- 顶部身份条 ---------------- */
 
-// 出口的三种模式：受管代理 / ctx.network 直连 / 两条都不可用。
+// 出口的三种模式：托管 runtime / ctx.network 直连 / 两条都不可用。
 export const TRANSPORT_TEXT = Object.freeze({
-  runtime: "受管代理",
-  direct: "直连（仅白名单）",
+  runtime: "托管 runtime",
+  direct: "直连",
 });
 
 export const TRANSPORT_UNAVAILABLE = "不可用";
+
+/** 没走托管时，副标题里固定挂上这句；具体原因进 error 行。 */
+export const TRANSPORT_DEGRADED = "托管 runtime 未就绪";
 
 export function transportTextOf(transport) {
   return TRANSPORT_TEXT[transport] || TRANSPORT_UNAVAILABLE;
@@ -58,6 +61,8 @@ export function statusView(data, latencyMs, readError = "") {
       latency: "—",
       version: "—",
       transport: TRANSPORT_UNAVAILABLE,
+      transportError: "",
+      transportNote: "",
       serverUrl: typeof source.serverUrl === "string" ? source.serverUrl : "",
       apiKeySet: Boolean(source.apiKeySet),
       apiKeyPlaceholder: apiKeyPlaceholder(source.apiKeySet),
@@ -69,6 +74,12 @@ export function statusView(data, latencyMs, readError = "") {
 
   const reach = source.reach || "idle";
   const transport = transportTextOf(source.transport);
+  // /status 在没走托管时给出原因（探活失败 / 请求中撞上 NOT_READY）。
+  // 副标题只说「降级」，原因原文放到 error 行——那里才是放全文的地方。
+  const transportError =
+    source.transport === "runtime" || typeof source.transportError !== "string"
+      ? ""
+      : source.transportError.trim();
   const version = versionTextOf(source.health?.version);
   const hasLatency = reach === "ok" && latencyMs != null;
 
@@ -85,10 +96,14 @@ export function statusView(data, latencyMs, readError = "") {
   }
 
   const bits = [transport];
+  if (transportError) bits.push(TRANSPORT_DEGRADED);
   if (version) bits.push(version);
   if (hasLatency) bits.push(`${latencyMs} ms`);
 
+  // 服务端已经给了 error（连不上 / 就绪检查不过）就用它的；
+  // 「托管为什么不可用」单独一行，不能因为直连也报错就把它盖掉。
   const error = source.error || source.readyError || "";
+  const transportNote = transportError ? `托管 runtime 不可用：${transportError}` : "";
 
   return {
     reach,
@@ -101,6 +116,8 @@ export function statusView(data, latencyMs, readError = "") {
     latency: hasLatency ? `${latencyMs} ms` : "—",
     version: version || "—",
     transport,
+    transportError,
+    transportNote,
     serverUrl: typeof source.serverUrl === "string" ? source.serverUrl : "",
     apiKeySet: Boolean(source.apiKeySet),
     apiKeyPlaceholder: apiKeyPlaceholder(source.apiKeySet),

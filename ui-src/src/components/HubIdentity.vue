@@ -205,6 +205,13 @@ const noteDepth = computed(() => (state.note.bad ? undefined : 3));
       </NList>
 
       <NText id="reachError" class="hint-line err" type="error" :hidden="!view.error">{{ view.error }}</NText>
+      <!-- 托管 runtime 为什么不可用：与连接错误分开一行，直连也失败时不互相盖掉。 -->
+      <NText
+        id="transportError"
+        class="hint-line"
+        type="warning"
+        :hidden="!view.transportNote"
+      >{{ view.transportNote }}</NText>
       <NText id="saveHint" class="hint-line save-hint" :type="noteType" :depth="noteDepth">{{ state.note.text }}</NText>
     </NCard>
 

@@ -55,19 +55,27 @@ export const GATE_MAX_CHARS = 8;
 /**
  * 请求失败只归一个类别，不抄原文、不抄地址。
  *
- * 两类够了：超时（请求发出去了，服务端没在预算内答完）与其它（连不上、代理挂了、
- * 服务端报错）。这两类的处置完全相反——超时就该放宽 recallTimeoutMs 或缩短 queryChars，
- * 其它该去查地址与 key——所以先分清它们，再看别的。
- * 判据只看 code 与 message 的关键词：宿主 / 代理 / fetch 三层的超时都是这套写法。
+ * 三类的处置完全不同：
+ *   timeout —— 请求发出去了，服务端没在预算内答完：放宽 recallTimeoutMs 或缩短查询；
+ *   runtime —— 托管运行时的服务没起来（APP_RUNTIME_NOT_READY）：去查 runtime 本身，
+ *              不是网络的事，也不该去改地址与 key；
+ *   network —— 其余（连不上、代理挂了、服务端报错）：去查地址与 key。
+ *
+ * runtime 必须单列：降级到直连之后仍然每轮失败，日志里全写 network 就找不到真因。
+ * 判据只看 code 与 message 的关键词：宿主 / 代理 / fetch 三层的写法都在下面两个正则里。
  */
 const TIMEOUT_HINTS = /timeout|timed out|etimedout|esockettimedout|aborted/i;
+const RUNTIME_HINTS = /APP_RUNTIME_NOT_READY|RUNTIME_NOT_READY|does not have a ready service|runtime (?:is )?not ready/i;
 
 export function recallErrorKind(error) {
   const code = String(error?.code || "").toUpperCase();
+  // 显式 code 优先于 message 关键词：一个错误可能两样都像，但 code 是宿主 / 代理的定性。
+  if (RUNTIME_HINTS.test(code)) return "runtime";
   if (code.includes("TIMEOUT")) return "timeout";
   const name = String(error?.name || "");
   if (name === "TimeoutError") return "timeout";
   const message = String(error?.message || error || "");
+  if (RUNTIME_HINTS.test(message)) return "runtime";
   if (TIMEOUT_HINTS.test(message)) return "timeout";
   return "network";
 }

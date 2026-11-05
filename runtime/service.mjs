@@ -11,8 +11,12 @@
 //   { url, method, headers, body, timeoutMs, maxBytes }
 //   -> 200 { status, headers, body }
 //   -> 4xx/5xx { error: { code: TIMEOUT | NETWORK | TOO_LARGE | BAD_REQUEST, message } }
+//   GET /health
+//   -> 200 { ok: true, ready: true }
 //
 // 只做转发，不记日志、不落盘、不碰 API Key。
+// /health 是启动后探活用的：宿主可能先把 runtimeId 交出来、服务却还没应，
+// 光看 runtimeId 会把一条死路当成出口（见 src/ov/transport.js 的 probeRuntime）。
 
 import http from "node:http";
 import https from "node:https";
@@ -20,6 +24,7 @@ import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 export const READY_MARKER = "APP_READY";
+export const HEALTH_PATH = "/health";
 export const DEFAULT_PORT = 47821;
 export const DEFAULT_TIMEOUT_MS = 1500;
 export const MAX_TIMEOUT_MS = 30000;
@@ -254,8 +259,13 @@ function respond(res, status, payload) {
 
 async function handleFetch(req, res, options) {
   const pathname = String(req.url || "").split("?")[0];
+  // 探活：只证明这个进程还在应答，不碰上游、不看 token、不回任何可用的信息。
+  if (req.method === "GET" && pathname === HEALTH_PATH) {
+    respond(res, 200, { ok: true, ready: true });
+    return;
+  }
   if (req.method !== "POST" || pathname !== "/fetch") {
-    respond(res, 404, { error: { code: "BAD_REQUEST", message: "只接受 POST /fetch" } });
+    respond(res, 404, { error: { code: "BAD_REQUEST", message: "只接受 POST /fetch 与 GET /health" } });
     return;
   }
   if (!tokenMatches(req.headers["x-ov-token"], options.token)) {

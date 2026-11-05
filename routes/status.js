@@ -10,7 +10,7 @@ import path from "node:path";
 import { readConnection, readSwitches } from "../src/ov/settings.js";
 import { describePeer } from "../src/ov/identity.js";
 import { createClient } from "../src/ov/client.js";
-import { transportFor } from "../src/ov/transport.js";
+import { runtimeTransportState, transportFor } from "../src/ov/transport.js";
 import { readSession, sessionKeyOf } from "../src/state/session.js";
 // checks 的归一化与工具（index.js 的 openviking_status）共用同一份实现，
 // 否则同一份 /ready 在两个消费者眼里会长成两种形状。
@@ -56,6 +56,12 @@ export default function registerStatusRoutes(app, ctx) {
     const conn = await readConnection(ctx);
     const probeLines = readTail(path.join(dir, "probe.log"));
     const transport = transportFor(ctx);
+    // 出口现在走哪条路，以及托管运行时为什么不在。两者必须分开给：
+    // 只看「连不上」分不清是网络错还是托管服务死了。
+    // 正在走托管时不带这个原因（那头可能是上一次降级留下的旧话）。
+    const exitState = runtimeTransportState();
+    const transportError =
+      transport.mode === "runtime" ? null : exitState.error || null;
 
     // 面板可以带上当前会话，就能说准这一段属于哪个助手。
     // 不带会话时，只有 mergeMemory 能单独给出身份；拿不到就给 null，
@@ -87,6 +93,8 @@ export default function registerStatusRoutes(app, ctx) {
       probeLog: summarizeLog(probeLines),
       // 当前出口：runtime（受管代理）/ direct（ctx.network）/ down（两条都不可用）。
       transport: transport.mode,
+      // 没走托管时的原因（探活失败 / 请求中撞上 NOT_READY / 宿主没给 runtime API）。
+      transportError,
       // peer 是会话级的：这一段对话属于哪个助手，就用哪个门牌。
       // 没有身份时是 null：服务端会看到“未绑定”，界面也有话可说。
       peer: described.peer,
@@ -100,6 +108,8 @@ export default function registerStatusRoutes(app, ctx) {
     }
 
     if (transport.mode === "down") {
+      // 不把 transportError 拼进 error：面板会单独把“托管为什么不可用”显示一行，
+      // 两句拼在一起只是同一件事说两遍。
       return c.json(
         { ...report, reach: "down", health: null, ready: null, error: "没有可用的网络出口" },
         200,
