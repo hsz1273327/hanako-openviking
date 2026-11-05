@@ -14,7 +14,7 @@
 // 余量归候选池卡）。展开区里提示词与模型两格 NGrid :cols="2"（700px 以下一列），
 // 通道列表在 ChannelList.vue。
 import { computed } from "vue";
-import { NButton, NCard, NGrid, NGridItem, NInput, NSelect } from "naive-ui";
+import { NButton, NCard, NGrid, NGridItem, NInput, NSelect, NSwitch } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import ChannelList from "./ChannelList.vue";
@@ -29,13 +29,7 @@ const rerankStatus = computed(() => rerankPromptStatus());
 // 兜底模型下拉的选项：默认（宿主辅助模型）+ 目录；目录读不到也保留默认项。
 const rerankModelOptions = computed(() => options(state.form.rerankModel));
 
-// 固定下拉的选项表：n-select 只认 { label, value }，文案与手写版逐字一致。
-const RERANK_OPTIONS = Object.freeze([
-  { label: "关", value: "off" },
-  { label: "开启", value: "llm" },
-]);
-
-// 下拉改了就整单提交（setForm → saveLayers）。
+// 开关改了就整单提交（setForm → saveLayers）。
 function onSelect(key, value) {
   setForm(key, value);
 }
@@ -60,19 +54,18 @@ function onPromptChange(which, value) {
     content-style="padding: 16px"
   >
     <!-- 第一项就是「结果重排」：它是这张卡的总开关，展开区跟着它走。
-         和召回卡一样走两列栅格：下拉占半行、说明在它下面，
-         不把一个只有「关 / 开启」两个值的下拉拉成一整行宽。 -->
+         两档（关/开）用 NSwitch，不用下拉：下拉是「从多个值里选」，开关是「开还是关」，
+         这里只有后一件事。 -->
     <NGrid class="rerank-grid" cols="1 700:2" responsive="screen" :x-gap="10" :class="{ dim: !enabled }">
       <NGridItem>
         <div class="field">
           <span class="field-label">结果重排</span>
-          <NSelect
+          <NSwitch
             size="small"
             aria-label="结果重排"
-            :options="RERANK_OPTIONS"
             :input-props="{ id: 'rerank' }"
-            :value="state.form.rerank"
-            @update:value="(value) => onSelect('rerank', value)"
+            :value="rerankOpen"
+            @update:value="(value) => onSelect('rerank', value ? 'llm' : 'off')"
           />
           <span class="field-hint">开启后按下面的通道精排；没有启用通道时用兜底模型。任一路失败只弃权，全部弃权时原样保留。</span>
         </div>

@@ -3292,9 +3292,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("超时收成数字，留空 = 删掉这一格", [timed, "timeoutMs" in state.channels[index]], [250, false]);
     await ui.removeChannel(index);
     eq(
-      "删除通道后就少了这一行 / 通道计数文案",
+      "删除通道后就少了一行 / 卡头标题自动拼上这一路实际用的模型（不再手填名称）",
       [state.channels.length, ui.store.channelView(state.channels[0], 0).title],
-      [1, "通道 1"],
+      [1, "通道 1 · bge-reranker-v2-m3"],
     );
     await ui.testChannels();
     check(

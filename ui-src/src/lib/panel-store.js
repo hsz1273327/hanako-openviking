@@ -896,7 +896,20 @@ export function createPanelStore(deps = {}) {
       channel,
       options,
       unavailable: channelServiceMissing(channel, state.layers),
-      title: `通道 ${index + 1}`,
+    // 卡头标题自动拼：通道序号 + 这一路实际打到哪个模型。名字不再手填，
+      // 每类服务只能配一个模型，再抄一遍只会抄错。
+      title: (() => {
+        const label = RERANK_CHANNEL_LABELS[channel?.type] || channel?.type || "通道";
+        const model =
+          channel?.model ||
+          (channel?.type === "rerank"
+            ? state.layers?.rerankServiceModel
+            : channel?.type === "systemone"
+              ? state.layers?.systemoneServiceModel
+              : "") ||
+          "";
+        return model ? `通道 ${index + 1} · ${model}` : `通道 ${index + 1} · ${label}`;
+      })(),
       // 配对说明拿「服务端确认过的打分服务」当配置：草稿里填了一半时，
       // 运行时那一对其实还没生效。
       pairNote: channelPairNote(channel, state.layers),

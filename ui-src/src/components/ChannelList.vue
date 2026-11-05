@@ -54,19 +54,9 @@ function onType(index, value) {
   updateChannel(index, { type: value, url: "", model: "" });
 }
 
-// 名称只在失焦 / 回车时提交：中途逐字提交会被飞行中的回包整行盖回去（通道行没有
-// inline 保护）。:value 仍直接绑 store，写回草稿也写 store，失败回滚界面会跟着退。
-function onNameInput(index, value) {
-  const current = state.channels[index];
-  if (!current) return;
-  state.channels[index] = { ...current, name: value };
-}
-
-function onNameCommit(index) {
-  const current = state.channels[index];
-  if (!current) return;
-  updateChannel(index, { name: current.name });
-}
+// 通道不再手填名字：每类服务只能配一个模型，地址和模型都在「打分服务」里，
+// 再手填一遍只是抄一遍的事，还容易和服务实际用的对不上。卡头改成自动显示
+// 这一路实际打到哪个模型（channelView 的 title 里拼）。
 
 function onWeight(index, value) {
   // n-input-number 清空给 null：不提交，也不让它变成 0 再被夹到 0.1。
@@ -140,7 +130,7 @@ function timeoutTitle(row) {
               </div>
             </template>
 
-            <NGrid cols="1 520:2 700:4" responsive="screen" :x-gap="8" :y-gap="6">
+            <NGrid cols="1 520:2 700:3" responsive="screen" :x-gap="8" :y-gap="6">
               <NGridItem>
                 <!-- 类型那格包的是 NSelect：非 filterable 时内部没有 <input>，
                      包在 <label> 里也关联不上，所以用 div + 控件自己的 aria-label。 -->
@@ -154,19 +144,6 @@ function timeoutTitle(row) {
                     @update:value="(value) => onType(row.index, value)"
                   />
                 </div>
-              </NGridItem>
-              <NGridItem>
-                <label class="channel-cell">
-                  <span>名称</span>
-                  <NInput
-                    size="small"
-                    :input-props="{ spellcheck: 'false' }"
-                    placeholder="显示名，可空"
-                    :value="row.channel.name"
-                    @update:value="(value) => onNameInput(row.index, value)"
-                    @change="onNameCommit(row.index)"
-                  />
-                </label>
               </NGridItem>
               <NGridItem>
                 <label class="channel-cell">
