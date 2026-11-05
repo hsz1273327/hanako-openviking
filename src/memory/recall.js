@@ -1953,7 +1953,9 @@ function bumpRecall(sdk, sessionId, tokens) {
  *   其余一切 -> undefined（钩子据此判定"不干预"）
  *
  * options.deduper 供测试注入；生产环境每次 createRecallHandler 一份进程内表。
- * options.probe 是探针函数：只在 gate 跳过时调用一次，写入一行事实。
+ * options.probe 是探针函数：每轮记一条 recall/result 汇总（正常那轮也记），
+ * 另在 gate 跳过 / 精排跑过 / 组装跑过时各记一条细节。全部只写事实，不改返回值。
+ * 探针只在 switches.probe 开着时写（会话可以覆盖这一项）。
  */
 export function createRecallHandler(sdk, options = {}) {
   const deduper = options.deduper || createDeduper();
@@ -2007,6 +2009,38 @@ export function createRecallHandler(sdk, options = {}) {
       log(sdk, "info", `skip: autoRecall off (session=${sessionId})`);
       return undefined;
     }
+
+    // 每轮一条汇总（recall/result）：这一轮走到哪、gate 怎么判的、召回多少条、精排跑没跑、
+    // 组装剩多少、最后注了多少，全摆在一行里。
+    //
+    // 为什么要有：原来只有三个探针点，全是异常分支（跳过 / 精排跑过 / 组装跑过），
+    // 正常那一轮一片空白——「精排跑没跑」从日志里判断不了，只记跑了的情况，
+    // 没跑就没记录，是循环论证。这条汇总行每轮必记，与那三个细节探针并存，不替代。
+    //
+    // 只记档位与数字，不记任何正文：日志不该成为凭据的第二个落点。
+    // 它仍然受探针总开关管（switches.probe），关着就不写——那是“我不要任何探针”，
+    // 不是“这一轮没发生”。
+    const summary = {
+      // off 表示这一档关着；passed 表示判过且要召回；skipped:* 表示跳过及其原因。
+      gate: switches.recallGate === "off" ? "off" : "passed",
+      // gate 就跳过的那一轮根本没有查询文本，先按 gate 看的那句话记，查到再改。
+      query: { mode: switches.queryMode, chars: charLength(lastText) },
+      recalled: 0,
+      rerank: null,
+      assemble: null,
+      injected: null,
+    };
+    let reported = false;
+    const report = async () => {
+      if (reported) return;
+      reported = true;
+      if (!switches.probe || typeof options.probe !== "function") return;
+      try {
+        await options.probe("recall/result", { session, ...summary });
+      } catch {
+        /* 探针写不进去不能影响本轮对话 */
+      }
+    };
 
     // 判据看最后一条用户原话，不看拼接后的查询：gate 回答的是“这句话需不需要查记忆”，
     // queryMode 回答的是“用什么去查”，两件事分开。若用拼接结果判断，context 模式
@@ -2085,6 +2119,7 @@ export function createRecallHandler(sdk, options = {}) {
     }
 
     if (gateSkip) {
+      summary.gate = `skipped:${gateSkip.by}`;
       log(
         sdk,
         "info",
@@ -2102,11 +2137,14 @@ export function createRecallHandler(sdk, options = {}) {
           /* 探针写不进去不能影响本轮对话 */
         }
       }
+      await report();
       return undefined;
     }
 
     // 用什么去查：与上面的判断无关，按 queryMode 取。
     const query = recallQuery(payload, switches.queryMode);
+    // 真正发出去的查询文本可能比最后一句长（context 档会拼上前几轮），字数按它算。
+    summary.query = { mode: switches.queryMode, chars: charLength(query) };
 
     // 排除名单只对跨门牌（all）有意义：actor 范围本来就不含别人，
     // 多带这个键只会让请求体多一个不必要的字段。
@@ -2130,13 +2168,17 @@ export function createRecallHandler(sdk, options = {}) {
       });
     } catch (error) {
       log(sdk, "info", `skip: request failed (session=${sessionId}) ${reasonOf(error)}`);
+      await report();
       return undefined;
     }
 
     const items = extractRecallItems(result);
+    // 召回数记过滤前的候选条数：后面精排与组装各自会减，三个数摆在一起才知道减在哪一步。
+    summary.recalled = items.length;
     if (!items.length) {
       warnShapeOnce(sdk, result);
       log(sdk, "info", `skip: no text in response (session=${sessionId})`);
+      await report();
       return undefined;
     }
 
@@ -2158,6 +2200,14 @@ export function createRecallHandler(sdk, options = {}) {
         channels: lanes,
       });
       kept = outcome.kept;
+      // 精排这一轮真跑了几路（含兜底那一路）与留了几条：没跑时整个字段是 null，
+      // 「跑了但一条没留」和「压根没跑」在日志里必须分得开。
+      summary.rerank = {
+        mode: switches.rerank,
+        lanes: outcome.channelCount,
+        kept: kept.length,
+        fallback: outcome.fallback,
+      };
 
       for (const channel of outcome.channels) {
         if (!channel.ok) {
@@ -2204,6 +2254,7 @@ export function createRecallHandler(sdk, options = {}) {
       if (!kept.length) {
         // 有路成功，且把所有候选都打了 0 分：本轮不注入。
         log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
+        await report();
         return undefined;
       }
     }
@@ -2215,6 +2266,13 @@ export function createRecallHandler(sdk, options = {}) {
     // 预算裁剪仍然在下面的 memoryBlock 里做（按拼好之后的文本算 token）。
     const assembled = assembleCandidates(kept, switches.assembleMode);
     const text = assembled.text;
+    // kept 是组装之后的段数（凭据过滤已经在这里发生过），droppedCredential 单独记；
+    // 记条数不记原文，命中内容进了日志等于又把凭据搬了一处。
+    summary.assemble = {
+      mode: switches.assembleMode,
+      kept: assembled.refs.length,
+      droppedCredential: assembled.dropped.credential,
+    };
 
     // 回指表只进探针与日志，不进注入文本：目标是「这一轮拼了谁」可查，不是把元信息喂给模型。
     log(
@@ -2233,6 +2291,8 @@ export function createRecallHandler(sdk, options = {}) {
             mode: switches.assembleMode,
             kept: kept.length,
             refs: assembled.refs,
+            // 凭据过滤的命中数：只记条数，不记命中原文。
+            droppedCredential: assembled.dropped.credential,
           },
         });
       } catch {
@@ -2243,20 +2303,27 @@ export function createRecallHandler(sdk, options = {}) {
     const block = memoryBlock(text, budget);
     if (!block) {
       log(sdk, "info", `skip: empty block (session=${sessionId})`);
+      await report();
       return undefined;
     }
 
     const injected = injectMemory(payload, block);
     if (!injected) {
       log(sdk, "info", `skip: unknown payload shape (session=${sessionId})`);
+      await report();
       return undefined;
     }
 
-    bumpRecall(sdk, sessionId, estimateTokens(block));
+    const tokens = estimateTokens(block);
+    // 字数是最终拼进上下文的那一段（含标记）的长度，与 token 估算同一个对象。
+    summary.injected = { chars: block.length, tokens };
+    await report();
+
+    bumpRecall(sdk, sessionId, tokens);
     log(
       sdk,
       "info",
-      `ok (session=${sessionId} scope=${live.recallPeerScope} tokens=${estimateTokens(block)})`,
+      `ok (session=${sessionId} scope=${live.recallPeerScope} tokens=${tokens})`,
     );
 
     return { payload: injected };

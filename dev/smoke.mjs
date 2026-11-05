@@ -198,6 +198,7 @@ import {
   assembleCandidates,
   candidateKey,
   dedupeCandidates,
+  hasCredential,
   peerOfUri,
   scoreOf,
   sortByScore,
@@ -369,6 +370,7 @@ import {
   peerTappable,
   peerTitle,
   readFootText,
+  recallResultText,
   statusView,
   transportTextOf,
   versionTextOf,
@@ -2797,6 +2799,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           entries: [
             { text: "低分的旧版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.2 },
             { text: "高分的新版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.9 },
+            { text: "网关原样拄下来的 x-opencode-session: 2f1c8d40", score: 0.95 },
           ],
         },
       },
@@ -2823,9 +2826,105 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       offInjected.includes("低分的旧版本\n\n高分的新版本"),
       offInjected,
     );
+    check(
+      "off 档也滤凭据（安全不随功能开关）：那条带网关会话头的候选整条没进上下文",
+      !offInjected.includes("x-opencode-session") && !offInjected.includes("2f1c8d40"),
+      offInjected,
+    );
 
     fs.rmSync(dir, { recursive: true, force: true });
   }
+
+  // ---- 凭据过滤：命中就整条丢，off 档也照滤（安全不随功能开关） ----
+  eq(
+    "六种凭据模式各命中一条：厂商 key / Bearer / 私钥块 / 网关会话头 / 键值对 / 32 位以上混合随机串",
+    [
+      hasCredential("导出里的 key 是 sk-live-4f9a2b7c8d1e6f3a"),
+      hasCredential("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9c2lnbmF0dXJl"),
+      hasCredential("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA"),
+      hasCredential("x-opencode-session: 2f1c8d40"),
+      hasCredential('api_key = "9f8a7b6c5d4e3f2a1b7c6d5e"'),
+      hasCredential("qO7GNTzK2YfawS5XUgZY5A3sbHqczX9f"),
+    ],
+    [true, true, true, true, true, true],
+  );
+  eq(
+    "混合随机串的门槛：32 字命中，31 字不命中；缺大写 / 缺数字 / 带空格一律不算",
+    [
+      hasCredential("aB3".repeat(10) + "aB"),
+      hasCredential("aB3".repeat(10) + "a"),
+      hasCredential("ab3".repeat(12)),
+      hasCredential("aBc".repeat(12)),
+      hasCredential("aB3 aB3 aB3 aB3 aB3 aB3 aB3 aB3 aB"),
+    ],
+    [true, false, false, false, false],
+  );
+  eq(
+    "正常文本不命中：中文长句 / 英文长句 / 纯数字长串 / 带 sk- 的普通单词 / 全小写路径与 uuid / 空值",
+    [
+      hasCredential("今天下午三点在望京开会，记得把那份合同带上。"),
+      hasCredential("The quick brown fox jumps over the lazy dog and keeps running for a while."),
+      hasCredential("123456789012345678901234567890123456789012"),
+      hasCredential("risk-management-and-planning-review-meeting"),
+      hasCredential("viking://user/default/memories/events/2026/10/12/a.md"),
+      hasCredential("session 01a1aa55-0001-7d69-adf8-b3be18a79107"),
+      hasCredential(""),
+      hasCredential(null),
+    ],
+    [false, false, false, false, false, false, false, false],
+  );
+
+  const credentialItems = [
+    { text: "干净的第一条", score: 0.9 },
+    { text: "网关原样抄下来的 sk-live-4f9a2b7c8d1e6f3a", score: 0.8 },
+    { text: "干净的第三条", score: 0.7 },
+  ];
+  const filtered = assembleCandidates(credentialItems, "rules");
+  eq(
+    "命中凭据的候选整条丢掉（不打码）：文本里没有它、refs 只剩干净的两条且序号连续",
+    [
+      filtered.text,
+      filtered.refs.map((ref) => [ref.index, ref.score]),
+      filtered.refs.length === filtered.text.split("\n\n").length,
+      filtered.dropped,
+    ],
+    ["干净的第一条\n\n干净的第三条", [[1, 0.9], [2, 0.7]], true, { credential: 1 }],
+  );
+  const filteredRefs = assembleCandidates(
+    [
+      { text: "甲", uri: "viking://user/default/m/1.md", score: 0.5 },
+      { text: "Bearer eyJhbGciOiJIUzI1NiJ9c2lnbmF0dXJl", uri: "viking://user/default/m/2.md", score: 0.9 },
+      { text: "丙", uri: "viking://user/default/m/3.md", score: 0.1 },
+    ],
+    "rules",
+  );
+  eq(
+    "过滤后回指表与文本段落仍然对得上：丢了中间那条，refs 的序号连续、uri 一一对应",
+    [filteredRefs.text, filteredRefs.refs.map((ref) => [ref.index, ref.uri])],
+    ["甲\n\n丙", [[1, "viking://user/default/m/1.md"], [2, "viking://user/default/m/3.md"]]],
+  );
+  const offFiltered = assembleCandidates(credentialItems, "off");
+  eq(
+    "off 档也滤：剩下的按原顺序原样拼（不去重、不按分精排），凭据这一条同样丢掉",
+    [offFiltered.text, offFiltered.refs.map((ref) => ref.index), offFiltered.dropped.credential],
+    ["干净的第一条\n\n干净的第三条", [1, 2], 1],
+  );
+  eq(
+    "同 uri 的两条副本里只有一条带凭据时：脏的那条先被丢掉，干净的那条留下来",
+    assembleCandidates(
+      [
+        { text: "干净的副本", uri: "viking://user/default/m/a.md", score: 0.2 },
+        { text: "带 password = \"9f8a7b6c5d4e3f2a1b7c6d\" 的副本", uri: "viking://user/default/m/a.md", score: 0.9 },
+      ],
+      "rules",
+    ).text,
+    "干净的副本",
+  );
+  eq(
+    "全是凭据的一批：文本为空、refs 为空、命中数照实记（下游 memoryBlock 会给空串）",
+    [assembleCandidates([{ text: "x-opencode-session: 2f1c8d40" }], "rules")],
+    [{ text: "", refs: [], dropped: { credential: 1 } }],
+  );
 
   // ---- 页签与控件位置 ----
   const assembleCard = uiCode("components/AssembleCard.vue");
@@ -2985,6 +3084,64 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ], logBodyText([]), logBodyText([{ a: 1 }, { a: 2 }]).split("\n")],
     [[["a × 2", "b × 1"], [{ text: "暂无事件", muted: true }], "k × 1"], LOG_EMPTY, ['{"a":2}', '{"a":1}']],
   );
+
+  {
+    // recall/result 每轮都有，渲染成摘要行比原 JSON 好扫；其余事件照旧给 JSON。
+    const summaryLine = {
+      at: new Date(2026, 10, 5, 13, 29).toISOString(),
+      event: "recall/result",
+      count: 1,
+      sessionId: "s-1",
+      sessionPath: null,
+      shape: {
+        gate: "passed",
+        query: { mode: "context", chars: 120 },
+        recalled: 10,
+        rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+        assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
+        injected: { chars: 3000, tokens: 900 },
+      },
+    };
+    eq(
+      "日志正文：recall/result 渲染成一行摘要，其余事件仍是原始 JSON（倒序不变）",
+      logBodyText([{ event: "provider/before-request", shape: { messageCount: 2 } }, summaryLine]).split("\n"),
+      [
+        "13:29 召回 · gate=passed · query=context/120字 · 召回10 · 精排10(none) · 组装9(滤1) · 注入900tok",
+        '{"event":"provider/before-request","shape":{"messageCount":2}}',
+      ],
+    );
+    check(
+      "摘要是一行（不换行）",
+      !recallResultText(summaryLine).includes("\n"),
+      recallResultText(summaryLine),
+    );
+    eq(
+      "字段缺失时那一段念「—」：精排 / 组装 / 注入没跑、时间读不到也不空着",
+      recallResultText({
+        at: "not-a-date",
+        event: "recall/result",
+        shape: {
+          gate: "skipped:rules",
+          query: { mode: "last", chars: 4 },
+          recalled: 0,
+          rerank: null,
+          assemble: null,
+          injected: null,
+        },
+      }),
+      "— 召回 · gate=skipped:rules · query=last/4字 · 召回0 · 精排— · 组装— · 注入—",
+    );
+    eq(
+      "整条记录什么都不带时也有一行（不是空行、不摔错）",
+      recallResultText({ event: "recall/result" }),
+      "— 召回 · gate=— · query=— · 召回— · 精排— · 组装— · 注入—",
+    );
+    eq(
+      "计数条照旧按事件名数：recall/result 也会占一格",
+      logChips([summaryLine, summaryLine]).map((chip) => chip.text),
+      ["recall/result × 2"],
+    );
+  }
 
   // ---- 通道测试结果排版 ----
   eq(
@@ -5029,6 +5186,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     assemble: {
       mode: "rules",
       kept: 3,
+      droppedCredential: 1,
       refs: [
         { index: 1, uri: "viking://user/default/peers/mbp-01/m/a.md", peer: "mbp-01", score: 0.9 },
         { index: 2, uri: "", peer: "", score: null },
@@ -5044,8 +5202,96 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   eq(
     "五行记录 / 第一个事件名 / before-start 记了 prompt 长度 / 同一会话第二次计数为 2 / payload 里数出 messages / payload 顶层键 / gate 事件名 / gate 记了查询长度 / gate 记了查询头部 / gate 记了原因 / 组装事件名 / 组装记了 mode与目录数 / 回指表原样落盘",
-    [lines.length, lines[0].event, lines[0].shape.promptChars, lines[2].count, lines[1].shape.messageCount, lines[1].shape.payloadKeys, lines[3].event, lines[3].shape.queryChars, lines[3].shape.queryHead, lines[3].shape.reason, lines[4].event, [lines[4].shape.mode, lines[4].shape.kept, lines[4].shape.segments], lines[4].shape.refs],
-    [5, "agent/before-start", 8, 2, 2, ["system", "messages"], "recall/gate-skip", 4, "运行测试", "short-operation-command", "recall/assemble", ["rules", 3, 2], [{ index: 1, uri: "viking://user/default/peers/mbp-01/m/a.md", peer: "mbp-01", score: 0.9 }, { index: 2, uri: "", peer: "", score: null }]],
+    [lines.length, lines[0].event, lines[0].shape.promptChars, lines[2].count, lines[1].shape.messageCount, lines[1].shape.payloadKeys, lines[3].event, lines[3].shape.queryChars, lines[3].shape.queryHead, lines[3].shape.reason, lines[4].event, [lines[4].shape.mode, lines[4].shape.kept, lines[4].shape.segments, lines[4].shape.droppedCredential], lines[4].shape.refs],
+    [5, "agent/before-start", 8, 2, 2, ["system", "messages"], "recall/gate-skip", 4, "运行测试", "short-operation-command", "recall/assemble", ["rules", 3, 2, 1], [{ index: 1, uri: "viking://user/default/peers/mbp-01/m/a.md", peer: "mbp-01", score: 0.9 }, { index: 2, uri: "", peer: "", score: null }]],
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // recall/result：少哪一段就给 null（不拿 0 / 空串填坑），正文一个字都不进来。
+  const dir = path.join(import.meta.dirname, ".tmp-probe-result");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const probe = createProbe({ dataDir: dir });
+  const session = { sessionId: "s-r" };
+
+  await probe("recall/result", {
+    session,
+    gate: "skipped:llm",
+    query: { mode: "last", chars: 4 },
+    recalled: 0,
+    rerank: null,
+    assemble: null,
+    injected: null,
+  });
+  await probe("recall/result", {
+    session,
+    gate: "passed",
+    query: { mode: "context", chars: 120 },
+    recalled: 10,
+    rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+    assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
+    injected: { chars: 3000, tokens: 900 },
+  });
+  // 脏值：类型不对的当缺失，不能洗成 0。
+  await probe("recall/result", {
+    session,
+    gate: "",
+    query: { mode: "context", chars: "120" },
+    recalled: "10",
+    rerank: { mode: "llm", lanes: 1, kept: null, fallback: "none" },
+    assemble: null,
+    injected: { chars: 3000 },
+  });
+
+  const lines = fs
+    .readFileSync(path.join(dir, "probe.log"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+
+  eq(
+    "recall/result 的形状：档位 / 查询 / 召回数 / 精排 / 组装 / 注入，没跑的那几段是 null",
+    [lines.length, lines[0].event, lines[0].shape, lines[1].shape],
+    [
+      3,
+      "recall/result",
+      {
+        gate: "skipped:llm",
+        query: { mode: "last", chars: 4 },
+        recalled: 0,
+        rerank: null,
+        assemble: null,
+        injected: null,
+      },
+      {
+        gate: "passed",
+        query: { mode: "context", chars: 120 },
+        recalled: 10,
+        rerank: { mode: "llm", lanes: 1, kept: 10, fallback: "none" },
+        assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
+        injected: { chars: 3000, tokens: 900 },
+      },
+    ],
+  );
+  eq(
+    "脏值不洗成 0：字符型计数当缺失，空串当缺失",
+    [
+      lines[2].shape.query.chars,
+      lines[2].shape.recalled,
+      lines[2].shape.rerank.kept,
+      lines[2].shape.assemble,
+      lines[2].shape.injected.tokens,
+      lines[2].shape.gate,
+    ],
+    [null, null, null, null, null, null],
+  );
+  eq(
+    "recall/result 只收档位与计数：查询那一段只有 mode / chars，没地方放正文",
+    Object.keys(lines[1].shape.query),
+    ["mode", "chars"],
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -7232,13 +7478,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "gate 跳过时日志有一行 gate: skipped",
     infos.some((m) => m.includes("gate: skipped")),
   );
+  // 每轮还有一条 recall/result 汇总，所以这里只数 gate-skip 那一条。
+  const gateSkips = probes.filter((probe) => probe.event === "recall/gate-skip");
   eq("gate 跳过时探针记一次，带事件名 / 查询原文 / 原因",
-    [probes.length, probes[0].event, probes[0].invocation.query, probes[0].invocation.reason],
+    [gateSkips.length, gateSkips[0].event, gateSkips[0].invocation.query, gateSkips[0].invocation.reason],
     [1, "recall/gate-skip", "运行测试", "short-operation-command"]);
 
   await handler({ payload, session });
   eq("同一句第二次：不再记 gate 日志、也不再写探针",
-    [infos.filter((m) => m.includes("gate: skipped")).length, probes.length], [1, 1]);
+    [
+      infos.filter((m) => m.includes("gate: skipped")).length,
+      probes.filter((probe) => probe.event === "recall/gate-skip").length,
+      probes.filter((probe) => probe.event === "recall/result").length,
+    ],
+    [1, 1, 1]);
 
   const probesOff = [];
   const offHandler = createRecallHandler(
@@ -7538,7 +7791,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         "systemPrompt" in req,
         [req.maxTokens, req.temperature],
         ["provider" in req, "model" in req],
-      ], [probes.length, probes[0].invocation.by, probes[0].invocation.reason]],
+      ], [
+        probes.filter((probe) => probe.event === "recall/gate-skip").length,
+        probes[0].invocation.by,
+        probes[0].invocation.reason,
+      ]],
       [["app", [1, "user"], true, false, [8, 0], [false, false]], [1, "llm", "llm-no-need"]],
     );
     check(
@@ -8194,7 +8451,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "decision 跳过日志与探针带 by=decision / reason=decision-no-need",
       [
         infos.some((m) => m.includes("gate: skipped") && m.includes("by=decision")),
-        probes.length,
+        probes.filter((probe) => probe.event === "recall/gate-skip").length,
         probes[0]?.invocation.by,
         probes[0]?.invocation.reason,
       ],
@@ -11168,6 +11425,266 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     fs.rmSync(dir, { recursive: true, force: true });
     resetRuntimeTransport();
   }
+}
+
+// ================= 每轮一条 recall/result：正常那轮也得有记录 =================
+{
+  // 为什么要这一节：探针原来只有三个点，全是异常分支（跳过 / 精排跑过 / 组装跑过）。
+  // 正常召回一行不记，“精排跑没跑”就只能从“有没有那条记录”反推——没记录既可能是没跑，
+  // 也可能是根本没走到。所以每轮都要有一条汇总，它是一个可被断言的契约。
+  const dir = path.join(import.meta.dirname, ".tmp-recall-result");
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const TEXT = "什么时候交稿？";
+  const entriesOf = (...texts) =>
+    texts.map((text, index) => ({ text, score: 1 - index * 0.1 }));
+
+  // 跑一轮召回，把探针整份收下来。values 覆盖默认配置，服务端返回的候选由调用方给。
+  const run = async ({ values = {}, entries, sessionId, text = TEXT, models } = {}) => {
+    const probes = [];
+    const mock = mockFetch({
+      body: { status: "ok", result: entries ? { entries } : {} },
+    });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true, ...values },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+        models,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: text }] },
+      session: { sessionId },
+    });
+    return {
+      result,
+      probes,
+      rows: probes.filter((probe) => probe.event === "recall/result").map((p) => p.invocation),
+      requests: mock.calls.length,
+    };
+  };
+
+  // ---- 1. 正常召回 ----
+  const normal = await run({
+    sessionId: "result-normal",
+    entries: entriesOf("甲", "乙"),
+  });
+  const row = normal.rows[0];
+  const injectedContent = asText(asList(normal.result?.payload?.messages)[0]?.content);
+  eq(
+    "正常召回也记一条：gate / query / 召回数（过滤前）/ 组装 / 注入全在，精排没跑就是 null",
+    [normal.rows.length, row?.gate, row?.query, row?.recalled, row?.rerank, row?.assemble],
+    [1, "off", { mode: "last", chars: 7 }, 2, null, { mode: "rules", kept: 2, droppedCredential: 0 }],
+  );
+  eq(
+    "字段类型：召回数 / 保留数 / token 都是数字（不是字符串或布尔）",
+    [typeof row?.recalled, typeof row?.assemble?.kept, typeof row?.injected?.tokens],
+    ["number", "number", "number"],
+  );
+  check(
+    "injected.chars 就是真正拼进上下文的那一块的长度（注入内容 = 记忆块 + 空行 + 原话）",
+    row?.injected?.chars === injectedContent.length - 7 - 2 && row?.injected?.tokens > 0,
+    `${row?.injected?.chars} / ${injectedContent.length}`,
+  );
+  check(
+    "细节探针没被汇总行取代：正常那轮仍有一条 recall/assemble",
+    normal.probes.some((probe) => probe.event === "recall/assemble"),
+    normal.probes.map((probe) => probe.event).join(","),
+  );
+
+  // ---- 2. gate 跳过 ----
+  const skipped = await run({
+    values: { recallGate: "rules" },
+    sessionId: "result-gate-skip",
+    text: "运行测试",
+  });
+  eq(
+    "gate 跳过也记一条：gate=skipped:rules，精排 / 组装 / 注入都是 null、召回数 0",
+    [
+      skipped.rows.length,
+      skipped.rows[0]?.gate,
+      skipped.rows[0]?.query,
+      skipped.rows[0]?.recalled,
+      skipped.rows[0]?.rerank,
+      skipped.rows[0]?.assemble,
+      skipped.rows[0]?.injected,
+      skipped.requests,
+    ],
+    [1, "skipped:rules", { mode: "last", chars: 4 }, 0, null, null, null, 0],
+  );
+  check(
+    "gate 跳过那轮仍有一条 recall/gate-skip 细节记录",
+    skipped.probes.some((probe) => probe.event === "recall/gate-skip"),
+    skipped.probes.map((probe) => probe.event).join(","),
+  );
+
+  // ---- 3. 零候选 ----
+  const empty = await run({ sessionId: "result-empty", entries: [] });
+  eq(
+    "零候选也记一条（请求发了、什么都没召到）：recalled=0，其余三步都是 null",
+    [
+      empty.rows.length,
+      empty.rows[0]?.gate,
+      empty.rows[0]?.recalled,
+      empty.rows[0]?.rerank,
+      empty.rows[0]?.assemble,
+      empty.rows[0]?.injected,
+      empty.requests,
+    ],
+    [1, "off", 0, null, null, null, 1],
+  );
+
+  // ---- 4. 组装关闭 ----
+  const offAssemble = await run({
+    values: { assembleMode: "off" },
+    sessionId: "result-assemble-off",
+    entries: [
+      { text: "同一段", uri: "viking://user/default/m/a.md", score: 0.2 },
+      { text: "同一段", uri: "viking://user/default/m/a.md", score: 0.9 },
+      { text: "另一段", score: 0.1 },
+    ],
+  });
+  eq(
+    "组装关闭也记一条：mode=off，kept 是拼进去的条数（不去重，三条都在）",
+    [offAssemble.rows[0]?.assemble, offAssemble.rows[0]?.recalled],
+    [{ mode: "off", kept: 3, droppedCredential: 0 }, 3],
+  );
+
+  // ---- 5. 精排跑过：这一格就是“精排跑没跑”的正面证据 ----
+  // 默认配置里没有启用的主路，模型那一路只当兜底：所以 fallback 是 model。
+  const reranked = await run({
+    values: { rerank: "llm" },
+    sessionId: "result-rerank",
+    entries: entriesOf("第一条", "第二条", "第三条"),
+    models: modelSdk({ utility: () => ({ text: "1" }) }).models,
+  });
+  eq(
+    "精排跑过：rerank 记 mode / 这一轮真跑了几路 / 保留条数 / 兜底走了哪条（默认只跑兜底那一路）",
+    reranked.rows[0]?.rerank,
+    { mode: "llm", lanes: 1, kept: 1, fallback: "model" },
+  );
+  check(
+    "精排那轮仍有一条 recall/rerank 细节记录",
+    reranked.probes.some((probe) => probe.event === "recall/rerank"),
+    reranked.probes.map((probe) => probe.event).join(","),
+  );
+  const rerankedMain = await run({
+    values: {
+      rerank: "llm",
+      // schema=2 才认为存着的 enabled 是真的：老配置（空串）会把 model 那一路
+      // 当成“当年硬写开的”，只留它当兜底，不参与主路。
+      rerankLaneSchema: "2",
+      rerankChannels: JSON.stringify([{ type: "model", model: "", weight: 1, enabled: true }]),
+    },
+    sessionId: "result-rerank-main",
+    entries: entriesOf("第一条", "第二条", "第三条"),
+    models: modelSdk({ utility: () => ({ text: "2" }) }).models,
+  });
+  eq(
+    "主路跑通时 fallback=none：“兜底接的”与“主路算的”在日志里分得开",
+    rerankedMain.rows[0]?.rerank,
+    { mode: "llm", lanes: 1, kept: 1, fallback: "none" },
+  );
+
+  // ---- 6. 凭据：只记条数，不记内容 ----
+  const dirty = await run({
+    sessionId: "result-credential",
+    entries: [
+      { text: "干净的记录", score: 0.9 },
+      { text: "网关原样拄下来的 key: sk-live-4f9a2b7c8d1e6f3a", score: 0.8 },
+      { text: "x-opencode-session: 2f1c8d40", score: 0.7 },
+    ],
+  });
+  const dirtyContent = asText(asList(dirty.result?.payload?.messages)[0]?.content);
+  eq(
+    "两条带凭据的候选在组装这一步被丢掉：召回 3 / 组装 1 / 命中 2，注入文本里一条都没有",
+    [
+      dirty.rows[0]?.recalled,
+      dirty.rows[0]?.assemble,
+      dirtyContent.includes("sk-live-4f9a2b7c8d1e6f3a"),
+      dirtyContent.includes("x-opencode-session"),
+      dirtyContent.includes("干净的记录"),
+    ],
+    [3, { mode: "rules", kept: 1, droppedCredential: 2 }, false, false, true],
+  );
+  check(
+    "日志里（含细节探针）不出现命中的原文：只记条数，不记内容",
+    !JSON.stringify(dirty.probes).includes("sk-live") &&
+      !JSON.stringify(dirty.probes).includes("2f1c8d40"),
+    JSON.stringify(dirty.probes).slice(0, 400),
+  );
+  eq(
+    "组装细节探针也带命中数（droppedCredential=2），两个事件的口径一致",
+    dirty.probes.find((probe) => probe.event === "recall/assemble")?.invocation.assemble
+      .droppedCredential,
+    2,
+  );
+
+  // ---- 7. 探针总开关 ----
+  const silent = await run({ values: { probe: false }, sessionId: "result-probe-off", entries: entriesOf("甲") });
+  eq(
+    "探针总开关关着时一条都不写（汇总行也受它管），召回本身照旧",
+    [silent.probes.length, silent.requests, Boolean(silent.result?.payload)],
+    [0, 1, true],
+  );
+
+  // ---- 8. 整链：recall.js 交出去的字段名，与 probe.js 认的字段名必须对得上 ----
+  // 上面几段分别验两端，但“交出去”与“认下来”是两份对象：名字对不上会静静地变 null。
+  // 这一段把中间的真实探针接上，再交给日志页的渲染函数。
+  {
+    const chainDir = path.join(import.meta.dirname, ".tmp-recall-result-chain");
+    fs.rmSync(chainDir, { recursive: true, force: true });
+    const chainMock = mockFetch({
+      body: { status: "ok", result: { entries: entriesOf("甲", "乙") } },
+    });
+    const chainHandler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true },
+        fetchImpl: chainMock.fetchImpl,
+        dataDir: dir,
+      }),
+      { probe: createProbe({ dataDir: chainDir }) },
+    );
+    await chainHandler({
+      payload: { messages: [{ role: "user", content: TEXT }] },
+      session: { sessionId: "result-chain" },
+    });
+    const chainLines = fs
+      .readFileSync(path.join(chainDir, "probe.log"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const chainRow = chainLines.find((line) => line.event === "recall/result");
+    eq(
+      "整链：那一轮的汇总被 probe.js 原样认下（档位 / 召回数 / 组装 / 注入 / 查询字数都有值，没一个漏成 null）",
+      [
+        chainRow?.shape.gate,
+        chainRow?.shape.recalled,
+        chainRow?.shape.assemble,
+        typeof chainRow?.shape.injected?.tokens,
+        chainRow?.shape.query,
+      ],
+      [
+        "off",
+        2,
+        { mode: "rules", kept: 2, droppedCredential: 0 },
+        "number",
+        { mode: "last", chars: 7 },
+      ],
+    );
+    check(
+      "整链：日志页把那一条渲染成一行摘要（时间 · gate · query · 召回 · 精排 · 组装 · 注入）",
+      /^\d{2}:\d{2} 召回 · gate=off · query=last\/7字 · 召回2 · 精排— · 组装2\(滤0\) · 注入\d+tok$/.test(
+        logBodyText([chainRow]).split("\n")[0],
+      ),
+      logBodyText([chainRow]),
+    );
+    fs.rmSync(chainDir, { recursive: true, force: true });
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 // ================= memory/recall =================

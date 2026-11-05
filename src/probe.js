@@ -98,7 +98,22 @@ function shapeOf(event, invocation) {
       mode: typeof assemble.mode === "string" ? assemble.mode : null,
       kept: Number.isFinite(Number(assemble.kept)) ? Number(assemble.kept) : null,
       segments: refs.length,
+      // 凭据过滤的命中数：只记条数，不记命中内容。
+      droppedCredential: countOf(assemble.droppedCredential),
       refs,
+    };
+  }
+
+  // 每轮一条汇总：档位与计数，不带任何正文。
+  // 少哪一段就给 null，不拿 0 或空串填坑——「没跑」与「跑了但是 0」必须分得开。
+  if (event === "recall/result") {
+    return {
+      gate: textOf(invocation.gate),
+      query: queryOf(invocation.query),
+      recalled: countOf(invocation.recalled),
+      rerank: rerankOf(invocation.rerank),
+      assemble: assembleOf(invocation.assemble),
+      injected: injectedOf(invocation.injected),
     };
   }
 
@@ -110,6 +125,43 @@ function len(value) {
   if (typeof value === "string") return value.length;
   if (Array.isArray(value)) return value.length;
   return null;
+}
+
+function textOf(value) {
+  return typeof value === "string" && value ? value : null;
+}
+
+function countOf(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function queryOf(query) {
+  if (!query || typeof query !== "object") return null;
+  return { mode: textOf(query.mode), chars: countOf(query.chars) };
+}
+
+function rerankOf(rerank) {
+  if (!rerank || typeof rerank !== "object") return null;
+  return {
+    mode: textOf(rerank.mode),
+    lanes: countOf(rerank.lanes),
+    kept: countOf(rerank.kept),
+    fallback: textOf(rerank.fallback),
+  };
+}
+
+function assembleOf(assemble) {
+  if (!assemble || typeof assemble !== "object") return null;
+  return {
+    mode: textOf(assemble.mode),
+    kept: countOf(assemble.kept),
+    droppedCredential: countOf(assemble.droppedCredential),
+  };
+}
+
+function injectedOf(injected) {
+  if (!injected || typeof injected !== "object") return null;
+  return { chars: countOf(injected.chars), tokens: countOf(injected.tokens) };
 }
 
 function head(value) {

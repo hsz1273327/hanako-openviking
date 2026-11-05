@@ -198,9 +198,78 @@ export function logChips(lines) {
 
 export const LOG_EMPTY = "（还没有记录）";
 
+/* ---------------- 日志：召回汇总行 ---------------- */
+
+// 一段里字段缺失时用“—”，不空着：空着看不出“没跑”还是“跑了是 0”。
+const LOG_DASH = "—";
+
+function dashText(value) {
+  return value === null || value === undefined || value === "" ? LOG_DASH : String(value);
+}
+
+/** 计数：只有真数字才念，其余（null / 缺项 / 类型不对）都是“—”。 */
+function countText(value) {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : LOG_DASH;
+}
+
+/** 记录时间 → 时:分（本地）。取不到（at 缺失 / 不是日期）就不编一个。 */
+function clockText(at) {
+  const date = at ? new Date(at) : null;
+  if (!date || Number.isNaN(date.getTime())) return LOG_DASH;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /**
- * 日志正文：倒序（最新在最上面），一行一条 JSON。
+ * 一条 recall/result → 一行摘要（不换行）：
  *
+ *   13:29 召回 · gate=passed · query=context/120字 · 召回10 · 精排10(none) · 组装9(滤1) · 注入900tok
+ *
+ * 原始 JSON 能查，但扫不动：每轮都有的那一行要一眼看出“精排跑没跑、剩下几条”。
+ * 精排 / 组装 / 注入没跑时那一段的括号里什么都不编，只给“—”。
+ */
+export function recallResultText(line) {
+  const shape = line?.shape && typeof line.shape === "object" ? line.shape : {};
+  const query = shape.query && typeof shape.query === "object" ? shape.query : null;
+  const rerank = shape.rerank && typeof shape.rerank === "object" ? shape.rerank : null;
+  const assemble = shape.assemble && typeof shape.assemble === "object" ? shape.assemble : null;
+  const injected = shape.injected && typeof shape.injected === "object" ? shape.injected : null;
+
+  const queryText = query
+    ? `${dashText(query.mode)}/${typeof query.chars === "number" ? `${query.chars}字` : LOG_DASH}`
+    : LOG_DASH;
+  const rerankText = rerank
+    ? `精排${countText(rerank.kept)}(${dashText(rerank.fallback)})`
+    : `精排${LOG_DASH}`;
+  const assembleText = assemble
+    ? `组装${countText(assemble.kept)}(滤${countText(assemble.droppedCredential)})`
+    : `组装${LOG_DASH}`;
+  const injectedText = injected ? `注入${countText(injected.tokens)}tok` : `注入${LOG_DASH}`;
+
+  return [
+    `${clockText(line?.at)} 召回`,
+    `gate=${dashText(shape.gate)}`,
+    `query=${queryText}`,
+    `召回${countText(shape.recalled)}`,
+    rerankText,
+    assembleText,
+    injectedText,
+  ].join(" · ");
+}
+
+/** 一行日志的显示文本：汇总事件读摘要，其余照旧是原始 JSON。 */
+export function logLineText(line) {
+  if (line && typeof line === "object" && line.event === "recall/result") {
+    return recallResultText(line);
+  }
+  return JSON.stringify(line);
+}
+
+/**
+ * 日志正文：倒序（最新在最上面），一行一条。
+ *
+ * recall/result 例外：它每轮都有一条，渲染成摘要行（recallResultText），
+ * 其余事件仍然原样给 JSON——细节探针要给的就是能对照字段的原文。
  * 行数上限由服务端定（/probe 只回最后 60 条），面板不截断：
  * 漏掉哪一条都不该由前端悄悄决定。
  */
@@ -210,7 +279,7 @@ export function logBodyText(lines) {
   return list
     .slice()
     .reverse()
-    .map((line) => JSON.stringify(line))
+    .map((line) => logLineText(line))
     .join("\n");
 }
 
