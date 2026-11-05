@@ -144,7 +144,7 @@ export const SERVICE_KEY_MASK_DOTS = 8;
 // 两类打分服务的超时边界，与 src/ov/settings.js 的 SERVICE_TIMEOUT_LIMITS 同值。
 // fallback 就是留空时的默认值，输入框的 placeholder 用它。
 export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
-  rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
+  rerank: Object.freeze({ min: 100, max: 10000, fallback: 2500 }),
   systemone: Object.freeze({ min: 100, max: 8000, fallback: 3500 }),
 });
 

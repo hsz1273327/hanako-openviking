@@ -242,7 +242,9 @@ export const SERVICE_KEY_MAX = 512;
  * 用户把 99999 填进来通常是想「别超时」，悄悄夹成 10000 会让原因更难查。
  */
 export const SERVICE_TIMEOUT_LIMITS = Object.freeze({
-  rerank: Object.freeze({ min: 100, max: 10000, fallback: 800 }),
+  // rerank 的 fallback 从 800 抬到 2500：实测十条候选配一条长查询要 965ms，800 会让
+  // 主路每轮都超时、一律落到兜底。800 只在候选很少且查询很短时才够。
+  rerank: Object.freeze({ min: 100, max: 10000, fallback: 2500 }),
   // 运行时 systemoneTimeoutFor 的硬上限也是 8000：配置允许更大的值只会被压回去，
   // 所以写入侧直接对齐，不让两个数字打架。
   systemone: Object.freeze({ min: 100, max: 8000, fallback: 3500 }),

@@ -2513,8 +2513,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       item.rerankServiceTimeoutMs,
       item.systemoneServiceTimeoutMs,
     ])],
-    [[800, 3500, [100, 10000], [100, 8000]], [1200, 1200, 1200, null, null, null, null, 8000, null, null], [
-      [800, 3500],
+    [[2500, 3500, [100, 10000], [100, 8000]], [1200, 1200, 1200, null, null, null, null, 8000, null, null], [
+      [2500, 3500],
       [1200, 8000],
       ["1200", "", ""],
       ["", ""],
@@ -5069,7 +5069,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       uiServiceTimeoutInput(1200, "systemone"),
       uiServiceTimeoutInput("99999", "rerank"),
     ]],
-    [SERVICE_TIMEOUT_LIMITS, [800, 3500], [1200, null, null, null], ["", "1200", ""]],
+    [SERVICE_TIMEOUT_LIMITS, [2500, 3500], [1200, null, null, null], ["", "1200", ""]],
   );
 
   // ---- 打分服务描述表：渲染完全由数据驱动 ----
@@ -5098,7 +5098,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("默认超时与后端边界同值", [
     SCORING_SERVICES[0].defaultTimeoutMs,
     SCORING_SERVICES[1].defaultTimeoutMs,
-  ], [800, 3500]);
+  ], [2500, 3500]);
 
   const layout = scoringServiceLayout();
   eq(
@@ -5130,9 +5130,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ["password", "click", "可选"],
       ["password", "click", "可选"],
     ], [
-      ["800 ms", 100, 10000],
+      ["2500 ms", 100, 10000],
       ["3500 ms", 100, 8000],
-    ], "交叉编码器走 /v1/rerank，决策模型走 /v1/systemone。地址与模型成对；超时留空用默认（精排 800ms、决策 3500ms）；密钥可选，留空表示该服务没开鉴权。留空的类型不会出现在精排通道里。", 1],
+    ], "交叉编码器走 /v1/rerank，决策模型走 /v1/systemone。地址与模型成对；超时留空用默认（精排 2500ms、决策 3500ms）；密钥可选，留空表示该服务没开鉴权。留空的类型不会出现在精排通道里。", 1],
   );
 
   // 往表里临时插一项假服务：行数变三，证明渲染确实按表走。
