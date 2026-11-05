@@ -615,6 +615,31 @@ function ndjsonResponse(events) {
 }
 
 {
+  // ---- 召回那一跳的超时：只透传正数，没给就别在 init 里留一个空键 ----
+  // 「给了 5000 就是 5000」在运行时那一档验过了（信封信的 timeoutMs）；
+  // 这一条看的是另一半：直连出口的 init 被原样摊进 fetch 的参数里，键在不在一眼可见。
+  const direct = mockFetch();
+  const directClient = createClient({
+    serverUrl: "http://h:1",
+    apiKey: "k",
+    fetchImpl: direct.fetchImpl,
+  });
+  await directClient.recall("给一档宽的", { timeoutMs: 5000 });
+  await directClient.recall("不给就用客户端那一档");
+  await directClient.recall("给 0 也不算数", { timeoutMs: 0 });
+  eq(
+    "给了正数才带 timeoutMs 键；不传 / 传 0 时 init 里没有这个键（走客户端默认）",
+    [
+      Object.hasOwn(direct.calls[0].init, "timeoutMs"),
+      direct.calls[0].init.timeoutMs,
+      Object.hasOwn(direct.calls[1].init, "timeoutMs"),
+      Object.hasOwn(direct.calls[2].init, "timeoutMs"),
+    ],
+    [true, 5000, false, false],
+  );
+}
+
+{
   const { calls, fetchImpl } = mockFetch();
   const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
 

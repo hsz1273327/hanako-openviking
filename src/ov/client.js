@@ -110,10 +110,13 @@ export function createClient({
     // exclude_uris 只在确实有排除项时出现：空数组 / 未传都不带这个键，
     // 让请求体保持与旧版逐字节一致。
     // timeoutMs 不传就用客户端那一档：召回随查询长度涨得很快，调用方该显式给一档更宽的。
+    // 只有显式给了正数才把这个键交给 call：没给就不带，让 call 落到客户端那一档，
+    // init 的形状与加这一档之前逐字节一致。
     recall: (query, opts = {}) => {
       const excludeUris = Array.isArray(opts.excludeUris)
         ? opts.excludeUris.filter((uri) => typeof uri === "string" && uri.trim())
         : [];
+      const hopTimeoutMs = Number(opts.timeoutMs);
       return call("/api/v1/search/search", {
         method: "POST",
         body: JSON.stringify({
@@ -124,7 +127,7 @@ export function createClient({
           score_threshold: opts.scoreThreshold ?? 0.35,
           ...(excludeUris.length ? { exclude_uris: excludeUris } : {}),
         }),
-        timeoutMs: opts.timeoutMs,
+        ...(hopTimeoutMs > 0 ? { timeoutMs: hopTimeoutMs } : {}),
       });
     },
 
