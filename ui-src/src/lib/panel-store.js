@@ -25,6 +25,7 @@ import {
   DEFAULT_GATE_PROMPT,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
+  GATE_CONTEXT_DEFAULT,
   GATE_CONTEXT_TURNS_DEFAULT,
   GATE_DECISION_THRESHOLD_DEFAULT,
   RERANK_CHANNELS_MAX,
@@ -194,8 +195,8 @@ export function createPanelStore(deps = {}) {
     form: {
       recallGate: "off",
       gateFallback: "recall",
-      // 决策档判断时看不看前文：初始值就是默认 none / 4 轮，首次 refresh 后以服务端投影为准。
-      gateContext: "none",
+      // 决策档判断时看不看前文：初始值就是默认 turns / 4 轮，首次 refresh 后以服务端投影为准。
+      gateContext: GATE_CONTEXT_DEFAULT,
       gateContextTurns: GATE_CONTEXT_TURNS_DEFAULT,
       // 决策档的召回门槛：初始值就是默认 0.45，首次 refresh 后以服务端投影为准。
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,

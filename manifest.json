@@ -20,8 +20,14 @@
     "app/models.infer"
   ],
   "network": {
-    "allowedHosts": ["127.0.0.1", "localhost"],
-    "methods": ["GET", "POST"],
+    "allowedHosts": [
+      "127.0.0.1",
+      "localhost"
+    ],
+    "methods": [
+      "GET",
+      "POST"
+    ],
     "allowLocalhost": true,
     "defaultTimeoutMs": 1500,
     "maxResponseBytes": 2097152
@@ -29,7 +35,9 @@
   "contributes": {
     "settings": {
       "title": "OpenViking",
-      "ui": { "route": "/settings.html" },
+      "ui": {
+        "route": "/settings.html"
+      },
       "schema": {
         "type": "object",
         "properties": {
@@ -74,16 +82,36 @@
             "title": "召回判断",
             "description": "off 关闭、永远召回；rules 规则判断，只跳过极短的纯操作指令；llm 语言模型判断（宿主生成式模型）看这一句要不要查历史；decision 决策模型判断（/v1/systemone，choice + 内置 criteria），复用决策服务那组配置。决策服务（地址与模型）没配好时不出现 decision 这一档，存着的 decision 会归一化成 off。",
             "default": "off",
-            "enum": ["off", "rules", "llm", "decision"],
-            "ui": { "enumLabels": ["关闭", "规则判断", "语言模型判断", "决策模型判断"] }
+            "enum": [
+              "off",
+              "rules",
+              "llm",
+              "decision"
+            ],
+            "ui": {
+              "enumLabels": [
+                "关闭",
+                "规则判断",
+                "语言模型判断",
+                "决策模型判断"
+              ]
+            }
           },
           "gateFallback": {
             "type": "string",
             "title": "判断失败时",
             "description": "只对「语言模型判断」与「决策模型判断」两档生效：这两档判断失败（网络错、超时、返回结构不认识、提示词为空）时怎么办。recall 照常召回（默认，不过滤）；rules 退到规则判断跑一遍，规则说跳过才跳过。另两档不依赖外部服务，不受这个设置影响。非法值归一化成 recall。",
             "default": "recall",
-            "enum": ["recall", "rules"],
-            "ui": { "enumLabels": ["照常召回（不过滤）", "退到规则判断"] }
+            "enum": [
+              "recall",
+              "rules"
+            ],
+            "ui": {
+              "enumLabels": [
+                "照常召回（不过滤）",
+                "退到规则判断"
+              ]
+            }
           },
           "gatePrompt": {
             "type": "string",
@@ -100,10 +128,18 @@
           "gateContext": {
             "type": "string",
             "title": "判断前文",
-            "description": "决策模型判断（decision 档）时看不看前文：none 只看最后一条用户消息；turns 带上最近几轮问答一起判断。只在 decision 档生效，非法值归一化成 none。",
-            "default": "none",
-            "enum": ["none", "turns"],
-            "ui": { "enumLabels": ["不看前文", "带最近几轮对话"] }
+            "description": "决策模型判断（decision 档）时看不看前文：turns（默认）带上最近几轮问答一起判断，前文里找得到就不去共享库查；none 只看最后一条用户消息。只在 decision 档生效，非法值归一化成 turns。",
+            "default": "turns",
+            "enum": [
+              "none",
+              "turns"
+            ],
+            "ui": {
+              "enumLabels": [
+                "不看前文",
+                "带最近几轮对话"
+              ]
+            }
           },
           "gateContextTurns": {
             "type": "string",
@@ -134,8 +170,16 @@
             "title": "结果重排",
             "description": "off 原样注入；llm 按 rerankChannels 配置的通道做精排。任一路失败只弃权，全部弃权时原样保留。",
             "default": "off",
-            "enum": ["off", "llm"],
-            "ui": { "enumLabels": ["关", "开启"] }
+            "enum": [
+              "off",
+              "llm"
+            ],
+            "ui": {
+              "enumLabels": [
+                "关",
+                "开启"
+              ]
+            }
           },
           "rerankChannels": {
             "type": "string",
@@ -210,8 +254,16 @@
             "title": "召回查询",
             "description": "last 只用最后一条用户文本；context 拼最近三条用户文本，总长最多 300 字符、最新一条完整。",
             "default": "last",
-            "enum": ["last", "context"],
-            "ui": { "enumLabels": ["最后一句", "带上文"] }
+            "enum": [
+              "last",
+              "context"
+            ],
+            "ui": {
+              "enumLabels": [
+                "最后一句",
+                "带上文"
+              ]
+            }
           },
           "autoCapture": {
             "type": "boolean",
@@ -230,7 +282,10 @@
             "title": "召回范围",
             "description": "all 跨门牌召回（别的机器、Hermes 写的也能看到），self 只看本机。",
             "default": "all",
-            "enum": ["all", "self"]
+            "enum": [
+              "all",
+              "self"
+            ]
           },
           "excludedPeers": {
             "type": "string",
@@ -281,7 +336,9 @@
         "realization": "page",
         "siteNavEntry": true,
         "pageIcon": "assets/icon.svg",
-        "face": { "image": "assets/cover.svg" }
+        "face": {
+          "image": "assets/cover.svg"
+        }
       },
       {
         "id": "status",
@@ -289,7 +346,9 @@
         "description": "常驻小卡：连通、peer、开关、探针计数",
         "route": "/card.html",
         "cardForm": "flush",
-        "face": { "image": "assets/cover.svg" },
+        "face": {
+          "image": "assets/cover.svg"
+        },
         "functionPanel": {
           "id": "openviking-status",
           "label": "OpenViking",

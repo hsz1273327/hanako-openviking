@@ -72,7 +72,7 @@ export const DEFAULTS = {
   queryMode: "last",
   gatePrompt: "",
   gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
-  gateContext: "none",
+  gateContext: "turns",
   gateContextTurns: GATE_CONTEXT_TURNS_DEFAULT,
   gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,

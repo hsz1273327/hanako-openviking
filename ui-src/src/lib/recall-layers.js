@@ -488,15 +488,18 @@ export function normalizeGateContextPrompt(value) {
 }
 
 // 判断前文：与 src/ov/settings.js 的 GATE_CONTEXT_MODES 同值。
+// 默认是 turns：只看当前消息时，模型只能判「这句话自不自足」，判不出
+// 「前文里找不找得到」，结果是前文明明有的也去查一次库。
 export const GATE_CONTEXT_MODES = Object.freeze(["none", "turns"]);
+export const GATE_CONTEXT_DEFAULT = "turns";
 export const GATE_CONTEXT_LABELS = Object.freeze({
   none: "不看前文",
   turns: "带最近几轮对话",
 });
 
-/** 与 src/ov/settings.js 的 normalizeGateContext 同口径：非法值回 none。 */
+/** 与 src/ov/settings.js 的 normalizeGateContext 同口径：非法值回默认。 */
 export function normalizeGateContext(value) {
-  return oneOf(value, GATE_CONTEXT_MODES, "none");
+  return oneOf(value, GATE_CONTEXT_MODES, GATE_CONTEXT_DEFAULT);
 }
 
 /** 「判断前文」下拉的选项：两项，文案与 manifest 的 enumLabels 逐字一致。 */

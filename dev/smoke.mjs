@@ -2093,7 +2093,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // 判断前文：枚举两端同值、轮数边界两端同值、默认题面逐字一致；manifest 声明齐全。
   eq(
-    "判断前文两端同值：none / turns 两个枚举、轮数默认 4 边界 1–12 步长 1、脏值都回 none / 4；默认题面两端逐字一致且不是不带前文那一份",
+    "判断前文两端同值：none / turns 两个枚举、轮数默认 4 边界 1–12 步长 1、脏值都回 turns（默认）/ 4；默认题面两端逐字一致且不是不带前文那一份",
     [
       GATE_CONTEXT_MODES,
       gateContextOptions().map((option) => [option.value, option.label]),
@@ -2116,8 +2116,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [1, 1],
       [12, 12],
       [1, 1],
-      ["turns", "none", "none", "none", "none", "none"],
-      ["turns", "none", "none", "none", "none", "none"],
+      ["turns", "none", "turns", "turns", "turns", "turns"],
+      ["turns", "none", "turns", "turns", "turns", "turns"],
       [4, 4, 4, 4, 4, 4, 4, 4, 2, 12, 4, 4],
       [4, 4, 4, 4, 4, 4, 4, 4, 2, 12, 4, 4],
       [DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT],
@@ -2152,10 +2152,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "当前为默认提示词",
       "已修改",
       true,
-      [["none", "turns"], ["不看前文", "带最近几轮对话"], "none"],
+      [["none", "turns"], ["不看前文", "带最近几轮对话"], "turns"],
       ["string", "4"],
       ["string", DEFAULT_GATE_CONTEXT_PROMPT],
-      ["none", 4, DEFAULT_GATE_CONTEXT_PROMPT],
+      ["turns", 4, DEFAULT_GATE_CONTEXT_PROMPT],
     ],
   );
 
@@ -2994,9 +2994,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   {
     const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
     eq(
-      "首屏判断前文读回默认 none / 4 轮 / 带前文题面坐默认全文",
+      "首屏判断前文读回默认 turns / 4 轮 / 带前文题面坐默认全文",
       [state.form.gateContext, state.form.gateContextTurns, state.prompts.context],
-      ["none", 4, DEFAULT_GATE_CONTEXT_PROMPT],
+      ["turns", 4, DEFAULT_GATE_CONTEXT_PROMPT],
     );
     eq(
       "同一个 textarea 按 gateContext 切绑不同题面：decision+none 绑不带前文那份、decision+turns 绑带前文那份、llm 绑语言模型那份",
@@ -3010,7 +3010,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ["decision", "gateDecisionPrompt"],
         ["context", "gateContextPrompt"],
         ["gate", "gatePrompt"],
-        ["decision", "gateDecisionPrompt"],
+        ["context", "gateContextPrompt"],
       ],
     );
 
@@ -3547,7 +3547,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gatePrompt: "",
     gateModel: "",
     gateDecisionPrompt: "",
-    gateContext: "none",
+    gateContext: "turns",
     gateContextTurns: 4,
     gateContextPrompt: "",
     gateDecisionThreshold: 0.45,
@@ -4755,14 +4755,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 
   eq(
-    "GET 缺省时判断前文也是默认值（none / 轮数 \"4\" 字符串 / 带前文题面是默认问法）",
+    "GET 缺省时判断前文也是默认值（turns / 轮数 \"4\" 字符串 / 带前文题面是默认问法）",
     [
       defaults.body.gateContext,
       defaults.body.gateContextTurns,
       typeof defaults.body.gateContextTurns,
       defaults.body.gateContextPrompt,
     ],
-    ["none", "4", "string", DEFAULT_GATE_CONTEXT_PROMPT],
+    ["turns", "4", "string", DEFAULT_GATE_CONTEXT_PROMPT],
   );
 
   store.recallGate = "bogus";
@@ -5035,14 +5035,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     delete store.gateContextPrompt;
     const missingPrompt = await get();
     eq(
-      "GET 把脏 gateContext 收敛成 none、把越界轮数收敛成 \"4\"；空题面保留空串，缺项才投影默认题面",
+      "GET 把脏 gateContext 收敛成 turns（默认）、把越界轮数收敛成 \"4\"；空题面保留空串，缺项才投影默认题面",
       [
         dirtyContext.body.gateContext,
         dirtyContext.body.gateContextTurns,
         dirtyContext.body.gateContextPrompt,
         missingPrompt.body.gateContextPrompt,
       ],
-      ["none", "4", "", DEFAULT_GATE_CONTEXT_PROMPT],
+      ["turns", "4", "", DEFAULT_GATE_CONTEXT_PROMPT],
     );
 
     writes.length = 0;
@@ -6868,7 +6868,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     };
     const noneRequest = decisionFetch({ choice: "need", confidence: 0.8 });
     await createRecallHandler(
-      recallSdk({ values, fetchImpl: noneRequest.fetchImpl, dataDir: dir }),
+      recallSdk({
+        values: { ...values, gateContext: "none" },
+        fetchImpl: noneRequest.fetchImpl,
+        dataDir: dir,
+      }),
     )({
       payload,
       session: { sessionId: "decision-context-none" },
@@ -7113,7 +7117,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [gateContextPromptOf({}), gateContextPromptOf({ gateContextPrompt: "  \n " }), gateContextPromptOf({ gateContextPrompt: "  自定义  " })],
     ],
     [
-      ["none", "turns", "none"],
+      ["turns", "turns", "turns"],
       [4, 12, 4],
       ["", "", "自定义"],
     ],
