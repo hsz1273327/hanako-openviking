@@ -1,10 +1,14 @@
 <script setup>
-// 精排卡：「查回来之后怎么排序」——开关，加三条并列的路。
+// 精排卡：「查回来之后怎么排序」——开关，加三条路，顺序固定。
 //
-// 三条路是平的，谁也不是谁的备胎：
-//   语言模型    宿主提供，恒启用（至少保留一路），吃 rerankPrompt 那份清单模板；
 //   判别模型    配了决策服务才出现，吃 rerankSystemonePrompt 那份逐条题面；
-//   rerank 模型 配了精排服务才出现，交叉编码器成对打分，没有提示词可配。
+//   rerank 模型 配了精排服务才出现，交叉编码器成对打分，没有提示词可配；
+//   语言模型    宿主提供，永远排在最后，是兜底那一格，吃 rerankPrompt。
+//
+// 启用的那几条就是主路：并行跑、按权重合并，有结果就不叫兜底（语言模型拨开也在里面）。
+// 语言模型不可关：主路全部失败或全部弃权时必定被调一次；它那个开关只决定
+// 「要不要参与主路打分」（开着就跟其他路一起算分，适合想让它参与的人；关着就只在
+// 主路不通时接一手，省一次 LLM）。它就算在主路里失败过，兜底也会再试一次。
 //
 // 一条路只有一行头（类型 + 启用开关 + 权重 + 「配置」），点开才显示规则区：
 // 提示词 / 题面是大块文本，权重与超时是数字，收起时不该占着一屏。
@@ -13,9 +17,13 @@
 // 提交仍然是**整单**：本卡只调 store 的动作（setForm / setPrompt / setLane*），
 // 请求体由 lib/panel-store.js 的 readLayers() 整份拼。组件里不出现任何 post / fetch。
 import { computed, ref } from "vue";
-import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSwitch } from "naive-ui";
+import { NButton, NCard, NGrid, NGridItem, NInput, NInputNumber, NSwitch, NTag } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
-import { RERANK_LANE_NO_PROMPT_NOTE } from "../lib/recall-layers.js";
+import {
+  RERANK_FALLBACK_TAG,
+  RERANK_LANE_NO_PROMPT_NOTE,
+  RERANK_LANE_PARTICIPATE_NOTE,
+} from "../lib/recall-layers.js";
 import { lightThemeOverrides } from "../theme.js";
 
 const {
@@ -105,7 +113,7 @@ function borderStyle(lane) {
         @update:value="onSwitch"
       />
       <span class="field-hint">
-        开启后按下面启用的路精排；一个启用通道都没有时直接跳过，候选原样保留。任一路失败只弃权，全部弃权也原样保留。
+        开启后按下面启用的路精排：启用的那几条并行打分、按权重合并，拿到结果就用；都不通时由语言模型兜底（不管它自己有没有在里头）。任一路失败只弃权，兜底也失败时候选原样保留。
       </span>
     </div>
 
@@ -121,17 +129,18 @@ function borderStyle(lane) {
         >
           <div class="lane-head">
             <span class="lane-name">{{ lane.label }}</span>
+            <!-- 语言模型那一路的角色标签：它排在最后，是兜底。 -->
+            <NTag v-if="lane.fallback" size="small" type="info" :bordered="false">
+              {{ RERANK_FALLBACK_TAG }}
+            </NTag>
 
-            <!-- 语言模型那一条恒启用：开关是禁用态，旁边写明为什么。 -->
             <NSwitch
               size="small"
               :aria-label="`${lane.label}启用`"
               :value="lane.enabled"
-              :disabled="lane.locked"
               @update:value="(value) => setLaneEnabled(lane.type, value)"
             />
-            <span v-if="lane.locked" class="lane-lock">恒启用 · 至少保留一路</span>
-            <span v-else-if="lane.unavailable" class="lane-warn">服务未配置，不会生效</span>
+            <span v-if="lane.unavailable" class="lane-warn">服务未配置，不会生效</span>
 
             <span class="lane-weight">权重 {{ lane.weight }}</span>
             <NButton
@@ -145,8 +154,11 @@ function borderStyle(lane) {
             </NButton>
           </div>
 
+          <!-- 语言模型那格的开关管什么：这一句只写给兜底那一路，开关下面一直可见。 -->
+          <p v-if="lane.fallback" class="lane-switch-note">{{ RERANK_LANE_PARTICIPATE_NOTE }}</p>
+
           <div class="lane-body" :hidden="openLane !== lane.type">
-            <!-- 语言模型：提示词（编号清单模板） -->
+            <!-- 语言模型：提示词（编号清单模板），参与主路与兜底都用它 -->
             <div v-if="lane.type === 'model'" class="field">
               <div class="prompt-head">
                 <label for="rerankPrompt">提示词</label>
@@ -260,7 +272,7 @@ function borderStyle(lane) {
 
       <pre id="rerankTestResult" class="rerank-test-result" :hidden="state.channelTest.hidden">{{ state.channelTest.text }}</pre>
 
-      <span class="field-hint">三条路各配各的：语言模型吃提示词，判别模型吃题面，rerank 模型只打分不吃提示词。多路按权重加权合并，单路失败只弃权不归零。超时留空 = 用该路的默认值（判别模型按候选数自适应）；语言模型那一路停不了，至少保留一路。</span>
+      <span class="field-hint">三条路各配各的：判别模型吃题面，rerank 模型只打分不吃提示词，语言模型吃提示词。启用的那几条一起按权重加权合并，单路失败只弃权不归零；语言模型那一路开着就在主路里一起算分，关着就只在主路不通时接手（兜底不会没有；它就算在主路里失败过，兜底也会再试一次）。超时留空 = 用该路的默认值（判别模型按候选数自适应）。</span>
     </div>
   </NCard>
 </template>

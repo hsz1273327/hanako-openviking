@@ -168,7 +168,7 @@
           "rerank": {
             "type": "string",
             "title": "结果精排",
-            "description": "off 原样注入；llm 按配置好的那几条路做精排。任一路失败只弃权，全部弃权时原样保留；一个启用通道都没有时直接跳过精排。",
+            "description": "off 原样注入；llm 按配置好的那几条路做精排。三条路的顺序固定：判别模型 → rerank 模型 → 语言模型。主路 = 当前启用的所有路（任意组合，语言模型拨开也算），并行打分后按权重合并，有结果就用；主路全失败或全弃权时由语言模型兜底（这一层不可关，它就算在主路里失败过也会再调一次）。只有兜底自己也失败时，候选才原样保留。",
             "default": "off",
             "enum": [
               "off",
@@ -184,13 +184,19 @@
           "rerankChannels": {
             "type": "string",
             "title": "精排通道",
-            "description": "JSON 数组，每项 {type: rerank|systemone|model, name, url, model, weight, enabled}。三种类型各最多一条（同类型重复的只留第一条），对应界面上三条固定的路：语言模型（model，恒启用）/ 判别模型（systemone）/ rerank 模型（rerank）。一个启用通道都没有时直接跳过精排，不拿宿主模型顶上。留空时自动补出 rerankModel 那一条 model 通道（存量迁移）。",
+            "description": "JSON 数组，每项 {type: rerank|systemone|model, name, url, model, weight, enabled}。三种类型各最多一条（同类型重复的只留第一条），对应界面上三条固定的路：判别模型（systemone）/ rerank 模型（rerank）/ 语言模型（model，兜底）。语言模型那一条不可关（配置里没有它时读取侧会补一条）；它的 enabled 管的是「要不要进主路一起打分」，进不进都不影响兜底。留空时自动补出 rerankModel 那一条 model 通道（存量迁移）。改通道表请连 rerankLaneSchema 一起写，它说明这份表按哪一版语义读。",
+            "default": ""
+          },
+          "rerankLaneSchema": {
+            "type": "string",
+            "title": "精排通道语义版本",
+            "description": "精排通道配置的语义版本，由应用在保存时自动写入，不必手改。缺失或小于 2 = 老语义（语言模型那一路恒启用，当年那个开关是置灰的）；2 = 新语义（那一路可开关、默认不进主路）。读到老版本时把语言模型通道的 enabled 归成 false，下一次保存连同 \"2\" 一起写回。",
             "default": ""
           },
           "rerankPrompt": {
             "type": "string",
             "title": "精排提示词",
-            "description": "语言模型（宿主模型）那一路的提示词模板，最长 2000 字符。留空表示使用内置默认模板。支持 {{message}} 与 {{candidates}}。判别模型那一路不吃这一份，它自己有 rerankSystemonePrompt。",
+            "description": "语言模型那一路的提示词模板，最长 2000 字符。这一路平时只在主路不通时被调（兜底），勾上参与主路时也拿它打分。留空表示使用内置默认模板。支持 {{message}} 与 {{candidates}}。判别模型那一路不吃这一份，它自己有 rerankSystemonePrompt。",
             "default": ""
           },
           "rerankSystemonePrompt": {

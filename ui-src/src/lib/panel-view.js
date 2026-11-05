@@ -251,8 +251,14 @@ export function formatChannelTest(out) {
     // 整对回退的通道要说明为什么没用它自己的地址 / 模型名。
     if (channel?.pairNote) lines.push(`${name} · ${channel.pairNote}`);
   }
-  if (out?.fallback) {
-    lines.push("合并：全部通道弃权，原样保留全部候选");
+  // fallback 只有两个取值：none（主路成功）与 model（主路垮了，走了兜底）。
+  // 兜底自己也失败时合并结果是空的：那时候选一条没被排序，说清“原样保留”。
+  if (out?.fallback === "model") {
+    lines.push(
+      out?.merged == null
+        ? "合并：主路没结果，兜底也没接住，原样保留全部候选"
+        : "合并：主路没有可用的结果，由语言模型兜底",
+    );
   } else {
     lines.push(
       `合并：[${(Array.isArray(out?.merged) ? out.merged : []).map((score) => Number(score).toFixed(2)).join(", ")}]`,

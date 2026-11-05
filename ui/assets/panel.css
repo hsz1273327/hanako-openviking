@@ -396,13 +396,16 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 .lane-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .lane-name { font-size: 12px; font-weight: 500; }
-.lane-lock,
+.lane-switch-note,
 .lane-warn,
 .lane-weight { font-size: 10.5px; }
-.lane-lock { opacity: 0.5; }
+/* 兜底那一路开关的作用说明：一行小字，一直可见（不藏在展开区里）。 */
+.lane-switch-note { margin: 2px 0 0; line-height: 1.45; opacity: 0.5; }
 .lane-warn { color: #b8564d; }
 .lane-weight { margin-left: auto; opacity: 0.5; font-variant-numeric: tabular-nums; }
 .lane-config { flex: none; }
+/* 兜底标签：不跟着窄屏一起缩（它是那一路的定位，不该被权重那列挤掉）。 */
+.lane-head .n-tag { flex: none; }
 
 .lane-body { margin-top: 10px; display: grid; gap: 8px; min-width: 0; }
 .lane-body .field { margin-bottom: 0; }

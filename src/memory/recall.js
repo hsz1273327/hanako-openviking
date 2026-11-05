@@ -17,6 +17,11 @@ import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
   GATE_DECISION_THRESHOLD_DEFAULT,
+  RERANK_FALLBACK_CHANNEL_TYPE,
+  RERANK_FALLBACK_MODEL,
+  RERANK_FALLBACK_NONE,
+  RERANK_FALLBACK_VALUES,
+  ensureModelChannel,
   normalizeGateContext,
   normalizeGateContextPrompt,
   normalizeGateContextTurns,
@@ -1334,17 +1339,16 @@ export function resolveRerankChannel(channel, switches) {
 }
 
 /**
- * 这一轮实际要跑的通道。
+ * 这一轮要考虑的全部路：配置里那几条 + 兜底那一条（不管它的开关）。
  *
- * 只跑启用的那几条，一个都没有就返回空数组（调用方据此直接跳过精排）。
- * 不再偷偷用宿主模型顶上：三种类型是平的三条路，谁也不是谁的备胎。
+ * 兜底不可关，所以它必须在这个列表里：开关只决定它「要不要额外参与主路合并」，
+ * 不决定它能不能兜底。配置里没有 model 通道时由 ensureModelChannel 补一条（默认不参与主路）。
  * 存量 rerankModel 的值由 src/ov/settings.js 的 migrateRerankChannels 在读取侧
  * 并成一条 model 通道，所以到这里已经没有需要兼容的旧形态。
  */
-export function rerankChannelsOf(switches) {
+export function rerankLanesOf(switches) {
   const raw = switches?.rerankChannels;
-  const configured = Array.isArray(raw) ? raw : parseRerankChannels(raw);
-  return configured.filter((channel) => channel && channel.enabled !== false);
+  return ensureModelChannel(Array.isArray(raw) ? raw : parseRerankChannels(raw));
 }
 
 /**
@@ -1487,12 +1491,94 @@ export function promptSourceOf(type) {
   return "none";
 }
 
+export { RERANK_FALLBACK_MODEL, RERANK_FALLBACK_NONE, RERANK_FALLBACK_VALUES };
+
 /**
- * 跑一轮多路精排。
+ * 跑一路打分：成功回分数与标准化结果，失败只标记这一路，绝不把失败当成 0 分。
+ *
+ * 从 runRerankChannels 里拆出来是因为现在分两段跑：先主路（并行），主路没结果才跑兜底。
+ * 两段用的是同一份打分逻辑，只是调用时机不同。
+ */
+async function scoreRerankLane({ sdk, switches, channel, query, candidates, instructionFor }) {
+  const channelStarted = Date.now();
+  let scoreScale = "probability";
+  try {
+    // 端点解析完之后仍为空：这一类打分服务没配，这一路直接弃权。
+    if ((channel.type === "rerank" || channel.type === "systemone") && !channel.url) {
+      throw new Error("打分服务未配置，这一路不会生效");
+    }
+    let scores;
+    if (channel.type === "rerank") {
+      const result = await scoreRerankChannel(sdk, channel, query, candidates);
+      scores = result.scores;
+      scoreScale = result.scoreScale;
+    } else if (channel.type === "systemone") {
+      scores = await scoreSystemOneChannel(sdk, channel, query, candidates, instructionFor);
+    } else if (channel.type === "model") {
+      scores = await scoreModelChannel(sdk, switches, channel, query, candidates);
+    } else {
+      throw new Error(`未知通道类型 ${channel.type}`);
+    }
+    const scaled = normalizeChannelScores(scores);
+    if (!scaled) {
+      // 所有候选同分：这一路在这批上没有区分力，弃权，不进分母。
+      // 全是 null 是另一回事：这一路一条都没打分，同样没票可投。
+      return {
+        channel,
+        weight: channel.weight,
+        ok: false,
+        abstained: true,
+        scores,
+        scoreScale,
+        error: Array.isArray(scores) && scores.some((score) => score !== null && score !== undefined)
+          ? "候选全部同分，这一路没有区分力"
+          : "这一路没有给任何候选打分",
+        elapsedMs: Date.now() - channelStarted,
+      };
+    }
+    return {
+      channel,
+      weight: channel.weight,
+      ok: true,
+      scores,
+      scoreScale,
+      normalized: scaled.normalized,
+      range: [scaled.min, scaled.max],
+      elapsedMs: Date.now() - channelStarted,
+    };
+  } catch (error) {
+    return {
+      channel,
+      weight: channel.weight,
+      ok: false,
+      scoreScale,
+      error: reasonOf(error),
+      elapsedMs: Date.now() - channelStarted,
+    };
+  }
+}
+
+/**
+ * 跑一轮多路精排。两层：主路（当前启用的所有路，并行合并）+ 兜底（语言模型，无条件值班）。
+ *
+ *   1. 参与的路（判别模型 / rerank 模型 / 语言模型 任意组合）并行跑、按权重合并；
+ *      拿到结果就用；
+ *   2. 主路全失败 / 全弃权（合并结果为 null）/ 一条参与的路都没有 -> 无条件调兜底一次；
+ *   3. 兜底也失败（抛错 / 解析不出）-> 原样保留全部候选。
+ *
+ * 语言模型那一路的 enabled 管的是「要不要进主路参加合并」，不是「能不能兜底」：
+ * 开着时它就是主路里的一路（与另两条一起算分），关着时它不参与主路。两种情况下兜底都在。
+ *
+ * 它已经在主路里跑过而且失败了，兜底仍然会再调它一次：这是故意的。
+ * 主路那一次与兜底那一次隔着一段时间，服务拥塞、瞬时超时、模型排障都可能已恢复；
+ * 兜底本来就是“再试一手”的位置，为了省一次调用而把这一步去掉，就白留了这层保险。
  *
  * 每路先在自己批内 min-max 标准化，再按权重平均；同分的一路直接弃权。
- * 没一路可用 -> fallback=true、indexes 是全部候选（不排序、不删）。
  * 单路失败只让那一路弃权，不参与分母，也不会把它的失败当成 0 分。
+ *
+ * fallback 只有两个取值，探针与日志都看它：
+ *   none  主路成功，没触发兜底
+ *   model 主路垮了，走了兜底（它自己也失败是另一层：fallbackError 非空）
  */
 export async function runRerankChannels({ sdk, switches, query, items, channels } = {}) {
   const startedAt = Date.now();
@@ -1500,78 +1586,48 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   const candidates = (Array.isArray(items) ? items : []).map((item) =>
     typeof item === "string" ? { text: item } : item,
   );
-  const list = (Array.isArray(channels) && channels.length ? channels : rerankChannelsOf(switches))
-    .map((channel) => resolveRerankChannel(channel, switches));
+  const given = Array.isArray(channels) && channels.length ? channels : rerankLanesOf(switches);
+  const lanes = given
+    .map((channel) => resolveRerankChannel(channel, switches))
+    .filter((channel) => channel && channel.type);
+  // 兜底那一路永远在（配置里没有时由投影补上）；它的开关只管要不要参与主路。
+  const fallbackLane = lanes.find((lane) => lane.type === RERANK_FALLBACK_CHANNEL_TYPE) || null;
+  const participating = lanes.filter((lane) => lane.enabled !== false);
   // 判别模型的题面只在这里渲染一次：同一个模板给全部候选逐条换序号。
   const systemoneTemplate = systemonePromptOf(switches);
   const instructionFor = (position) => renderSystemoneInstruction(systemoneTemplate, position);
+  const runLane = (lane) =>
+    scoreRerankLane({ sdk, switches, channel: lane, query, candidates, instructionFor });
 
-  const results = await Promise.all(
-    list.map(async (channel) => {
-      const channelStarted = Date.now();
-      let scoreScale = "probability";
-      try {
-        // 端点解析完之后仍为空：这一类打分服务没配，这一路直接弃权。
-        if ((channel.type === "rerank" || channel.type === "systemone") && !channel.url) {
-          throw new Error("打分服务未配置，这一路不会生效");
-        }
-        let scores;
-        if (channel.type === "rerank") {
-          const result = await scoreRerankChannel(sdk, channel, query, candidates);
-          scores = result.scores;
-          scoreScale = result.scoreScale;
-        } else if (channel.type === "systemone") {
-          scores = await scoreSystemOneChannel(sdk, channel, query, candidates, instructionFor);
-        } else if (channel.type === "model") {
-          scores = await scoreModelChannel(sdk, switches, channel, query, candidates);
-        } else {
-          throw new Error(`未知通道类型 ${channel.type}`);
-        }
-        const scaled = normalizeChannelScores(scores);
-        if (!scaled) {
-          // 所有候选同分：这一路在这批上没有区分力，弃权，不进分母。
-          // 全是 null 是另一回事：这一路一条都没打分，同样没票可投。
-          return {
-            channel,
-            weight: channel.weight,
-            ok: false,
-            abstained: true,
-            scores,
-            scoreScale,
-            error: Array.isArray(scores) && scores.some((score) => score !== null && score !== undefined)
-              ? "候选全部同分，这一路没有区分力"
-              : "这一路没有给任何候选打分",
-            elapsedMs: Date.now() - channelStarted,
-          };
-        }
-        return {
-          channel,
-          weight: channel.weight,
-          ok: true,
-          scores,
-          scoreScale,
-          normalized: scaled.normalized,
-          range: [scaled.min, scaled.max],
-          elapsedMs: Date.now() - channelStarted,
-        };
-      } catch (error) {
-        return {
-          channel,
-          weight: channel.weight,
-          ok: false,
-          scoreScale,
-          error: reasonOf(error),
-          elapsedMs: Date.now() - channelStarted,
-        };
+  const mainResults = await Promise.all(participating.map(runLane));
+  let results = mainResults;
+  // 主路自己拿到的合并结果：兜底那个取值看的就是它（而不是兜完之后的结果）。
+  const mainMerged = mergeRerankScores(mainResults, candidates.length);
+  let merged = mainMerged;
+  let fallbackError = "";
+
+  if (merged === null) {
+    if (!fallbackLane) {
+      // 只可能发生在调用方手写了不含语言模型的通道表时：没有兜底可调。
+      fallbackError = "没有可用的兜底路";
+    } else {
+      // 无条件调一次：它在主路里跑过也一样再试一手（网络抖动、瞬时拥塞可能已恢复）。
+      const spare = await runLane(fallbackLane);
+      results = [...mainResults, spare];
+      const spareMerged = mergeRerankScores([spare], candidates.length);
+      if (spareMerged !== null) merged = spareMerged;
+      else if (!spare.ok && spare.abstained !== true) {
+        // 只有真失败（抛错 / 解析不出）才多记一句；它自己弃权不算失败，那句日志会误导。
+        fallbackError = spare.error;
       }
-    }),
-  );
+    }
+  }
 
-  const merged = mergeRerankScores(results, candidates.length);
-  const fallback = merged === null;
-  const indexes = fallback
-    ? candidates.map((_, index) => index)
-    : dropRejectedIndexes(rankRerankIndexes(merged), results);
+  const fallback = mainMerged === null ? RERANK_FALLBACK_MODEL : RERANK_FALLBACK_NONE;
+  const indexes =
+    merged === null
+      ? candidates.map((_, index) => index)
+      : dropRejectedIndexes(rankRerankIndexes(merged), results);
 
   return {
     // 探针把两段数字都留下：原始分数看量纲，标准化分数看实际贡献。
@@ -1604,7 +1660,11 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
     indexes,
     kept: indexes.map((index) => candidates[index]),
     fallback,
-    channelCount: list.length,
+    // 兜底没能给出结果的原因（只有在 fallback=model 时才会有）。日志靠它分两句。
+    ...(fallbackError ? { fallbackError } : {}),
+    // 配置里那几条路的条数 / 这一轮真跑了的条数。
+    laneCount: lanes.length,
+    channelCount: results.length,
     elapsedMs: Date.now() - startedAt,
   };
 }
@@ -2084,58 +2144,67 @@ export function createRecallHandler(sdk, options = {}) {
     // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
     let kept = items;
     if (switches.rerank === "llm" && items.length >= 2) {
-      const channels = rerankChannelsOf(switches);
-      if (!channels.length) {
-        // 三条路都停用（或者一条都没配）：不拿宿主模型顶上，候选原样保留。
-        log(sdk, "info", `rerank: no enabled channel, skip (session=${sessionId})`);
+      // 兜底不可关，所以这里不存在「没有路可跑」那一种状态：配置里没有 model 通道时
+      // 由 rerankLanesOf 补一条，它至少能在主路垮了之后接一手。
+      const lanes = rerankLanesOf(switches);
+      // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
+      writeRerankSample(sdk, sessionId, { query: lastText, items });
+
+      const outcome = await runRerankChannels({
+        sdk,
+        switches,
+        query: lastText,
+        items,
+        channels: lanes,
+      });
+      kept = outcome.kept;
+
+      for (const channel of outcome.channels) {
+        if (!channel.ok) {
+          log(
+            sdk,
+            "info",
+            `rerank: channel ${channel.type} failed, abstained (session=${sessionId}) ${channel.error}`,
+          );
+        }
+      }
+      // 两句：主路算出来的，还是兜底接的。兜底自己也失败时多一句说明（候选原样保留）。
+      if (outcome.fallback === RERANK_FALLBACK_MODEL) {
+        if (outcome.fallbackError) {
+          log(
+            sdk,
+            "info",
+            `rerank: fallback failed, keep all (session=${sessionId}) ${outcome.fallbackError}`,
+          );
+        } else {
+          log(sdk, "info", `rerank: fallback to model (kept=${kept.length}) (session=${sessionId})`);
+        }
       } else {
-        // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
-        writeRerankSample(sdk, sessionId, { query: lastText, items });
+        log(sdk, "info", `rerank: main lanes ok (kept=${kept.length}) (session=${sessionId})`);
+      }
 
-        const outcome = await runRerankChannels({
-          sdk,
-          switches,
-          query: lastText,
-          items,
-          channels,
-        });
-        kept = outcome.kept;
+      if (switches.probe && typeof options.probe === "function") {
+        try {
+          await options.probe("recall/rerank", {
+            session,
+            query: lastText,
+            candidates: items.length,
+            // 配置里那几条路的总数（含没被叫上的兜底那一路）；下面 channels 里只有真跑了的。
+            enabledChannels: outcome.laneCount,
+            channels: outcome.channels,
+            kept: kept.length,
+            fallback: outcome.fallback,
+            elapsedMs: outcome.elapsedMs,
+          });
+        } catch {
+          /* 探针写不进去不能影响本轮对话 */
+        }
+      }
 
-        for (const channel of outcome.channels) {
-          if (!channel.ok) {
-            log(
-              sdk,
-              "info",
-              `rerank: channel ${channel.type} failed, abstained (session=${sessionId}) ${channel.error}`,
-            );
-          }
-        }
-        if (outcome.fallback) {
-          log(sdk, "info", `rerank: all channels abstained, keep all (session=${sessionId})`);
-        }
-
-        if (switches.probe && typeof options.probe === "function") {
-          try {
-            await options.probe("recall/rerank", {
-              session,
-              query: lastText,
-              candidates: items.length,
-              enabledChannels: outcome.channelCount,
-              channels: outcome.channels,
-              kept: kept.length,
-              fallback: outcome.fallback,
-              elapsedMs: outcome.elapsedMs,
-            });
-          } catch {
-            /* 探针写不进去不能影响本轮对话 */
-          }
-        }
-
-        if (!kept.length) {
-          // 有通道成功，且把所有候选都打了 0 分：本轮不注入。
-          log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
-          return undefined;
-        }
+      if (!kept.length) {
+        // 有路成功，且把所有候选都打了 0 分：本轮不注入。
+        log(sdk, "info", `rerank: dropped all (session=${sessionId})`);
+        return undefined;
       }
     }
 

@@ -84,6 +84,10 @@ export const DEFAULTS = {
   rerankSystemonePrompt: "",
   // 存量兜底模型的标识。界面不再显示、运行时不读，只在读取通道时用来补一条 model 通道。
   rerankModel: "",
+  // 精排通道配置的语义版本。空串 = 从没写过（老配置）：模型那一路的 enabled 当年是
+  // 读写两侧硬写成 true 的，不代表用户的选择。默认放空串而不是 "2"：read() 用它填缺失，
+  // 填成 2 就再也看不出「这份配置没迁移过」。
+  rerankLaneSchema: "",
   rerankChannels: "",
   rerankServiceUrl: "",
   rerankServiceModel: "",
@@ -138,9 +142,46 @@ export const ASSEMBLE_MODES = Object.freeze(["off", "rules"]);
 /**
  * 精排通道类型：语言模型（宿主模型）、判别模型（llama.cpp systemone）、rerank 模型（OpenAI 兼容 rerank）。
  *
- * 三种类型各最多一条，界面上是三条固定的路，谁也不是谁的备胎。
+ * 三种类型各最多一条。界面上是三条固定的路，顺序固定为 判别模型 → rerank 模型 → 语言模型，
+ * 见 RERANK_LANE_ORDER；配置里的枚举顺序只是存量数据的写法，不代表执行顺序。
  */
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
+
+/**
+ * 靠打分服务的那两种路（判别模型 / rerank 模型）。
+ *
+ * 注意它不等于「主路」：运行时的主路是「当前启用的所有路」，语言模型拨开也算在里面。
+ * 这个常量只用来拼展示顺序（两种服务路在前、兜底在后）与判断服务配置。
+ */
+export const RERANK_SERVICE_CHANNEL_TYPES = Object.freeze(["systemone", "rerank"]);
+
+/** 兜底那一路：主路全部失败或全部弃权时必定被调一次。它不可关，永远排在最后。 */
+export const RERANK_FALLBACK_CHANNEL_TYPE = "model";
+/**
+ * 三条路固定的展示顺序：判别模型 → rerank 模型 → 语言模型。
+ *
+ * 面板里另存一份逐字相同的常量（ui-src/src/lib/recall-layers.js），冒烟比对两边。
+ */
+export const RERANK_LANE_ORDER = Object.freeze([
+  ...RERANK_SERVICE_CHANNEL_TYPES,
+  RERANK_FALLBACK_CHANNEL_TYPE,
+]);
+
+/**
+ * 这一轮兜底有没有被叫上来（探针里字段就叫 fallback）：
+ *
+ *   none   主路成功，没触发兜底
+ *   model  主路垮了（全失败 / 全弃权 / 一条主路都没启用），走了兜底
+ *
+ * 只有两个值：兜底本身不可关，所以不存在「该兜底但没兜」这个状态。
+ * 兜底跑了但自己也失败是另一回事（候选原样保留），由日志那一句与探针的 channels 说明。
+ */
+export const RERANK_FALLBACK_NONE = "none";
+export const RERANK_FALLBACK_MODEL = "model";
+export const RERANK_FALLBACK_VALUES = Object.freeze([
+  RERANK_FALLBACK_NONE,
+  RERANK_FALLBACK_MODEL,
+]);
 
 /**
  * 通道数组的存量上限。每种类型只留一条，所以真实能跑的永远不超过三条；
@@ -489,8 +530,9 @@ export function parseRerankChannel(raw) {
     url,
     model: type === "model" ? (model ? normalizeGateModel(model) : "") : model,
     weight,
-    // 语言模型（model 通道）恒启用：精排至少要留一路，停用状态在读写两侧都不成立。
-    enabled: type === "model" ? true : enabled,
+    // 语言模型那一路的 enabled 只管「要不要额外参与主路合并」，不决定兜底：
+    // 它就是兜底，不参与主路也会在主路垮了之后被调一次。
+    enabled,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
 }
@@ -498,7 +540,7 @@ export function parseRerankChannel(raw) {
 /**
  * 每种类型最多一条：同类型的重复项只留第一条，其余丢掉。
  *
- * 三条路是固定的（语言模型 / 判别模型 / rerank 模型），数组形态只为存量兼容保留。
+ * 三条路是固定的（判别模型 → rerank 模型 → 语言模型），数组形态只为存量兼容保留。
  * 收敛在读与写两侧都做，不让「同一个类型两条」这种状态在配置里活下来。
  */
 export function dedupeRerankChannels(list) {
@@ -513,12 +555,56 @@ export function dedupeRerankChannels(list) {
   return out;
 }
 
+/** 精排通道配置的语义版本常量。见 rerankLaneSchemaIsLegacy。 */
+export const RERANK_LANE_SCHEMA = 2;
+
+/**
+ * 这份精排通道配置是不是老语义（model 通道恒启用）？
+ *
+ *   ""（从没写过）/ 小于 2 / 认不出的值  老语义
+ *   >= 2                              新语义（model 可开关，默认不进主路）
+ *
+ * 当年那一格是置灰的：用户在界面上没得选，所以配置里躺着的 enabled: true 不是他的意思。
+ * 版本号是这件事的唯一凭据，不能用「enabled 是不是 true」推——用户迁移后主动拨开也是 true。
+ */
+export function rerankLaneSchemaIsLegacy(raw) {
+  const value = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+  if (!Number.isFinite(value)) return true;
+  return value < RERANK_LANE_SCHEMA;
+}
+
+/** 读出来的版本号：老语义一律当 2 用（迁移在内存里已经做完了，不往后拖）。 */
+export function normalizeRerankLaneSchema(raw) {
+  if (rerankLaneSchemaIsLegacy(raw)) return RERANK_LANE_SCHEMA;
+  return Math.trunc(Number(raw));
+}
+
+/** 写回配置的形状：一律存数字串（与门槛 / 轮数 / 超时同一口径）。 */
+export function serializeRerankLaneSchema(raw) {
+  return String(normalizeRerankLaneSchema(raw));
+}
+
+/**
+ * 老语义的通道表 -> 新语义：把 model 那一路的 enabled 压成 false。
+ *
+ * 只改 enabled，名字 / 地址 / 模型 / 权重点都不动：迁移只负责把一个「用户没选过的开关」
+ * 归到它的默认位置，不替用户做别的决定。已经是新版本的配置原样返回。
+ * 这不是「关掉兜底」：兜底跟这个开关无关，它永远在（见 runRerankChannels）。
+ */
+export function applyRerankLaneSchema(channels, legacy) {
+  const list = Array.isArray(channels) ? channels : [];
+  if (!legacy) return list;
+  return list.map((channel) =>
+    channel && channel.type === RERANK_FALLBACK_CHANNEL_TYPE ? { ...channel, enabled: false } : channel,
+  );
+}
+
 /**
  * 存量迁移：老配置里的 rerankModel（兜底模型）并进通道表。
  *
  * 判据是「rerankModel 有值且没有 model 通道」——已经有 model 通道时那一路说了算，
- * 不再拿 rerankModel 去覆盖。补出来的通道与界面新建的一模一样（权重 1、启用），
- * 所以补完之后运行时的行为与当年那一路兜底等价。
+ * 不再拿 rerankModel 去覆盖。补出来的通道与界面新建的一模一样（权重 1、不参与主路），
+ * 所以补完之后运行时的行为与当年那一路兜底等价（当年那一路也从没参与过主路）。
  * rerankModel 这个键本身不删（用户配置里那份还在），只是读完这一次就不再被引用。
  */
 export function migrateRerankChannels(channels, rerankModel) {
@@ -526,10 +612,40 @@ export function migrateRerankChannels(channels, rerankModel) {
   const ref = normalizeRerankModel(rerankModel);
   if (!ref) return list;
   if (list.some((channel) => channel && channel.type === "model")) return list;
-  return [
-    ...list,
-    { type: "model", name: "", url: "", model: ref, weight: 1, enabled: true },
-  ];
+  return [...list, { ...defaultModelChannel(), model: ref }];
+}
+
+/**
+ * 兜底那一条的默认形态：不需要任何服务配置，权重 1，不参与主路。
+ *
+ * 「不参与主路」是默认，因为主路能跑通时那一次 LLM 调用就是白花的；
+ * 它作为兜底永远在，开关关着也会在主路垮了之后被调。
+ */
+export function defaultModelChannel() {
+  return { type: "model", name: "", url: "", model: "", weight: 1, enabled: false };
+}
+
+/**
+ * 语言模型那一路是精排的兜底，不可关：配置里没有 model 通道时补一条出来
+ * （默认不参与主路）。
+ *
+ * 补在读取侧：存库的那份不动。用户把那一格的开关拨开之后，落库的是 `enabled: true`，
+ * 于是「配置里没有 model 通道」只表示「从没拨过」，而不是「用户不要兜底」。
+ * 这一条与 migrateRerankChannels 分开写：一个是存量兼容，一个是三条路的默认形态。
+ */
+export function ensureModelChannel(channels) {
+  const list = Array.isArray(channels) ? channels : [];
+  if (list.some((channel) => channel && channel.type === "model")) return list;
+  return [...list, defaultModelChannel()];
+}
+
+/**
+ * 配置里那份通道表 -> 这一轮真正要看的通道表：存量迁移 + 补上兜底那一条。
+ *
+ * readSwitches 与 /recall-mode 的投影共用这一份，面板与运行时就不会各看各的。
+ */
+export function projectRerankChannels(channels, rerankModel) {
+  return ensureModelChannel(migrateRerankChannels(channels, rerankModel));
 }
 
 /**
@@ -631,6 +747,10 @@ export async function readSwitches(sdk) {
   const systemoneServiceModel = normalizeServiceModel(await read(sdk, "systemoneServiceModel"));
   // 兜底模型的存量值先读出来：通道表要用它补那一条 model 通道，补完就不再用这个键。
   const rerankModel = normalizeRerankModel(await read(sdk, "rerankModel"));
+  // 通道表的语义版本：老配置里 model 那一路的 enabled 是被硬写成 true 的，不是用户的选择。
+  // 迁移只在这一层做（内存里），落库等下一次整单保存，见 routes/recall-mode.js。
+  const rerankLaneSchemaRaw = await read(sdk, "rerankLaneSchema");
+  const legacyLanes = rerankLaneSchemaIsLegacy(rerankLaneSchemaRaw);
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
@@ -659,15 +779,22 @@ export async function readSwitches(sdk) {
       await read(sdk, "rerankSystemonePrompt"),
     ),
     rerankModel,
-    rerankChannels: migrateRerankChannels(
-      parseRerankChannels(await read(sdk, "rerankChannels"), (message) => {
-        try {
-          sdk?.logger?.warn?.(`openviking ${message}`);
-        } catch {
-          /* 日志不能影响配置读取 */
-        }
-      }),
-      rerankModel,
+    // 读出来就是 2：迁移在内存里已经做完了，运行时与面板看到的都是新语义。
+    rerankLaneSchema: normalizeRerankLaneSchema(rerankLaneSchemaRaw),
+    // 迁移（老语义的 model 通道恒启用 -> 不参与主路）放在投影之后：rerankModel
+    // 补出来的那一条同样要落到位，否则「当年那一路兜底」会凭空变成参与主路。
+    rerankChannels: applyRerankLaneSchema(
+      projectRerankChannels(
+        parseRerankChannels(await read(sdk, "rerankChannels"), (message) => {
+          try {
+            sdk?.logger?.warn?.(`openviking ${message}`);
+          } catch {
+            /* 日志不能影响配置读取 */
+          }
+        }),
+        rerankModel,
+      ),
+      legacyLanes,
     ),
     rerankServiceUrl: normalizeServiceUrl(await read(sdk, "rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await read(sdk, "rerankServiceModel")),

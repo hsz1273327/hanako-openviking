@@ -18,12 +18,16 @@ import {
   RECALL_GATES,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_URL_MAX,
+  RERANK_LANE_SCHEMA,
   RERANK_MODES,
   RERANK_PROMPT_MAX,
   SERVICE_KINDS,
   SERVICE_MODEL_MAX,
+  applyRerankLaneSchema,
   dedupeRerankChannels,
-  migrateRerankChannels,
+  projectRerankChannels,
+  rerankLaneSchemaIsLegacy,
+  serializeRerankLaneSchema,
   normalizeAssembleMode,
   normalizeGateContext,
   normalizeGateContextPrompt,
@@ -164,6 +168,8 @@ async function current(ctx) {
   const systemoneServiceModel = normalizeServiceModel(await ctx.config.get("systemoneServiceModel"));
   // 兜底模型的存量值：只在拼通道表时用一次（补一条 model 通道），补完就不再用这个键。
   const rerankModel = normalizeRerankModel(await ctx.config.get("rerankModel"));
+  // 通道表的语义版本：面板只回显，不要求它回传（保存时由 POST 自己写）。
+  const rerankLaneSchema = await ctx.config.get("rerankLaneSchema");
   return {
     recallGate: resolveRecallGate(await ctx.config.get("recallGate"), {
       systemoneServiceUrl,
@@ -199,15 +205,23 @@ async function current(ctx) {
       await ctx.config.get("rerankSystemonePrompt"),
     ),
     rerankModel,
-    rerankChannels: migrateRerankChannels(
-      parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {
-        try {
-          ctx?.logger?.warn?.(`openviking ${message}`);
-        } catch {
-          /* 日志不能影响读数 */
-        }
-      }),
-      rerankModel,
+    // 通道表的语义版本。读出来就是 "2"（老配置在内存里已经被当成新语义），
+    // 面板拿它只为了回显 / 排查，不必自己回传。
+    rerankLaneSchema: serializeRerankLaneSchema(rerankLaneSchema),
+    // 存量迁移 + 补上兜底那一条：与 readSwitches 同一份投影，面板与运行时不会各看各的。
+    // 老语义下 model 那一路的 enabled 是被硬写的，这里一并压回 false（迁移只碰这个位）。
+    rerankChannels: applyRerankLaneSchema(
+      projectRerankChannels(
+        parseRerankChannels(await ctx.config.get("rerankChannels"), (message) => {
+          try {
+            ctx?.logger?.warn?.(`openviking ${message}`);
+          } catch {
+            /* 日志不能影响读数 */
+          }
+        }),
+        rerankModel,
+      ),
+      rerankLaneSchemaIsLegacy(rerankLaneSchema),
     ),
     rerankServiceUrl: normalizeServiceUrl(await ctx.config.get("rerankServiceUrl")),
     rerankServiceModel: normalizeServiceModel(await ctx.config.get("rerankServiceModel")),
@@ -468,6 +482,12 @@ export default function registerRecallModeRoutes(app, ctx) {
           channels.push(channel);
         }
         changes.push(["rerankChannels", JSON.stringify(dedupeRerankChannels(channels))]);
+      }
+      // 通道表一次整单落库时，语义版本跟它一起写：迁移过的值（model 不参与主路）与
+      // 「按什么语义读它」必须同时到位。只写版本不写通道表是危险的：存量里那份
+      // enabled: true 会被当成新语义下用户的选择，再也不会被迁移。
+      if (!changes.some(([key]) => key === "rerankLaneSchema")) {
+        changes.push(["rerankLaneSchema", String(RERANK_LANE_SCHEMA)]);
       }
     }
 

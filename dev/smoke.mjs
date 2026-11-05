@@ -47,7 +47,17 @@ import {
   normalizeRerankPrompt,
   normalizeRerankSystemonePrompt,
   dedupeRerankChannels,
+  ensureModelChannel,
   migrateRerankChannels,
+  projectRerankChannels,
+  RERANK_FALLBACK_CHANNEL_TYPE,
+  RERANK_LANE_SCHEMA,
+  applyRerankLaneSchema,
+  normalizeRerankLaneSchema,
+  rerankLaneSchemaIsLegacy,
+  serializeRerankLaneSchema,
+  RERANK_LANE_ORDER as BACKEND_RERANK_LANE_ORDER,
+  RERANK_SERVICE_CHANNEL_TYPES,
   normalizeServiceKey,
   normalizeServiceModel,
   normalizeServiceTimeout,
@@ -128,7 +138,7 @@ import {
   promptSourceOf,
   rerankPromptOf,
   rerankScoreScale,
-  rerankChannelsOf,
+  rerankLanesOf,
   resolveRerankChannel,
   normalizeChannelScores,
   squashRerankScores,
@@ -152,6 +162,9 @@ import {
   RERANK_CHANNEL_TIMEOUT_MS,
   RERANK_MODEL_CHANNEL_TIMEOUT_MS,
   RERANK_DOCUMENT_CHARS,
+  RERANK_FALLBACK_MODEL,
+  RERANK_FALLBACK_NONE,
+  RERANK_FALLBACK_VALUES,
   DEFAULT_GATE_PROMPT,
   DEFAULT_RERANK_PROMPT,
   DEFAULT_RERANK_SYSTEMONE_PROMPT,
@@ -255,6 +268,8 @@ import {
   RERANK_LANE_LABELS,
   RERANK_LANE_ORDER,
   RERANK_LANE_TIMEOUT_PLACEHOLDERS,
+  RERANK_FALLBACK_TAG as UI_RERANK_FALLBACK_TAG,
+  RERANK_LANE_PARTICIPATE_NOTE as UI_RERANK_LANE_PARTICIPATE_NOTE,
   normalizeRerankSystemonePrompt as uiNormalizeRerankSystemonePrompt,
   rerankLanes,
   rerankLanesCountText,
@@ -1833,9 +1848,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 精排通道：合法 / 非法 JSON / 字段不全 / 超过 8 路 ----
   eq(
-    "通道缺省：默认空串，读出来是空数组",
-    [DEFAULTS.rerankChannels, (await readSwitches(sdkWith({}))).rerankChannels],
-    ["", []],
+    "通道缺省：配置里是空串，读出来补上兜底那一条（语言模型不需要任何服务，默认不参与主路）",
+    [
+      DEFAULTS.rerankChannels,
+      (await readSwitches(sdkWith({}))).rerankChannels.map((channel) => [channel.type, channel.enabled]),
+    ],
+    ["", [["model", false]]],
   );
 
   const channelWarnings = [];
@@ -2096,14 +2114,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 面板加载不了 App 的 Node 模块，常量只能各存一份。这一节只守「两份不许漂」：
   // 漂了就是用户按下保存、落库的却是另一个数。组件结构不在这里验。
   eq(
-    "通道上限 / 三种类型的默认超时 / 决策超时上限与自适应两端同值 / 服务字段上限两端同值（模型 / 地址 / 密钥） / 三条路的文案键与展示顺序一一对应 / 三份默认提示词逐字一致（判断 / 精排 / 判别题面） / 提示词截断上限两端同值 / 序号占位符与三条路的超时 placeholder 两端同值",
+    "通道上限 / 三种类型的默认超时 / 决策超时上限与自适应两端同值 / 服务字段上限两端同值（模型 / 地址 / 密钥） / 三条路的文案键与展示顺序一一对应（判别 → rerank → 语言模型，两端同值） / 三份默认提示词逐字一致（判断 / 精排 / 判别题面） / 提示词截断上限两端同值 / 序号占位符与三条路的超时 placeholder 两端同值",
     [[
       UI_RERANK_CHANNELS_MAX,
       UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
       UI_SYSTEMONE_TIMEOUT_MAX,
       [UI_SYSTEMONE_TIMEOUT_BASE, UI_SYSTEMONE_TIMEOUT_STEP],
       UI_SYSTEMONE_MAX_CANDIDATES,
-    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, RERANK_LANE_ORDER, Object.keys(RERANK_LANE_LABELS)], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_GATE_DECISION_PROMPT, UI_DEFAULT_GATE_CONTEXT_PROMPT, UI_DEFAULT_RERANK_PROMPT, UI_DEFAULT_RERANK_SYSTEMONE_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX], [SYSTEMONE_N_PLACEHOLDER, RERANK_LANE_TIMEOUT_PLACEHOLDERS]],
+    ], [UI_SERVICE_MODEL_MAX, UI_SERVICE_URL_MAX, UI_SERVICE_KEY_MAX], [RERANK_CHANNEL_TYPES, RERANK_LANE_ORDER, Object.keys(RERANK_LANE_LABELS), BACKEND_RERANK_LANE_ORDER], [UI_DEFAULT_GATE_PROMPT, UI_DEFAULT_GATE_DECISION_PROMPT, UI_DEFAULT_GATE_CONTEXT_PROMPT, UI_DEFAULT_RERANK_PROMPT, UI_DEFAULT_RERANK_SYSTEMONE_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX], [SYSTEMONE_N_PLACEHOLDER, RERANK_LANE_TIMEOUT_PLACEHOLDERS]],
     [[
       RERANK_CHANNELS_MAX,
       {
@@ -2114,7 +2132,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       SYSTEMONE_TIMEOUT_MAX_MS,
       [SYSTEMONE_CHANNEL_TIMEOUT_MS, SYSTEMONE_TIMEOUT_PER_CANDIDATE_MS],
       SYSTEMONE_MAX_CANDIDATES,
-    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [["rerank", "systemone", "model"], ["model", "systemone", "rerank"], ["model", "systemone", "rerank"]], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX], ["{{n}}", { model: "1500", systemone: "自适应", rerank: "800" }]],
+    ], [SERVICE_MODEL_MAX, RERANK_CHANNEL_URL_MAX, SERVICE_KEY_MAX], [
+      ["rerank", "systemone", "model"],
+      // 三条路的顺序：判别模型 → rerank 模型 → 语言模型（两端同值，语言模型永远在最后）。
+      ["systemone", "rerank", "model"],
+      ["systemone", "rerank", "model"],
+      ["systemone", "rerank", "model"],
+    ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX], ["{{n}}", { systemone: "自适应", rerank: "800", model: "1500" }]],
   );
 
   // 决策那份默认题面就是那句完整问法：两个常量逐字一致，而且不是「空值兜底」的那份字。
@@ -2985,12 +3009,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     formatChannelTest({
       candidates: 1,
       channels: [{ type: "rerank", name: "n", ok: false, abstained: true, error: "超时", pairNote: "已改用服务配置" }],
-      fallback: true,
+      fallback: "off",
     }).includes("rerank 模型 n · 弃权 0ms · 超时"),
   );
-  check(
-    "通道测试：全部弃权时说原样保留",
-    formatChannelTest({ channels: [], fallback: true }).includes("全部通道弃权，原样保留全部候选"),
+  eq(
+    "通道测试：兜底只有两个取值（model 接手 / none 照常列合并分），兜底也没接住时说原样保留",
+    [
+      formatChannelTest({ channels: [], fallback: "model", merged: [0.5] }),
+      formatChannelTest({ channels: [], fallback: "model", merged: null }),
+      formatChannelTest({ channels: [], fallback: "none", merged: [0.5], kept: [0] }),
+    ],
+    [
+      "候选 0 条 · 0 路通道 · 0ms\n合并：主路没有可用的结果，由语言模型兜底",
+      "候选 0 条 · 0 路通道 · 0ms\n合并：主路没结果，兜底也没接住，原样保留全部候选",
+      "候选 0 条 · 0 路通道 · 0ms\n合并：[0.50]\n保留：#1",
+    ],
   );
 
   // ---- 下拉补存量值 ----
@@ -3185,8 +3218,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "lab",
       ["off", "last", "off"],
       [
-        ["model", true],
         ["rerank", true],
+        ["model", false],
       ],
     ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT], ["http://127.0.0.1:8098", "bge-reranker-v2-m3", "", "sk-a••••••••7890", ""], ["孤儿通道"], ["", "p/m"]],
   );
@@ -3218,9 +3251,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       JSON.stringify(lanes),
     );
     eq(
-      "服务被清空后只剩语言模型 + 那一行存量（顺序不变）",
+      "服务被清空后只剩那一条存量 + 语言模型（顺序仍是 rerank → 语言模型）",
       lanes.map((lane) => lane.type),
-      ["model", "rerank"],
+      ["rerank", "model"],
     );
     backend["/recall-mode"] = {
       ...backend["/recall-mode"],
@@ -3230,8 +3263,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await ui.refresh();
     eq(
       "服务配回来之后那一条不再标红（其它两条仍按服务有无出现）",
-      [ui.store.laneRows().map((lane) => lane.type), ui.store.laneRows()[1].unavailable],
-      [["model", "rerank"], false],
+      [ui.store.laneRows().map((lane) => lane.type), ui.store.laneRows()[0].unavailable],
+      [["rerank", "model"], false],
     );
   }
 
@@ -3856,11 +3889,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- 三条路：开关 / 权重 / 超时 / 测试（没有增删） ----
+  // ---- 三条路：顺序 / 开关 / 权重 / 超时 / 测试（没有增删） ----
   {
     const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    const lane = (type) => ui.store.laneRows().find((row) => row.type === type);
+    const postedChannel = (type) =>
+      JSON.parse(saves().at(-1).body.rerankChannels).find((channel) => channel.type === type);
 
-    // 决策服务配上之后，判别模型那一条才出现；顺序是语言模型 / 判别模型 / rerank 模型。
+    // 决策服务配上之后，判别模型那一条才出现；顺序固定 判别模型 → rerank 模型 → 语言模型。
     backend["/recall-mode"] = {
       ...backend["/recall-mode"],
       systemoneServiceUrl: "http://127.0.0.1:8097",
@@ -3868,32 +3904,37 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     };
     await ui.refresh();
     eq(
-      "配了决策服务后判别模型那一条出现，排在语言模型与 rerank 之间",
-      ui.store.laneRows().map((lane) => lane.type),
-      ["model", "systemone", "rerank"],
+      "三条路的顺序是判别模型 → rerank 模型 → 语言模型（语言模型永远在最后）",
+      ui.store.laneRows().map((row) => row.type),
+      ["systemone", "rerank", "model"],
+    );
+    eq(
+      "语言模型那一条标着兜底 / 其余两条不是",
+      ui.store.laneRows().map((row) => row.fallback),
+      [false, false, true],
     );
 
     // 开启判别模型：这一刻才建出那条通道（在此之前只有服务，没有通道）。
-    eq("判别模型还没配通道时是没启用的", ui.store.laneRows()[1].enabled, false);
+    eq("判别模型还没配通道时是没启用的", lane("systemone").enabled, false);
     await ui.setLaneEnabled("systemone", true);
     eq(
       "开启判别模型 = 给它建一条 enabled 的通道，并且真的提交了",
-      [
-        ui.store.laneRows()[1].enabled,
-        JSON.parse(saves().at(-1).body.rerankChannels).find((channel) => channel.type === "systemone")
-          ?.enabled,
-      ],
+      [lane("systemone").enabled, postedChannel("systemone")?.enabled],
       [true, true],
     );
 
-    // 语言模型那一条停不掉：状态不动，也不发请求。
-    const beforeModelOff = saves().length;
-    await ui.setLaneEnabled("model", false);
+    // 语言模型：缺省不参与主路（省那次 LLM），开关随时可拨；拨开就额外参与打分。
+    eq("语言模型缺省不参与主路（不需要先建通道）", lane("model").enabled, false);
+    eq("兜底那一路没有「置灰」这回事（开关任何时候都能拨）", lane("model").locked, undefined);
+    const beforeModelOn = saves().length;
+    await ui.setLaneEnabled("model", true);
     eq(
-      "语言模型点停用不生效（状态仍是启用、也没发请求）",
-      [ui.store.laneRows()[0].enabled, saves().length - beforeModelOff],
-      [true, 0],
+      "拨开 = 额外参与主路：状态变了、也真提交了一条 enabled:true 的通道",
+      [lane("model").enabled, saves().length - beforeModelOn, postedChannel("model")?.enabled],
+      [true, 1, true],
     );
+    await ui.setLaneEnabled("model", false);
+    eq("拨回去也不影响兜底（只是不再参与打分）", lane("model").enabled, false);
 
     // 权重 / 超时按路改（不再是按下标）。
     await ui.setLaneWeight("systemone", "99");
@@ -3919,17 +3960,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "停用判别模型不删数据（那一条还在，只是未启用）",
       [
         state.channels.filter((channel) => channel.type === "systemone").length,
-        ui.store.laneRows()[1].enabled,
+        lane("systemone").enabled,
       ],
       [1, false],
     );
 
-    // 三条路都停用只剩语言模型：计数那行跟着草稿走。
+    // 停用 rerank 模型（判别模型也停着）：计数那行跟着草稿走。
     await ui.setLaneEnabled("rerank", false);
     eq(
       "rerank 模型也能停用 / 计数只算启用中的",
-      [ui.store.laneRows()[2].enabled, ui.store.laneCountText()],
-      [false, "3 路通道 · 1 路启用"],
+      [lane("rerank").enabled, ui.store.laneCountText()],
+      [false, "3 路通道 · 0 路启用"],
     );
     await ui.setLaneEnabled("rerank", true);
 
@@ -3949,6 +3990,43 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq("没有会话时通道测试说清楚为什么",
       sessionless.state.channelTest.text,
       "测试失败：当前会话还没绑定，先打开一次对话再试");
+  }
+
+  // ---- 只剩兜底那一条时：开关照样能拨（它就是兜底，不是「唯一可用所以锁住」） ----
+  {
+    createConfig({ get, post, sessionKey: async () => "01a1585b-86d2", schedule: () => 0 });
+    const solo = useConfig();
+    const soloLane = () => solo.store.laneRows()[0];
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      rerankChannels: [],
+      rerankServiceUrl: "",
+      rerankServiceModel: "",
+      systemoneServiceUrl: "",
+      systemoneServiceModel: "",
+    };
+    const soloBefore = calls.filter((call) => call.method === "POST" && call.path === "/recall-mode").length;
+    await solo.refresh();
+    eq(
+      "没配任何服务时只剩语言模型那一条（缺省不参与主路、开关可拨）",
+      solo.store.laneRows().map((row) => [row.type, row.enabled, row.locked, row.fallback]),
+      [["model", false, undefined, true]],
+    );
+    await solo.setLaneEnabled("model", true);
+    eq(
+      "只剩它一条时开关也能拨，而且真提交了一单（兜底不会因为关掉而消失）",
+      [soloLane().enabled, calls.filter((call) => call.method === "POST" && call.path === "/recall-mode").length - soloBefore],
+      [true, 1],
+    );
+    // 把这一块改过的投影改回去，后面的块还接着用同一个假后端。
+    backend["/recall-mode"] = {
+      ...backend["/recall-mode"],
+      rerankChannels: [{ type: "rerank", name: "孤儿通道", weight: 2, enabled: true }],
+      rerankServiceUrl: "http://127.0.0.1:8098",
+      rerankServiceModel: "bge-reranker-v2-m3",
+      systemoneServiceUrl: "http://127.0.0.1:8097",
+      systemoneServiceModel: "kev-4b",
+    };
   }
 
   // ---- 日志折叠已删 / 编辑中的格子不被刷新覆盖 ----
@@ -4458,9 +4536,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   }, ["可用", "不可用", "先填地址和模型"]],
   );
 
-  // 三条路哪几条出现，只看「服务配没配」：语言模型恒有，另两条各看自己那一组服务。
+  // 三条路哪几条出现，只看「服务配没配」：语言模型恒有且排最后，另两条各看自己那一组服务。
   eq(
-    "配了哪个服务就出现哪条路：都没配只剩语言模型 / 只配精排只多 rerank 模型 / 只配决策只多判别模型 / 都配三条都在",
+    "配了哪个服务就出现哪条路：都没配只剩语言模型 / 只配精排只多 rerank 模型 / 只配决策只多判别模型 / 都配三条都在（顺序永远是 判别 → rerank → 语言模型）",
     [
       rerankLanes({}).map((lane) => lane.type),
       rerankLanes({ rerankServiceUrl: "http://h:8098" }).map((lane) => lane.type),
@@ -4470,10 +4548,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         systemoneServiceUrl: "http://h:8097",
       }).map((lane) => lane.type),
     ],
-    [["model"], ["model", "rerank"], ["model", "systemone"], ["model", "systemone", "rerank"]],
+    [["model"], ["rerank", "model"], ["systemone", "model"], ["systemone", "rerank", "model"]],
   );
   eq(
-    "三条路的名字就是语言模型 / 判别模型 / rerank 模型 / 只有语言模型时它就恒启用（锁着的），另两条没通道就是没启用",
+    "三条路的名字就是判别模型 / rerank 模型 / 语言模型 / 只剩语言模型时不参与主路、也没有 locked 这回事 / 另两条没通道就是没启用",
     [
       rerankLanes({
         rerankServiceUrl: "http://h:8098",
@@ -4483,25 +4561,33 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       rerankLanes({ systemoneServiceUrl: "http://h:8097" }).map((lane) => lane.enabled),
     ],
     [
-      ["语言模型", "判别模型", "rerank 模型"],
-      [[true, true]],
-      [true, false],
+      ["判别模型", "rerank 模型", "语言模型"],
+      [[false, undefined]],
+      [false, false],
     ],
   );
   eq(
-    "配置里写着停用也停不掉语言模型那一条（读写两侧都强制 true）/ 判别模型与 rerank 模型跟着通道的启用状态走",
+    "语言模型那一路的开关管「要不要额外参与主路」：拨开就启用、拨关就不参与 / 没有 locked 这回事 / 另两条跟着通道的启用状态走",
     [
-      rerankLanes({ rerankChannels: [{ type: "model", model: "", enabled: false }] })[0].enabled,
+      rerankLanes({
+        rerankServiceUrl: "http://h:8098",
+        rerankChannels: [{ type: "model", model: "", enabled: true }],
+      }).find((lane) => lane.type === "model").enabled,
+      rerankLanes({
+        rerankServiceUrl: "http://h:8098",
+        rerankChannels: [{ type: "model", model: "", enabled: false }],
+      }).find((lane) => lane.type === "model").enabled,
+      "locked" in rerankLanes({})[0],
       rerankLanes({
         systemoneServiceUrl: "http://h:8097",
         rerankChannels: [{ type: "systemone", enabled: false }],
-      })[1].enabled,
+      }).find((lane) => lane.type === "systemone").enabled,
       rerankLanes({
         rerankServiceUrl: "http://h:8098",
         rerankChannels: [{ type: "rerank", enabled: true }],
-      })[1].enabled,
+      }).find((lane) => lane.type === "rerank").enabled,
     ],
-    [true, false, true],
+    [true, false, false, false, true],
   );
   eq(
     "服务被清空但通道还在：那一条仍然出现，并标明不会生效（不自动删数据）/ 通道自己成对配了地址与模型时不算失效",
@@ -4515,8 +4601,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       }).map((lane) => [lane.type, lane.unavailable]),
     ],
     [
-      [["model", false], ["rerank", true]],
-      [["model", false], ["rerank", false]],
+      [["rerank", true], ["model", false]],
+      [["rerank", false], ["model", false]],
     ],
   );
   eq(
@@ -4535,7 +4621,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         }),
       ),
     ],
-    ["1 路通道 · 1 路启用", "3 路通道 · 3 路启用"],
+    ["1 路通道 · 0 路启用", "3 路通道 · 3 路启用"],
+  );
+
+  // 三条路的划分与兜底那两个取值：两端同值，话也只写一份。
+  eq(
+    "三条路的常驻划分（靠服务的两条 + 兜底那一条；主路另有定义，看运行时的启用组合）/ 探针 fallback 只有 none 与 model 两个值 / 兜底标签与开关那一句小字",
+    [
+      RERANK_SERVICE_CHANNEL_TYPES,
+      RERANK_FALLBACK_CHANNEL_TYPE,
+      RERANK_FALLBACK_VALUES,
+      [UI_RERANK_FALLBACK_TAG, UI_RERANK_LANE_PARTICIPATE_NOTE],
+      [...BACKEND_RERANK_LANE_ORDER],
+    ],
+    [
+      ["systemone", "rerank"],
+      "model",
+      ["none", "model"],
+      ["兜底", "开启则每次也参与打分；关闭则只在其他路不通时接手。"],
+      ["systemone", "rerank", "model"],
+    ],
+  );
+  check(
+    "兜底不可关：探针里没有第三个取值（不存在「该兜底但没兜」这个状态）",
+    RERANK_FALLBACK_VALUES.includes("off") === false && RERANK_FALLBACK_VALUES.length === 2,
+    JSON.stringify(RERANK_FALLBACK_VALUES),
   );
 
   // 服务被清空：已有通道保留，只标记不可用，不自动删。
@@ -4771,7 +4881,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ),
       rerankLanes({ systemoneServiceUrl: "http://h:8097" }).map((lane) => lane.type),
     ],
-    [["model"], ["model", "rerank"], ["model", "systemone"]],
+    [["model"], ["rerank", "model"], ["systemone", "model"]],
   );
   eq(
     "判别模型 / rerank 模型停用只认明确的 false（缺省 / 0 / 空串都算启用）",
@@ -4784,14 +4894,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [true, false, true, true],
   );
   eq(
-    "语言模型那一条的启用状态不接受 false：界面归一时就强制成 true（写库时服务端再强制一次）",
+    "语言模型那一条的启用状态照实归一（它也可以关）：缺省启用、明确的 false 就是关的",
     [
       normalizeRerankChannel({ type: "model" }).enabled,
       normalizeRerankChannel({ type: "model", enabled: false }).enabled,
       normalizeRerankChannel({ type: "model", enabled: 0 }).enabled,
       normalizeRerankChannel({ type: "model", enabled: "" }).enabled,
     ],
-    [true, true, true, true],
+    [true, false, true, true],
   );
 }
 
@@ -6043,17 +6153,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 精排通道的读写与整单校验 ----
   // 存量迁移：上面刚写过 rerankModel = "p2/m2"，还没有 model 通道。
+  // 当年那一路兜底从来没参与过主路，所以补出来的这条不带 enabled: true。
   store.rerankChannels = "";
   const migrated = await get();
   eq(
-    "存量迁移：rerankModel 有值且没有 model 通道 → 读出一条 model 通道（model 取原值、启用）",
+    "存量迁移：rerankModel 有值且没有 model 通道 → 读出一条 model 通道（model 取原值、不参与主路）",
     asList(migrated.body.rerankChannels).map((channel) => [
       channel.type,
       channel.model,
       channel.enabled,
       channel.weight,
     ]),
-    [["model", "p2/m2", true, 1]],
+    [["model", "p2/m2", false, 1]],
   );
 
   // 已经有 model 通道就不再补：同一份存量配置不会越读越多，也不会盖掉那一路自己的模型。
@@ -6087,12 +6198,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("applied 列出 rerankChannels", asList(channelsOk.body.applied).includes("rerankChannels"));
   eq(
-    "写库时语言模型那一条的启用状态被强制成 true（请求里写 false 也没用）",
+    "写库时语言模型那一条的启用状态照存（它现在是兜底，允许关）/ 回显也是关的",
     [
       JSON.parse(store.rerankChannels).find((channel) => channel.type === "model").enabled,
       asList(channelsOk.body.rerankChannels).find((channel) => channel.type === "model").enabled,
     ],
-    [true, true],
+    [false, false],
   );
 
   // 同类型重复：只留第一条（读取侧与写入侧同一取舍，不 400）。
@@ -6115,12 +6226,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [200, ["rerank", "systemone"], "http://first:1", 3],
   );
 
-  // 读取侧：配置里写着停用的 model 通道，读出来仍是启用的（精排至少要留一路）。
+  // 读取侧：配置里写着停用的 model 通道，读出来也是停用的（那一格现在允许关）。
   store.rerankChannels = JSON.stringify([{ type: "model", model: "", enabled: false }]);
   eq(
-    "配置里把语言模型写成停用，读出来仍是启用",
+    "配置里把语言模型写成停用，读出来就是停用",
     asList((await get()).body.rerankChannels).map((channel) => channel.enabled),
-    [true],
+    [false],
+  );
+  // 反过来：一条通道都没有的时候，读侧补上兜底那一条（它不需要任何服务配置）。
+  store.rerankChannels = "";
+  const defaultLane = await get();
+  eq(
+    "一条通道都没配时投影出那一条语言模型路（权重 1、不参与主路、没有模型标识）",
+    asList(defaultLane.body.rerankChannels).map((channel) => [
+      channel.type,
+      channel.weight,
+      channel.enabled,
+      channel.model,
+    ]),
+    [["model", 1, false, ""]],
   );
 
   // 读取侧也收敛：把「两条同类型」直接塞进配置（绕开写入校验）也只会读出一条。
@@ -6130,9 +6254,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   ]);
   const readDeduped = await get();
   eq(
-    "读取侧也收敛：存量里同类型两条只读第一条",
-    asList(readDeduped.body.rerankChannels).map((channel) => channel.url),
-    ["http://first:1"],
+    "读取侧也收敛：存量里同类型两条只读第一条（后面再补上兜底那一条）",
+    asList(readDeduped.body.rerankChannels).map((channel) => [channel.type, channel.url]),
+    [["rerank", "http://first:1"], ["model", ""]],
   );
 
   // 通道 JSON 的三种坏形状：坏 JSON / 不是字符串 / 不是数组。
@@ -6183,9 +6307,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   writes.length = 0;
   const clearedChannels = await post({ rerankChannels: "" });
   eq(
-    "空串清空通道 / 清空后落库为空串 / 清空后回显空数组",
-    [clearedChannels.status, store.rerankChannels, clearedChannels.body.rerankChannels],
-    [200, "", []],
+    "空串清空通道 / 清空后落库为空串 / 清空后回显只剩补出来的那一条兜底",
+    [clearedChannels.status, store.rerankChannels, asList(clearedChannels.body.rerankChannels).map((channel) => channel.type)],
+    [200, "", ["model"]],
   );
 
   // ---- 地址与模型成对：有地址无模型 400、零写入 ----
@@ -6420,6 +6544,73 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [store.rerankServiceKey, keyOverwrite.body.rerankServiceKeyMasked, store.systemoneServiceKey],
     ["sk-new-key-9999", "sk-n••••••••9999", "sk-before"],
   );
+  // ---- 通道语义版本：读的时候迁、保存那一下写回，只发生一次 ----
+  //
+  // 老配置里 model 那一路的 enabled 是读写两侧硬写成 true 的（当年那格置灰，用户没得选）。
+  // 不迁的话，同一份配置换一套语义就变成「每次都参与主路」，用户并没有做过这个选择。
+  {
+    const modelEnabledIn = (body) =>
+      asList(body?.rerankChannels).find((channel) => channel.type === "model")?.enabled;
+    const legacyTable = JSON.stringify([
+      { type: "rerank", url: "http://127.0.0.1:8099", model: "bge", weight: 1, enabled: true },
+      { type: "model", name: "宿主", model: "", weight: 1, enabled: true },
+    ]);
+    delete store.rerankLaneSchema;
+    store.rerankChannels = legacyTable;
+
+    const legacy = await get();
+    eq(
+      "老配置（没有版本号 + model 那路 enabled: true）：读出来不参与主路、版本号回显 \"2\" / 库里一个字节都还没改",
+      [legacy.body.rerankLaneSchema, modelEnabledIn(legacy.body), store.rerankChannels === legacyTable],
+      ["2", false, true],
+    );
+
+    // 只改别的键：不能单写版本号。否则库里的 enabled: true 会被当成新语义下的用户选择，
+    // 迁移再也不会发生，那一刻才是真正把开关拨错了。
+    writes.length = 0;
+    await post({ recallGate: "rules" });
+    eq(
+      "只提交别的键：版本号不落库（它必须跟通道表同一单写）",
+      [store.rerankLaneSchema, writes.some(([key]) => key === "rerankLaneSchema")],
+      [undefined, false],
+    );
+
+    // 整单保存：面板上报的就是迁移后的那张表（model 那条已经 false）。
+    writes.length = 0;
+    const savedTable = await post({
+      rerankChannels: JSON.stringify(legacy.body.rerankChannels),
+    });
+    eq(
+      "整单保存：库里的版本号是 \"2\"、model 那条落库是 false、applied 里两个键都在",
+      [
+        store.rerankLaneSchema,
+        asList(JSON.parse(store.rerankChannels ?? "[]")).find((c) => c.type === "model")?.enabled,
+        ["rerankLaneSchema", "rerankChannels"].every((key) => asList(savedTable.body.applied).includes(key)),
+      ],
+      ["2", false, true],
+    );
+
+    // 再读一次：版本号已经是 2，迁移不会跑第二遍（改成什么就是什么）。
+    const reread = await get();
+    eq(
+      "保存后再读：值稳定，迁移只发生一次",
+      [reread.body.rerankLaneSchema, modelEnabledIn(reread.body)],
+      ["2", false],
+    );
+
+    // 用户迁移后主动拨开：版本号已是 2，不会再被打回 false。
+    await post({
+      rerankChannels: JSON.stringify([
+        { type: "rerank", url: "http://127.0.0.1:8099", model: "bge", weight: 1, enabled: true },
+        { type: "model", name: "宿主", model: "", weight: 1, enabled: true },
+      ]),
+    });
+    eq(
+      "迁移后主动拨开语言模型：保持 true，不会被打回",
+      [store.rerankLaneSchema, modelEnabledIn(await get().then((res) => res.body))],
+      ["2", true],
+    );
+  }
 }
 
 // ================= routes: 精排通道测试按钮 =================
@@ -8860,6 +9051,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     serverUrl: "http://h:1",
     rerank: "llm",
     probe: true,
+    // 新语义：这几组用例里 model 通道的开关就是用户拨的（不是老配置里硬写上去的 true）。
+    rerankLaneSchema: String(RERANK_LANE_SCHEMA),
     rerankChannels: modelChannelJson,
   };
   const entries = [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }];
@@ -8922,7 +9115,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     // 组装那一步另有一条 recall/assemble 探针，这里只看精排那一条。
     const rerankProbes = probes.filter((probe) => probe.event === "recall/rerank");
     eq(
-      "rerank 探针（一次 / 事件名 / 候选数 / 保留数 / 正常解析不算兜底 / 有耗时 / 模型通道 scoreScale=probability）",
+      "rerank 探针（一次 / 事件名 / 候选数 / 保留数 / 主路成功时 fallback=none / 有耗时 / 模型通道 scoreScale=probability）",
       [
         rerankProbes.length,
         rerankProbes[0].event,
@@ -8932,7 +9125,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         typeof rerankProbes[0].invocation.elapsedMs === "number",
         rerankProbes[0].invocation.channels[0].scoreScale,
       ],
-      [1, "recall/rerank", 3, 2, false, true, "probability"],
+      [1, "recall/rerank", 3, 2, RERANK_FALLBACK_NONE, true, "probability"],
     );
   }
 
@@ -9076,9 +9269,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       session: { sessionId: "rerank-none" },
     });
     eq(
-      "模型说无时本轮不注入 / 模型说无时召回请求照发 / 探针记保留数为 0 / 模型明确说无不算兜底",
+      "模型说无时本轮不注入 / 模型说无时召回请求照发 / 探针记保留数为 0 / 全是 0 分不算兜底（主路成功，只是答案是否）",
       [result, mock.calls.length, probes[0].invocation.kept, probes[0].invocation.fallback],
-      [undefined, 1, 0, false],
+      [undefined, 1, 0, RERANK_FALLBACK_NONE],
     );
   }
 
@@ -9101,9 +9294,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
     );
     eq(
-      "解析失败探针记兜底 / 解析失败探针保留数等于候选数",
+      "解析失败探针记 model（它就是兜底，自己也垮了）/ 解析失败探针保留数等于候选数",
       [probes[0].invocation.fallback, probes[0].invocation.kept],
-      [true, 3],
+      [RERANK_FALLBACK_MODEL, 3],
     );
   }
 
@@ -9127,7 +9320,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "抛错时保留全部",
       ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
     );
-    eq("抛错也 cancel 一次", fake.calls.cancel.length, 1);
+    eq("抛错时 cancel 两次（主路一次 + 兜底再试一次）", fake.calls.cancel.length, 2);
   }
 
   {
@@ -9147,8 +9340,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "超时后保留全部",
       ["第一条", "第二条", "第三条"].every((text) => contentOf(result).includes(text)),
     );
-    check("超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
-    eq("超时后 cancel 一次", fake.calls.cancel.length, 1);
+    // 主路那次超时（1500）之后，兜底还会再试一次，所以上限是两份超时的时间。
+    check("两次超时（主路 + 兜底重试）也在 3.5 秒内收手", elapsed < 3500, `elapsed=${elapsed}`);
+    eq("超时后 cancel 两次（主路一次 + 兜底再试一次）", fake.calls.cancel.length, 2);
   }
 
   // ---- 超时三层在真请求上的体现：通道自带 > 服务配置 > 默认 / 自适应 ----
@@ -9310,24 +9504,35 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [[1, 2, 0, 3], [[0, 1], [true, [0, 0]], [0, 1], [0, 1]]],
   );
 
-  // ---- 只有启用的通道才跑；一条都没有就是空数组（不再偷偷用宿主模型顶上） ----
+  // ---- 这一轮要考虑的路：配置里那几条 + 兜底那一条（不看开关） ----
   eq(
-    "一个通道都没配 = 空数组（不补兜底）/ 通道全部停用也是空数组 / 只跑启用的那几条",
+    "一个通道都没配 = 补上语言模型那一路（默认不参与主路，但兜底在）/ 关掉的也留在表里（兜底不靠开关）/ 开关只管参与不参与",
     [
-      rerankChannelsOf({ rerankChannels: [] }).length,
-      rerankChannelsOf({
+      rerankLanesOf({ rerankChannels: [] }).map((channel) => [channel.type, channel.weight, channel.enabled]),
+      rerankLanesOf({
         rerankChannels: [
           { type: "rerank", url: "http://h", model: "m", weight: 1, enabled: false },
+          { type: "model", model: "", weight: 1, enabled: false },
         ],
-      }).length,
-      rerankChannelsOf({
+      }).map((channel) => [channel.type, channel.enabled]),
+      rerankLanesOf({
         rerankChannels: [
           { type: "model", model: "", weight: 4, enabled: true },
           { type: "systemone", weight: 1, enabled: false },
         ],
-      }).map((channel) => [channel.type, channel.weight]),
+      }).map((channel) => [channel.type, channel.weight, channel.enabled]),
     ],
-    [0, 0, [["model", 4]]],
+    [
+      [["model", 1, false]],
+      [
+        ["rerank", false],
+        ["model", false],
+      ],
+      [
+        ["model", 4, true],
+        ["systemone", 1, false],
+      ],
+    ],
   );
 
   // 存量 rerankModel 由读取侧补成通道：读一遍 readSwitches，跑到这里的那条路与当年兜底等价。
@@ -9335,11 +9540,106 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const migratedSwitches = await readSwitches(
       sdkWith({ rerank: "llm", rerankModel: "  p1/m1  " }),
     );
-    const migrated = rerankChannelsOf(migratedSwitches);
+    const migrated = rerankLanesOf(migratedSwitches);
     eq(
       "存量 rerankModel 读一遍就被补成一条启用的 model 通道（model 取原值、不带任何 legacy 标记）",
       [migrated.length, migrated[0].type, migrated[0].model, migrated[0].weight, migrated[0].legacy],
       [1, "model", "p1/m1", 1, undefined],
+    );
+  }
+
+  // 兜底那一条是默认形态：配置里没有 model 通道时补一条（默认不参与主路），已有的不动。
+  eq(
+    "补兜底：空数组补一条语言模型（默认不参与主路）/ 已有关着的那一条不重复补 / 存量 rerankModel 先并进来再补",
+    [
+      ensureModelChannel([]).map((channel) => [channel.type, channel.enabled, channel.weight, channel.model]),
+      ensureModelChannel([{ type: "model", model: "", enabled: false }]).length,
+      projectRerankChannels([], "p9/m9").map((channel) => [channel.type, channel.model]),
+      projectRerankChannels([{ type: "rerank" }], "").map((channel) => channel.type),
+    ],
+    [[["model", false, 1, ""]], 1, [["model", "p9/m9"]], ["rerank", "model"]],
+  );
+
+  // ---- 通道表的语义版本：老配置里被硬写的 enabled: true 要迁回 false ----
+  //
+  // 当年那一格是置灰的，配置里的 true 不是用户的选择；新语义下它等于「每次都进主路」。
+  // 判据只能是版本号：迁移后用户主动拨开也是 true，用 enabled 反推会把他的选择也抹掉。
+  {
+    const legacyModel = JSON.stringify([
+      { type: "rerank", url: "http://h:1", model: "bge", weight: 2, enabled: true },
+      { type: "model", name: "宿主", model: "", weight: 1, enabled: true },
+    ]);
+    const legacySw = await readSwitches(sdkWith({ rerank: "llm", rerankChannels: legacyModel }));
+    const legacyNoModelSw = await readSwitches(
+      sdkWith({
+        rerank: "llm",
+        rerankChannels: JSON.stringify([
+          { type: "systemone", url: "http://h:2", model: "small", weight: 1, enabled: false },
+        ]),
+      }),
+    );
+    const alreadyOffSw = await readSwitches(
+      sdkWith({
+        rerank: "llm",
+        rerankChannels: JSON.stringify([{ type: "model", model: "", weight: 1, enabled: false }]),
+      }),
+    );
+    const newSw = await readSwitches(
+      sdkWith({ rerank: "llm", rerankLaneSchema: "2", rerankChannels: legacyModel }),
+    );
+    eq(
+      "老配置（无版本号）读出来一律按新语义：model 那路不参与主路 / 其余通道原样 / 版本号是 2",
+      [
+        [legacySw.rerankLaneSchema, legacySw.rerankChannels.map((c) => [c.type, c.enabled, c.weight])],
+        [legacyNoModelSw.rerankLaneSchema, legacyNoModelSw.rerankChannels.map((c) => [c.type, c.enabled])],
+        [alreadyOffSw.rerankLaneSchema, alreadyOffSw.rerankChannels.map((c) => [c.type, c.enabled])],
+      ],
+      [
+        [2, [["rerank", true, 2], ["model", false, 1]]],
+        [2, [["systemone", false], ["model", false]]],
+        [2, [["model", false]]],
+      ],
+    );
+    eq(
+      "新配置（版本号 2）一个字都不动：用户拨开的那一路保持 true / 再读一次还是 true（迁移不回头）",
+      [
+        [newSw.rerankLaneSchema, newSw.rerankChannels.map((c) => [c.type, c.enabled])],
+        (
+          await readSwitches(
+            sdkWith({ rerank: "llm", rerankLaneSchema: "2", rerankChannels: legacyModel }),
+          )
+        ).rerankChannels.map((c) => c.enabled),
+      ],
+      [[2, [["rerank", true], ["model", true]]], [true, true]],
+    );
+    eq(
+      "版本号判读：空串 / 小于 2 / 认不出 = 老语义；>= 2 保持原值；写回一律是数字串",
+      [
+        rerankLaneSchemaIsLegacy(""),
+        rerankLaneSchemaIsLegacy(undefined),
+        rerankLaneSchemaIsLegacy("1"),
+        rerankLaneSchemaIsLegacy("abc"),
+        rerankLaneSchemaIsLegacy("2"),
+        normalizeRerankLaneSchema(""),
+        normalizeRerankLaneSchema("7"),
+        serializeRerankLaneSchema(undefined),
+        DEFAULTS.rerankLaneSchema,
+      ],
+      [true, true, true, true, false, 2, 7, "2", ""],
+    );
+    eq(
+      "迁移只碰 model 那一路的 enabled：名字 / 地址 / 模型 / 权重与别的通道都照旧",
+      applyRerankLaneSchema(
+        [
+          { type: "systemone", name: "判别", url: "http://h", model: "m", weight: 3, enabled: true },
+          { type: "model", name: "宿主", url: "http://h", model: "p/m", weight: 5, enabled: true },
+        ],
+        true,
+      ).map((c) => [c.type, c.name, c.url, c.model, c.weight, c.enabled]),
+      [
+        ["systemone", "判别", "http://h", "m", 3, true],
+        ["model", "宿主", "http://h", "p/m", 5, false],
+      ],
     );
   }
 
@@ -9647,10 +9947,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       channels: [{ type: "rerank", name: "空", weight: 1 }],
     });
     check(
-      "服务未配置的通道失败、原因写明「打分服务未配置」、整轮原样保留",
+      "服务未配置的通道失败、原因写明「打分服务未配置」、没有兜底那一路可接所以整轮原样保留",
       outcome.channels[0].ok === false &&
         String(outcome.channels[0].error || "").includes("打分服务未配置") &&
-        outcome.fallback === true,
+        outcome.fallback === RERANK_FALLBACK_MODEL &&
+        Boolean(outcome.fallbackError) &&
+        outcome.kept.length === items.length,
       outcome.channels[0].error,
     );
   }
@@ -9808,7 +10110,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       /2\/3/.test(String(outcome.channels[0].error)),
       String(outcome.channels[0].error),
     );
-    eq("systemone 全部弃权时原样保留", [outcome.fallback, outcome.indexes], [true, [0, 1, 2]]);
+    eq("systemone 全部弃权时原样保留（没给兜底那一路，没人能接）", [outcome.fallback, outcome.indexes], [RERANK_FALLBACK_MODEL, [0, 1, 2]]);
     resetRuntimeTransport();
   }
 
@@ -10007,7 +10309,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "超时那一路弃权、原因写进探针（统一的 TIMEOUT 句）；另一路照常成功并参与合并",
       slow.ok === false && String(slow.error).startsWith("TIMEOUT ") && fast.ok === true &&
         JSON.stringify(outcome.merged.map((value) => Number(value.toFixed(2)))) === JSON.stringify([1, 0.28, 0]) &&
-        outcome.fallback === false,
+        outcome.fallback === RERANK_FALLBACK_NONE,
       `${slow.error} / ${JSON.stringify(outcome.merged)}`,
     );
     check("一路超时在 2 秒内收手", elapsed < 2000, `elapsed=${elapsed}`);
@@ -10035,7 +10337,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     const abort = outcome.channels.find((channel) => channel.name === "abort");
     check("直连超时也标成 TIMEOUT", String(abort.error).startsWith("TIMEOUT "), abort.error);
-    eq("直连超时整路弃权", [abort.ok, outcome.fallback], [false, true]);
+    eq("直连超时整路弃权（没给兜底那一路，没人能接）", [abort.ok, outcome.fallback], [false, RERANK_FALLBACK_MODEL]);
   }
 
   // ---- 一路分数全相同：这一路弃权，不影响另一路 ----
@@ -10080,7 +10382,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         outcome.indexes,
         outcome.fallback,
       ],
-      [[false, true], true, true, [1, 0.28, 0], [0, 1], false],
+      [[false, true], true, true, [1, 0.28, 0], [0, 1], RERANK_FALLBACK_NONE],
     );
   }
 
@@ -10101,8 +10403,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         { type: "rerank", name: "", url: "http://bad.test", model: "m", weight: 1, enabled: true },
       ],
     });
-    eq("全部弃权：回 fallback、索引原样、保留全部",
-      [outcome.fallback, outcome.indexes, outcome.kept.length], [true, [0, 1, 2], 3]);
+    eq("全部弃权：没有兜底那一路可接，探针记 model、索引原样、保留全部",
+      [outcome.fallback, outcome.indexes, outcome.kept.length], [RERANK_FALLBACK_MODEL, [0, 1, 2], 3]);
   }
 
   // ---- 最近一轮候选样本：测试按钮的数据源 ----
@@ -10159,7 +10461,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   fs.rmSync(dir, { recursive: true, force: true });
   const items = [{ text: "甲" }, { text: "乙" }];
 
-  // ---- 三路一起跑：每路的 promptSource 都记进探针，题面按配置渲染 ----
+  // ---- 主路一起跑：每路的 promptSource 都记进探针，题面按配置渲染；语言模型不参与 ----
   {
     const calls = [];
     setRuntimeTransport({
@@ -10182,9 +10484,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       sdk,
       switches: {
         rerankChannels: [
-          { type: "model", model: "", weight: 1, enabled: true },
           { type: "systemone", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
           { type: "rerank", url: "http://127.0.0.1:8080", model: "bge", weight: 1, enabled: true },
+          { type: "model", model: "", weight: 1, enabled: false },
         ],
         rerankPrompt: "挑一挑：{{message}}\n{{candidates}}",
         rerankSystemonePrompt: "第 {{n}} 条能帮上忙吗",
@@ -10193,21 +10495,68 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       items,
     });
     eq(
-      "三路一起跑：探针按路记来源（语言模型 rerankPrompt / 判别模型 rerankSystemonePrompt / 交叉编码器 none）",
+      "主路一起跑：探针按路记来源（判别模型 rerankSystemonePrompt / 交叉编码器 none），语言模型没跑所以不在里面",
       outcome.channels.map((channel) => [channel.type, channel.promptSource]),
       [
-        ["model", "rerankPrompt"],
         ["systemone", "rerankSystemonePrompt"],
         ["rerank", "none"],
       ],
     );
     eq(
-      "两份提示词各走各的：语言模型吃 rerankPrompt、判别模型吃 rerankSystemonePrompt（{{n}} 已换）",
+      "主路成功就不调语言模型（省那一次 LLM）/ 主路合并结果照常生效 / 兜底没被触发",
+      [fake.calls.utility.length, outcome.merged.map((value) => Number(value.toFixed(2))), outcome.fallback],
+      [0, [1, 0], RERANK_FALLBACK_NONE],
+    );
+    eq(
+      "判别模型那一份题面照常渲染进请求（{{n}} 已换）",
+      calls.find((call) => call.url.endsWith("/v1/systemone")).body.questions.r1.instructions,
+      "第 1 条能帮上忙吗",
+    );
+    resetRuntimeTransport();
+  }
+
+  // ---- 主路全失败：语言模型兜底接手，并且它吃的是 rerankPrompt ----------------
+  {
+    setRuntimeTransport({
+      send: async () => ({ ok: false, status: 500, headers: {}, data: { error: "boom" } }),
+    });
+    const fake = modelSdk({ utility: () => ({ text: "2" }) });
+    const sdk = recallSdk({ values: {}, dataDir: dir, models: fake.models });
+    const outcome = await runRerankChannels({
+      sdk,
+      switches: {
+        rerankChannels: [
+          { type: "systemone", url: "http://127.0.0.1:8080", model: "small", weight: 1, enabled: true },
+          { type: "model", model: "", weight: 1, enabled: false },
+        ],
+        rerankPrompt: "兜底选一选：{{message}}\n{{candidates}}",
+      },
+      query: "用户问题",
+      items,
+    });
+    eq(
+      "主路失败 → 语言模型兜底：探针把这一路标成 rerankPrompt、兜底取值是 model、结果被采用",
       [
-        fake.calls.utility[0].messages[0].content.startsWith("挑一挑：用户问题"),
-        calls.find((call) => call.url.endsWith("/v1/systemone")).body.questions.r1.instructions,
+        outcome.channels.map((channel) => [channel.type, channel.promptSource]),
+        outcome.fallback,
+        outcome.merged.map((value) => Number(value.toFixed(2))),
+        outcome.kept.map((item) => item.text),
       ],
-      [true, "第 1 条能帮上忙吗"],
+      [
+        [
+          ["systemone", "rerankSystemonePrompt"],
+          ["model", "rerankPrompt"],
+        ],
+        RERANK_FALLBACK_MODEL,
+        [0, 1],
+        ["乙"],
+      ],
+    );
+    check(
+      "兜底用的是语言模型那一份提示词（主路那份题面不会跑到它身上）",
+      fake.calls.utility.length === 1 &&
+        fake.calls.utility[0].messages[0].content.startsWith("兜底选一选：用户问题"),
+      fake.calls.utility[0]?.messages?.[0]?.content?.slice(0, 20),
     );
     resetRuntimeTransport();
   }
@@ -10225,7 +10574,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
 
-  // ---- 一个启用通道都没有：不跑任何一路，候选原样保留，日志写一句 ----
+  // ---- 三条全关：不跑任何一路，候选原样保留，日志写一句 ----
   {
     const logs = [];
     const fake = modelSdk({ utility: () => ({ text: "1" }) });
@@ -10246,10 +10595,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           apiKey: "k",
           serverUrl: "http://h:1",
           rerank: "llm",
-          // 三条都停用：语言模型那条在写库侧会被强制成启用，所以这里用「一条都没有」。
+          // 三条路的开关全关：主路两条不跑，但兜底不可关 —— 它仍会被调一次。
           rerankChannels: JSON.stringify([
-            { type: "rerank", url: "http://h:2", model: "m", weight: 1, enabled: false },
             { type: "systemone", url: "http://h:3", model: "m", weight: 1, enabled: false },
+            { type: "rerank", url: "http://h:2", model: "m", weight: 1, enabled: false },
+            { type: "model", model: "", weight: 1, enabled: false },
           ]),
         },
         fetchImpl: mock.fetchImpl,
@@ -10260,23 +10610,428 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       {},
     );
     const result = await handler({
-      payload: { messages: [{ role: "user", content: "没有启用的路" }] },
-      session: { sessionId: "rerank-no-channel" },
+      payload: { messages: [{ role: "user", content: "三格的开关全关着" }] },
+      session: { sessionId: "rerank-all-switches-off" },
     });
     const content = result?.payload?.messages?.[0]?.content || "";
     check(
-      "没有启用通道时：候选原样全留、一次宿主模型都没调、也没发任何打分请求",
+      "三格全关：主路那两条一次没跑（没发打分请求），但兜底仍被调一次（挑 1）/ 日志写 fallback to model",
       Boolean(result?.payload) &&
-        ["第一条", "第二条", "第三条"].every((text) => content.includes(text)) &&
-        fake.calls.utility.length + fake.calls.stream.length === 0 &&
-        mock.calls.length === 1,
-      `${fake.calls.utility.length}/${mock.calls.length}`,
+        content.includes("第一条") &&
+        !content.includes("第二条") &&
+        fake.calls.utility.length === 1 &&
+        mock.calls.length === 1 &&
+        logs.some((line) => line.includes("rerank: fallback to model (kept=1)")),
+      `${fake.calls.utility.length}/${mock.calls.length} / ${logs.join(" | ")}`,
     );
-    check(
-      "日志写明 rerank: no enabled channel, skip",
-      logs.some((line) => line.includes("rerank: no enabled channel, skip")),
-      logs.join(" | "),
+  }
+
+  // ---- 主路可以是任意组合：启用哪几条就跑哪几条 ----------------
+  //
+  // 语言模型也是主路里的一种可能，不是一个只会在旁边等着的特例。
+  {
+    const laneOf = (type) => ({
+      systemone: { type: "systemone", url: "http://127.0.0.1:8080", model: "small", weight: 1 },
+      rerank: { type: "rerank", url: "http://127.0.0.1:8080", model: "bge", weight: 1 },
+      model: { type: "model", model: "", weight: 1 },
+    })[type];
+
+    const runWith = async (enabledTypes) => {
+      const http = [];
+      setRuntimeTransport({
+        send: async (url) => {
+          http.push(String(url));
+          const data = String(url).includes("/v1/rerank")
+            ? {
+                results: [
+                  { index: 0, relevance_score: 0.9 },
+                  { index: 1, relevance_score: 0.1 },
+                ],
+              }
+            : { answers: { r1: { noul: 0.8 }, r2: { noul: 0.2 } } };
+          return { ok: true, status: 200, headers: {}, data };
+        },
+      });
+      const fake = modelSdk({ utility: () => ({ text: "2" }) });
+      const sdk = recallSdk({ values: {}, dataDir: dir, models: fake.models });
+      const outcome = await runRerankChannels({
+        sdk,
+        switches: {
+          rerankChannels: ["systemone", "rerank", "model"].map((type) => ({
+            ...laneOf(type),
+            enabled: enabledTypes.includes(type),
+          })),
+        },
+        query: "用户问题",
+        items,
+      });
+      resetRuntimeTransport();
+      return {
+        outcome,
+        utility: fake.calls.utility.length,
+        http: http.length,
+        ran: outcome.channels.map((channel) => channel.type),
+      };
+    };
+
+    const rows = [];
+    for (const combo of [["systemone"], ["rerank"], ["model"], ["systemone", "rerank", "model"], []]) {
+      const run = await runWith(combo);
+      rows.push([
+        combo.join("+") || "（全关）",
+        run.ran.join("+"),
+        run.outcome.fallback,
+        run.utility,
+        run.http,
+        run.outcome.kept.map((item) => item.text).join("+"),
+      ]);
+    }
+    eq(
+      "主路任意组合：单判别 / 单 rerank / 单语言模型 / 三条全开 / 三条全关，各路该跑的跑、该兜的兜",
+      rows,
+      [
+        ["systemone", "systemone", RERANK_FALLBACK_NONE, 0, 1, "甲+乙"],
+        ["rerank", "rerank", RERANK_FALLBACK_NONE, 0, 1, "甲+乙"],
+        ["model", "model", RERANK_FALLBACK_NONE, 1, 0, "乙"],
+        ["systemone+rerank+model", "systemone+rerank+model", RERANK_FALLBACK_NONE, 1, 2, "甲+乙"],
+        ["（全关）", "model", RERANK_FALLBACK_MODEL, 1, 0, "乙"],
+      ],
     );
+  }
+
+  // ---- 三个兜底分流各跑一遍：日志一句、探针一个取值 ----------------  //
+  // 这一块从 createRecallHandler 进去跑：日志与探针都是那一层写的，
+  // 只验 runRerankChannels 的返回值会漏掉「接线接对没有」。
+  {
+    const recallBody = {
+      status: "ok",
+      result: {
+        rendered: "",
+        digest: "",
+        entries: [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }],
+      },
+    };
+    const serviceOk = () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            { index: 0, relevance_score: 0.9 },
+            { index: 1, relevance_score: 0.2 },
+            { index: 2, relevance_score: 0 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const flatOk = () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            { index: 0, relevance_score: 0.5 },
+            { index: 1, relevance_score: 0.5 },
+            { index: 2, relevance_score: 0.5 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const serviceBad = () => new Response("bad", { status: 500 });
+    const systemoneFlat = () =>
+      new Response(
+        JSON.stringify({
+          answers: { r1: { noul: 0.5 }, r2: { noul: 0.5 }, r3: { noul: 0.5 } },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    /** 跑一轮召回，收集日志 / 探针 / 宿主模型调用。 */
+    const runOnce = async ({ sessionId, rerankChannels, service, systemone = serviceBad, answer }) => {
+      const logs = [];
+      const probes = [];
+      const fake = modelSdk({ utility: () => ({ text: answer }) });
+      const fetchImpl = async (url) => {
+        const target = String(url);
+        if (target.includes("/v1/rerank")) return service();
+        if (target.includes("/v1/systemone")) return systemone();
+        return new Response(JSON.stringify(recallBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      };
+      const handler = createRecallHandler(
+        recallSdk({
+          values: {
+            enabled: true,
+            apiKey: "k",
+            serverUrl: "http://h:1",
+            rerank: "llm",
+            probe: true,
+            // 这一块测的是新语义：开关拨开就是用户的选择，不是老配置里被硬写上去的 true。
+            rerankLaneSchema: String(RERANK_LANE_SCHEMA),
+            rerankChannels: JSON.stringify(rerankChannels),
+          },
+          fetchImpl,
+          dataDir: dir,
+          models: fake.models,
+          logger: { info: (line) => logs.push(line), warn: () => {} },
+        }),
+        { probe: async (event, invocation) => probes.push({ event, invocation }) },
+      );
+      const result = await handler({
+        payload: { messages: [{ role: "user", content: `兜底分流：${sessionId}` }] },
+        session: { sessionId },
+      });
+      const rerankProbe = probes.find((probe) => probe.event === "recall/rerank");
+      return {
+        logs,
+        fake,
+        content: result?.payload?.messages?.[0]?.content || "",
+        fallback: rerankProbe?.invocation?.fallback,
+        kept: rerankProbe?.invocation?.kept,
+        channelTypes: asList(rerankProbe?.invocation?.channels).map((channel) => channel.type),
+      };
+    };
+
+    const mainLane = { type: "rerank", url: "http://127.0.0.1:9999", model: "bge", weight: 1, enabled: true };
+
+    // 1. 主路成功、兜底那格关着：不调语言模型，日志说 main lanes ok，探针 fallback=none
+    {
+      const run = await runOnce({
+        sessionId: "fallback-none",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: false }],
+        service: serviceOk,
+        answer: "1,3",
+      });
+      check(
+        "主路成功（兜底那格关着）：语言模型一次没调 / 日志写 main lanes ok / 探针 fallback=none",
+        run.fake.calls.utility.length === 0 &&
+          run.logs.some((line) => line.includes("rerank: main lanes ok (kept=2)")) &&
+          run.fallback === RERANK_FALLBACK_NONE &&
+          run.kept === 2 &&
+          JSON.stringify(run.channelTypes) === JSON.stringify(["rerank"]),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
+
+    // 1b. 开关开着 = 它额外参与主路：就算主路自己成功，它也一起打分
+    {
+      const run = await runOnce({
+        sessionId: "fallback-participate",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: true }],
+        service: serviceOk,
+        answer: "1,3",
+      });
+      check(
+        "开关开着：语言模型与主路一起打分（主路成功也调一次）/ 合并里两路都投了票 / 没走兜底分支",
+        run.fake.calls.utility.length === 1 &&
+          run.fallback === RERANK_FALLBACK_NONE &&
+          run.kept === 3 &&
+          JSON.stringify(run.channelTypes) === JSON.stringify(["rerank", "model"]),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${JSON.stringify(run.channelTypes)}`,
+      );
+    }
+
+    // 2. 主路失败、兜底那格关着：它不参与打分，但照样会被调一次兜底
+    {
+      const run = await runOnce({
+        sessionId: "fallback-model",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: false }],
+        service: serviceBad,
+        answer: "1,3",
+      });
+      check(
+        "主路失败（兜底那格关着）：兜底照样被调一次（挑了 1,3）/ 日志写 fallback to model / 探针 fallback=model",
+        run.fake.calls.utility.length === 1 &&
+          run.logs.some((line) => line.includes("rerank: fallback to model (kept=2)")) &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.kept === 2 &&
+          run.content.includes("第一条") &&
+          !run.content.includes("第二条"),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
+
+    // 2b. 开关开着、主路又全垮：它已经在主路里打过分了，不再重试同一个失败
+    {
+      const run = await runOnce({
+        sessionId: "fallback-participated-fail",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: true }],
+        service: serviceBad,
+        answer: "1,3",
+      });
+      check(
+        "开关开着且主路全垮：语言模型只被调一次（不重试同一路）/ 它的分被采用 / 探针 fallback=none（它本来就在主路里）",
+        run.fake.calls.utility.length === 1 &&
+          run.fallback === RERANK_FALLBACK_NONE &&
+          run.kept === 2,
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.kept}`,
+      );
+    }
+
+    // 3. 主路失败、兜底自己也没给出结果：候选原样保留，日志说 fallback failed
+    {
+      const run = await runOnce({
+        sessionId: "fallback-broken",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: false }],
+        service: serviceBad,
+        answer: "我觉得都还行",
+      });
+      check(
+        "兜底也失败：三个候选全部原样保留 / 日志写 fallback failed, keep all / 探针 fallback=model",
+        run.fake.calls.utility.length === 1 &&
+          run.logs.some((line) => line.includes("rerank: fallback failed, keep all")) &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.kept === 3 &&
+          ["第一条", "第二条", "第三条"].every((text) => run.content.includes(text)),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
+
+    // 3b. 开关开着且它在主路里就失败了：兜底会再调它一次（两次），这次也失败就原样保留
+    {
+      const run = await runOnce({
+        sessionId: "fallback-broken-participating",
+        rerankChannels: [mainLane, { type: "model", model: "", weight: 1, enabled: true }],
+        service: serviceBad,
+        answer: "我觉得都还行",
+      });
+      check(
+        "语言模型在主路里失败后，兜底再调一次（两次）→ 这次也失败才原样保留 / 日志写 fallback failed",
+        run.fake.calls.utility.length === 2 &&
+          run.logs.some((line) => line.includes("rerank: fallback failed, keep all")) &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.kept === 3,
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
+
+    // 3c. 同上，但第二次（兜底那次）成功了：就是「网络抖动已恢复」那一格
+    {
+      let calls = 0;
+      const logs = [];
+      const fake = modelSdk({
+        utility: () => (++calls === 1 ? { text: "我觉得都还行" } : { text: "2" }),
+      });
+      const handler = createRecallHandler(
+        recallSdk({
+          values: {
+            enabled: true,
+            apiKey: "k",
+            serverUrl: "http://h:1",
+            rerank: "llm",
+            rerankLaneSchema: String(RERANK_LANE_SCHEMA),
+            rerankChannels: JSON.stringify([
+              mainLane,
+              { type: "model", model: "", weight: 1, enabled: true },
+            ]),
+          },
+          fetchImpl: async (url) =>
+            String(url).includes("/v1/rerank")
+              ? serviceBad()
+              : new Response(JSON.stringify(recallBody), {
+                  status: 200,
+                  headers: { "content-type": "application/json" },
+                }),
+          dataDir: dir,
+          models: fake.models,
+          logger: { info: (line) => logs.push(line), warn: () => {} },
+        }),
+        {},
+      );
+      const result = await handler({
+        payload: { messages: [{ role: "user", content: "兜底第二次才成" }] },
+        session: { sessionId: "fallback-retry-ok" },
+      });
+      const content = result?.payload?.messages?.[0]?.content || "";
+      check(
+        "第一次（主路）解析不出、第二次（兜底）成了：一共两次调用 / 用了第二次数结果 / 日志写 fallback to model",
+        calls === 2 &&
+          content.includes("第二条") &&
+          !content.includes("第一条") &&
+          logs.some((line) => line.includes("rerank: fallback to model (kept=1)")),
+        `${calls} / ${logs.join(" | ")}`,
+      );
+    }
+
+    // 4. 主路全弃权（三候选同分，两路都没区分力）：照样走兜底
+    {
+      const run = await runOnce({
+        sessionId: "fallback-abstain",
+        rerankChannels: [
+          mainLane,
+          { type: "systemone", url: "http://127.0.0.1:9998", model: "small", weight: 1, enabled: true },
+          { type: "model", model: "", weight: 1, enabled: false },
+        ],
+        service: flatOk,
+        systemone: systemoneFlat,
+        answer: "2",
+      });
+      check(
+        "主路全弃权（两路都同分，没有区分力）= 没结果，所以照样调兜底：日志写 fallback to model / 探针 fallback=model",
+        run.fake.calls.utility.length === 1 &&
+          run.logs.some((line) => line.includes("rerank: fallback to model (kept=1)")) &&
+          run.logs.filter((line) => line.includes("candidate") === false && line.includes("abstained")).length === 2 &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.kept === 1,
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
+
+    // 5. 语言模型是唯一的一条、开关开着：它就是主路，不走兜底分支
+    {
+      const run = await runOnce({
+        sessionId: "fallback-solo-on",
+        rerankChannels: [{ type: "model", model: "", weight: 1, enabled: true }],
+        service: serviceBad,
+        answer: "2",
+      });
+      check(
+        "语言模型单独存在且开关开着：直接当主路跑 / 探针 fallback=none / 结果被采用",
+        run.fake.calls.utility.length === 1 &&
+          run.fallback === RERANK_FALLBACK_NONE &&
+          run.kept === 1 &&
+          run.content.includes("第二条") &&
+          JSON.stringify(run.channelTypes) === JSON.stringify(["model"]),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${JSON.stringify(run.channelTypes)}`,
+      );
+    }
+
+    // 5b. 语言模型是唯一的一条、开关关着：主路空，它当兜底跑
+    //     ——这一条就是「兜底不可关」的证据：关了开关，精排也照样有人干活。
+    {
+      const run = await runOnce({
+        sessionId: "fallback-solo-off",
+        rerankChannels: [{ type: "model", model: "", weight: 1, enabled: false }],
+        service: serviceBad,
+        answer: "2",
+      });
+      check(
+        "语言模型单独存在、开关关着：照样被调一次兜底（开关关不掉它）/ 探针 fallback=model / 结果被采用",
+        run.fake.calls.utility.length === 1 &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.kept === 1 &&
+          run.content.includes("第二条"),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.kept}`,
+      );
+    }
+
+    // 6. 主路那几条都关着：它当兜底接手（关主路不等于把精排也关了）
+    {
+      const run = await runOnce({
+        sessionId: "fallback-main-off",
+        rerankChannels: [
+          { ...mainLane, enabled: false },
+          { type: "model", model: "", weight: 1, enabled: false },
+        ],
+        service: serviceBad,
+        answer: "1",
+      });
+      check(
+        "主路全关、兜底那格也关着：它仍然能接手（关主路不等于把精排也关了）/ 探针 fallback=model",
+        run.fake.calls.utility.length === 1 &&
+          run.fallback === RERANK_FALLBACK_MODEL &&
+          run.logs.some((line) => line.includes("rerank: fallback to model (kept=1)")),
+        `${run.fake.calls.utility.length} / ${run.fallback} / ${run.logs.join(" | ")}`,
+      );
+    }
   }
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -10311,9 +11066,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     channels: [{ type: "rerank", url: "http://127.0.0.1:9999", model: "m", weight: 1 }],
   });
   eq(
-    "全 0 分：这一路不弃权（全 0 是明确拒绝，不是没有区分力），整轮丢掉全部候选且不算兜底",
+    "全 0 分：这一路不弃权（全 0 是明确拒绝，不是没有区分力），整轮丢掉全部候选且不调兜底",
     [outcome.channels[0].abstained, outcome.fallback, outcome.indexes, outcome.kept],
-    [false, false, [], []],
+    [false, RERANK_FALLBACK_NONE, [], []],
   );
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -10392,11 +11147,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [0.1, 10, null, null],
   );
   {
-    // 零候选：不排序、不崩，保留空数组，算兜底。
+    // 零候选：不排序、不崩，保留空数组；没有可用的合并结果，也调不动兜底。
     resetRuntimeTransport();
     const dir = path.join(import.meta.dirname, ".tmp-rerank-edge");
     fs.rmSync(dir, { recursive: true, force: true });
-    const sdk = recallSdk({ values: {}, dataDir: dir });
+    const fake = modelSdk({ utility: () => ({ text: "1" }) });
+    const sdk = recallSdk({ values: {}, dataDir: dir, models: fake.models });
     const outcome = await runRerankChannels({
       sdk,
       switches: { rerankChannels: [] },
@@ -10405,9 +11161,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       channels: [{ type: "model", weight: 1 }],
     });
     eq(
-      "零候选：不崩、索引与保留都是空、算兜底",
-      [outcome.fallback, outcome.indexes, outcome.kept],
-      [true, [], []],
+      "零候选：不崩、索引与保留都是空、没拿到合并结果所以算走了兜底（主路一次 + 兜底一次）",
+      [outcome.fallback, outcome.indexes, outcome.kept, fake.calls.utility.length],
+      [RERANK_FALLBACK_MODEL, [], [], 2],
     );
     fs.rmSync(dir, { recursive: true, force: true });
     resetRuntimeTransport();

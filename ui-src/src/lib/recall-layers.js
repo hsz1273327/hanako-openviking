@@ -90,24 +90,39 @@ export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model
 export const RERANK_CHANNELS_MAX = 8;
 
 /**
- * 精排页那三条固定的路的顺序：语言模型 / 判别模型 / rerank 模型。
+ * 精排页那三条固定的路的顺序：判别模型 → rerank 模型 → 语言模型。
  *
  * 与 RERANK_CHANNEL_TYPES（配置里的枚举）故意分成两份：那边是存量数据的写法，
- * 这边是给人看的顺序，语言模型放最上面（它恒启用，是那一条基线）。
+ * 这边是给人看的顺序。语言模型永远在最后：它是主路都不通时接手的那一道兜底，
+ * 不是主力，所以不放在顶上。前两条是主路，并行跑、按权重合并。
  */
-export const RERANK_LANE_ORDER = Object.freeze(["model", "systemone", "rerank"]);
+export const RERANK_LANE_ORDER = Object.freeze(["systemone", "rerank", "model"]);
+
+/** 语言模型那一路的角色：排在最后，且不可关（它是兜底）。 */
+export const RERANK_FALLBACK_LANE = "model";
+
+/** 语言模型名字旁边那个小标签。 */
+export const RERANK_FALLBACK_TAG = "兜底";
+
+/**
+ * 语言模型那个开关旁边的小字。
+ *
+ * 那个开关管的是「要不要额外参与主路打分」，不是「要不要兜底」：两者都行，兜底都在。
+ */
+export const RERANK_LANE_PARTICIPATE_NOTE =
+  "开启则每次也参与打分；关闭则只在其他路不通时接手。";
 
 export const RERANK_LANE_LABELS = Object.freeze({
-  model: "语言模型",
   systemone: "判别模型",
   rerank: "rerank 模型",
+  model: "语言模型",
 });
 
 /** 每种路的默认超时显示（超时框的 placeholder）。systemone 没配时是自适应的。 */
 export const RERANK_LANE_TIMEOUT_PLACEHOLDERS = Object.freeze({
-  model: "1500",
   systemone: "自适应",
   rerank: "800",
+  model: "1500",
 });
 
 /**
@@ -454,11 +469,12 @@ export function rerankLaneConfigured(type, config) {
 /**
  * 精排页要画的那几条路（纯函数，冒烟直接验）。
  *
- * 规则只有三条：
- *   1. 语言模型恒有、恒启用（精排至少留一路，停用状态在数据侧也不成立）；
- *   2. 判别模型 / rerank 模型：配了对应的打分服务才出现；已经有通道的也留下
+ * 规则只有四条：
+ *   1. 顺序固定：判别模型 → rerank 模型 → 语言模型（RERANK_LANE_ORDER）；
+ *   2. 语言模型恒有（不需要服务），它的开关只是「要不要额外参与主路打分」，任何时候都能拨；
+ *   3. 判别模型 / rerank 模型：配了对应的打分服务才出现；已经有通道的也留下
  *      （服务被清空时行还在，只标记不会生效，不自动删用户的数据）；
- *   3. 启用状态看那条通道；还没有通道就是没启用（开启会在 store 里建出这一条）。
+ *   4. 启用状态看那条通道；还没有通道就是没启用（开启会在 store 里建出这一条）。
  *
  * 返回的是展示模型，不是配置：组件只读它，不反过来写回配置。
  */
@@ -473,14 +489,16 @@ export function rerankLanes(config) {
   for (const type of RERANK_LANE_ORDER) {
     const channel = byType.get(type) || null;
     const configured = rerankLaneConfigured(type, config);
-    if (type !== "model" && !channel && !configured) continue;
-    const locked = type === "model";
+    const isFallback = type === RERANK_FALLBACK_LANE;
+    if (!isFallback && !channel && !configured) continue;
     lanes.push({
       type,
       label: RERANK_LANE_LABELS[type],
       channel,
-      enabled: locked ? true : Boolean(channel && channel.enabled),
-      locked,
+      // 这一格只管「要不要额外参与主路打分」，缺省是不参与（主路能跑通时不必多打一次 LLM）。
+      // 语言模型没通道时也是不参与；它是兜底这件事不靠这个开关。
+      enabled: Boolean(channel && channel.enabled),
+      fallback: isFallback,
       hasChannel: Boolean(channel),
       // 有通道、但那一类服务已经不在了（且它自己也没成对配上地址 + 模型）：
       // 运行时这一路会直接弃权，界面要说出来。判据与 channelServiceMissing 同一份。
@@ -861,8 +879,8 @@ export function normalizeRerankChannel(value) {
     url: typeof item.url === "string" ? item.url.trim() : "",
     model: typeof item.model === "string" ? item.model.trim() : "",
     weight: Number.isFinite(weight) && weight >= 0.1 && weight <= 10 ? weight : 1,
-    // 语言模型那一条恒启用：精排至少要留一路，界面上那个开关本来就是禁用态。
-    enabled: type === "model" ? true : item.enabled !== false,
+    // 这一格只管「要不要额外参与主路打分」，缺省不参与；语言模型也一样（兜底不靠它）。
+    enabled: item.enabled !== false,
     // 超时那一格用户可以留空（= 用该类型默认值），存量里填了要原样带回去。
     ...(Number.isFinite(timeout) && timeout > 0 && timeout <= 30000
       ? { timeoutMs: Math.floor(timeout) }

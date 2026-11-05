@@ -841,7 +841,7 @@ export function createPanelStore(deps = {}) {
    *
    * 用的是草稿（state.channels），不是服务端确认过的那份：拨了开关要立刻变，
    * 不用等回包。哪几条出现由 rerankLanes 判定（配了服务才有判别 / rerank 那两条，
-   * 语言模型恒有）。
+   * 语言模型恒有，排在最后）。
    */
   function laneRows() {
     return rerankLanes({ ...state.layers, rerankChannels: state.channels });
@@ -855,22 +855,24 @@ export function createPanelStore(deps = {}) {
    * 改一条路的配置。没有这一条通道就现建一条（只有拨开关 / 改权重才会走到这里），
    * 所以「界面上看得见的那条路」与「配置里真有的通道」不会长期错位。
    *
-   * 语言模型的 enabled 恒为 true：那个开关在界面上是禁用态，这里再兜一层，
-   * 免得别的调用方把停用状态写进配置。
+   * 语言模型那一格的 enabled 只管「要不要额外参与主路打分」，不影响兜底。
    */
   function patchLane(type, patch) {
     const index = state.channels.findIndex((channel) => channel && channel.type === type);
     const base = index >= 0 ? state.channels[index] : emptyRerankChannel(type);
     const next = { ...base, ...patch };
-    if (type === "model") next.enabled = true;
     if (index >= 0) state.channels[index] = next;
     else state.channels = [...state.channels, next];
     return saveLayers();
   }
 
-  /** 启用 / 停用一条路。语言模型那一条不可停用，调用直接返回（不改状态也不发请求）。 */
+  /**
+   * 启用 / 停用一条路。
+   *
+   * 没有「不能停」的路：语言模型停了也还是兜底（只是平时不再参与打分），
+   * 所以任何一格任何时候都能拨。
+   */
   function setLaneEnabled(type, enabled) {
-    if (type === "model") return undefined;
     return patchLane(type, { enabled: Boolean(enabled) });
   }
 
