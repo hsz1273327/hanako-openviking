@@ -2579,7 +2579,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "rendered / digest / 字符串形态仍视为单条：没有 uri 与分数，元信息全是空值",
     [extractRecallItems({ rendered: "渲染块" }), extractRecallItems("一段记忆").length],
-    [[{ text: "渲染块", uri: "", score: null, time: "", peer: "" }], 1],
+    [[{ text: "渲染块", uri: "", score: null, time: "", peer: "", type: "", detail: "" }], 1],
   );
   eq(
     "peer 从 uri 的 /peers/<name>/ 解出来；不在 peers 下 / 没有 uri / 只有前缀没有尾斜杠都给空串",
@@ -9244,11 +9244,120 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 {
   // ---- 候选条目：保留边界（与元信息），extractRecallText 仍按旧规则拼回去 ----
   {
-    const bare = { uri: "", score: null, time: "", peer: "" };
+    const bare = { uri: "", score: null, time: "", peer: "", type: "", detail: "" };
     eq(
       "条目：rendered 视为单条 / 条目：空 rendered 让位给 digest（仍是单条） / 条目：entries 逐条保留并跳过空项 / 条目：字符串也是一条 / 条目：未知形状给空数组 / 条目：null 给空数组 / 条目：没有元信息的形状降级成空值 / extractRecallText 语义未变（entries 用空行连接）",
       [extractRecallItems({ rendered: "渲染块", digest: "摘要", entries: [{ text: "条目" }] }), extractRecallItems({ rendered: "  ", digest: "只有摘要", entries: [{ text: "条目" }] }), extractRecallItems({ entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }] }), extractRecallItems("  一段记忆  "), extractRecallItems({ total: 0 }), extractRecallItems(null), extractRecallText({ entries: [{ text: "甲" }, { text: "" }, { text: "乙" }] })],
       [[{ text: "渲染块", ...bare }], [{ text: "只有摘要", ...bare }], [{ text: "第一条", ...bare }, { text: "第二条", ...bare }], [{ text: "一段记忆", ...bare }], [], [], "甲\n\n乙"],
+    );
+  }
+
+  // ---- rendered 拆条：一个 <memory> 块是一条候选，不是整段一条 ----
+  {
+    // 服务端 render.py 的真实形态：属性顺序 uri/type/score/detail，块体前后各一个换行，
+    // 块与块之间用单个换行连（FRAGMENT_SEPARATOR）。
+    const tenBlocks = [
+      ["viking://user/default/memories/events/2026/07/14/tier_design.md", "events", "0.58", "full", "周三要交稿。"],
+      ["viking://user/default/memories/entities/software/openviking_fs.md", "entities", "0.55", "overview", "存储层用 viking 路径。"],
+      ["viking://user/default/memories/preferences/hsz/editor.md", "preferences", "0.51", "abstract", "编辑器用 vim。"],
+      ["viking://user/default/memories/experiences/deploy.md", "experiences", "0.47", "full", "部署走 rsync。"],
+      ["viking://user/default/memories/events/2026/06/01/release.md", "events", "0.44", "overview", "六月发过一版。"],
+      ["viking://user/default/memories/entities/people/assistant.md", "entities", "0.41", "abstract", "助手叫小花。"],
+      ["viking://user/default/memories/preferences/hsz/tea.md", "preferences", "0.38", "full", "喜欢乌龙茶。"],
+      ["viking://user/default/memories/experiences/probe.md", "experiences", "0.35", "overview", "探针只写日志。"],
+      ["viking://user/default/memories/events/2026/05/02/split.md", "events", "0.32", "abstract", "拆条是为了精排。"],
+      ["viking://user/default/memories/entities/software/host.md", "entities", "0.29", "full", "宿主是 HanaAgent。"],
+    ];
+    const renderEntry = ([uri, type, score, detail, body]) =>
+      `<memory uri="${uri}" type="${type}" score="${score}" detail="${detail}">\n${body}\n</memory>`;
+    const tenRendered = tenBlocks.map(renderEntry).join("\n");
+    const tenItems = extractRecallItems({ rendered: tenRendered });
+
+    eq(
+      "rendered 十个 <memory> 块拆成十条，顺序与原文一致",
+      tenItems.map((item) => item.text),
+      tenBlocks.map(renderEntry),
+    );
+    check(
+      "拆条后的条数就是十条：精排入口条件 items.length >= 2 这才真正成立",
+      tenItems.length === 10 && tenItems.length >= 2,
+      `got ${tenItems.length}`,
+    );
+    eq(
+      "每条的 uri / score / type / detail 从开标签解析正确（score 是数字）",
+      tenItems.map((item) => [item.uri, item.score, item.type, item.detail, item.peer]),
+      tenBlocks.map(([uri, type, score, detail]) => [uri, Number(score), type, detail, ""]),
+    );
+
+    // 缺字段降级：只有 uri 的块给空串 / null，脏分给 null（不能是 0）。
+    const ragged = [
+      '<memory uri="viking://user/default/memories/bare.md">\n只有 uri 与正文\n</memory>',
+      '<memory uri="viking://user/default/memories/bad_score.md" type="events" score="abc" detail="full">\n分是脏值\n</memory>',
+    ].join("\n");
+    const raggedItems = extractRecallItems({ rendered: ragged });
+    eq(
+      "缺字段降级成空串 / null，脏分解不出给 null 而不是 0，两条一条不丢",
+      [raggedItems.map((item) => [item.uri, item.score, item.type, item.detail]), raggedItems.length],
+      [
+        [
+          ["viking://user/default/memories/bare.md", null, "", ""],
+          ["viking://user/default/memories/bad_score.md", null, "events", "full"],
+        ],
+        2,
+      ],
+    );
+
+    // 自闭合块：正文为空时服务端给 `<memory ... />`，它自己就是一条。
+    const selfClosing =
+      '<memory uri="viking://user/default/memories/empty.md" type="skills" score="0.20" detail="uri" />';
+    eq(
+      "自闭合块也是一条，正文就是那个开标签，且优先于 digest",
+      [extractRecallItems({ rendered: selfClosing, digest: "摘要不该赢" }).map((item) => item.text), extractRecallItems({ rendered: selfClosing })[0].uri],
+      [[selfClosing], "viking://user/default/memories/empty.md"],
+    );
+
+    // 块外散落文本：抬头与结尾各留一条，条数对得上原文。
+    const withStray = `以下是相关记忆：\n\n${tenRendered}\n\n以上。`;
+    const strayItems = extractRecallItems({ rendered: withStray });
+    eq(
+      "块外散落文本（抬头 / 结尾）各自留一条，不静默丢，也不挤进块正文",
+      [strayItems.length, strayItems[0]?.text ?? null, strayItems[0]?.uri ?? null, strayItems[1]?.uri ?? null, strayItems[11]?.text ?? null],
+      [12, "以下是相关记忆：", "", tenBlocks[0][0], "以上。"],
+    );
+
+    // 没有闭标签：预算截断留下的尾巴，切到整段末尾，不吞掉前面的块。
+    const truncated = `${renderEntry(tenBlocks[0])}\n<memory uri="viking://user/default/memories/cut.md" type="events" score="0.50" detail="full">\n写到一半`;
+    eq(
+      "没有闭标签的块切到整段末尾，前面的正常块照样拆出来",
+      extractRecallItems({ rendered: truncated }).map((item) => item.uri),
+      [tenBlocks[0][0], "viking://user/default/memories/cut.md"],
+    );
+
+    // 降级路径：认不出块就是一条，不能因为拆不开就丢光。
+    const noBlock = "一段没有任何 memory 块的渲染文本";
+    eq(
+      "没有 <memory> 块的 rendered 仍是一条（降级路径）",
+      [extractRecallItems({ rendered: noBlock }).map((item) => item.text), extractRecallItems({ rendered: "  " }).length],
+      [[noBlock], 0],
+    );
+
+    // 关键断言：拆开再拼回来，注入文本逐字不变。
+    eq(
+      "拆分后 extractRecallText 拼回去与拆分前逐字一致（十块 / 散落文本 / 自闭合 / 无闭标签）",
+      [tenRendered, withStray, selfClosing, truncated].map((source) =>
+        extractRecallText({ rendered: source }) === source,
+      ),
+      [true, true, true, true],
+    );
+    eq(
+      "组装 off 档把十条拼回去也与 rendered 逐字一致（拆条不改注入文本）",
+      assembleCandidates(tenItems, "off").text,
+      tenRendered,
+    );
+    eq(
+      "组装 rules 档按分精排后顺序未变（服务端本就按分降序）时同样逐字一致",
+      [assembleCandidates(tenItems, "rules").text, assembleCandidates(tenItems, "rules").refs.length],
+      [tenRendered, 10],
     );
   }
 
@@ -12092,6 +12201,41 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "entries 兜底：注入成功，用空行拼起来且跳过空项",
     Boolean(entriesResult?.payload) &&
       entriesText.includes("第一条\n\n第二条"),
+  );
+
+  // ---- 十块 rendered：召回数必须是十条，不是一条 ----
+  // 这就是 probe.log 里「recalled:1、rerank:null、却注入了十条」那个现象。
+  const tenBlocks = Array.from(
+    { length: 10 },
+    (_, index) =>
+      `<memory uri="viking://user/default/memories/m${index + 1}.md" type="events" score="0.${90 - index * 3}" detail="full">\n第${index + 1}条记忆\n</memory>`,
+  );
+  const tenFetch = mockFetch({
+    body: { status: "ok", result: { rendered: tenBlocks.join("\n"), entries: [], stats: {} } },
+  });
+  const tenProbes = [];
+  const tenHandler = createRecallHandler(
+    recallSdk({
+      values: { ...values, probe: true },
+      fetchImpl: tenFetch.fetchImpl,
+      dataDir: dir,
+    }),
+    { probe: async (event, invocation) => tenProbes.push({ event, invocation }) },
+  );
+  const tenResult = await tenHandler({
+    payload: { messages: [{ role: "user", content: "十块记忆怎么拆" }] },
+    session: { sessionId: "shape-ten" },
+  });
+  const tenText = asText(asList(tenResult?.payload?.messages)[0]?.content);
+  const tenSummary = tenProbes.find((probe) => probe.event === "recall/result")?.invocation;
+  eq(
+    "十块 rendered：recalled 是十条而不是一条，组装也看见十条，注入文本逐块保留",
+    [
+      tenSummary?.recalled,
+      tenSummary?.assemble?.kept,
+      tenBlocks.every((block) => tenText.includes(block)),
+    ],
+    [10, 10, true],
   );
 
   fs.rmSync(dir, { recursive: true, force: true });

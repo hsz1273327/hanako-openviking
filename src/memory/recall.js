@@ -1838,7 +1838,12 @@ export function recallMetaOf(entry) {
   const rawTime = source.modTime ?? source.timestamp;
   const time =
     typeof rawTime === "string" ? rawTime.trim() : typeof rawTime === "number" ? String(rawTime) : "";
-  return { uri, score, time, peer: peerOfUri(uri) };
+  // type / detail 只有 rendered 的 <memory> 开标签带：前者是条目类别（events / entities /
+  // preferences ...），后者是服务端实际给的档位（full / overview / abstract / uri）。
+  // 其余形态没有这两项，一律空串，不拿别的字段顶替。
+  const type = typeof source.type === "string" ? source.type.trim() : "";
+  const detail = typeof source.detail === "string" ? source.detail.trim() : "";
+  return { uri, score, time, peer: peerOfUri(uri), type, detail };
 }
 
 /** 一条候选：文本 + 元信息。 */
@@ -1846,15 +1851,152 @@ function recallItem(text, entry) {
   return { text, ...recallMetaOf(entry) };
 }
 
+/** 条目之间没有原始分隔时的拼法：空行（与 assemble.js 一致）。 */
+const ITEM_SEPARATOR = "\n\n";
+
+/**
+ * 开标签结束的位置（`>` 之后）。引号里的 `>` 属于属性值，不算标签结束。
+ * 找不到收尾的 `>` 返回 -1：这半截不像标签，交给调用方退到「整段一条」。
+ */
+function openTagEnd(text, start) {
+  let quote = "";
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === ">") return index + 1;
+  }
+  return -1;
+}
+
+/** 属性值里的实体还原。服务端写属性时会转义，读回来要还原成原字符。 */
+function unescapeAttr(value) {
+  return value.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+}
+
+/**
+ * 从开标签里读 uri / score / type / detail。缺哪个就不给哪个，由 recallMetaOf 降级成空值。
+ * 正则建在函数里：带 g 的正则共用一份 lastIndex，跨次调用会从上次停下的位置接着扫。
+ */
+function memoryAttrsOf(head) {
+  const attrs = {};
+  const pattern = /\b(uri|score|type|detail)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  let match;
+  while ((match = pattern.exec(head))) {
+    const name = match[1].toLowerCase();
+    attrs[name] = unescapeAttr(match[2] ?? match[3] ?? "").trim();
+  }
+  return attrs;
+}
+
+/**
+ * 扫出 rendered 里的 `<memory>` 块：位置 + 开标签属性。
+ *
+ * 三种收尾都认，按服务端真实形态排：
+ *   1. `</memory>`——正常块；
+ *   2. 自闭合 `<memory ... />`——正文为空时的形态，块就是那个开标签；
+ *   3. 没有闭标签——预算截断留下的尾巴，切到下一个开标签（或整段末尾），
+ *      尾随空白留给条目之间的分隔，不算进块正文。
+ * 块体里的 `<memory` 已经被服务端转义成 `<\memory`，所以这里扫到的开标签都是真块的。
+ */
+function memoryBlocksOf(text) {
+  const blocks = [];
+  const openPattern = /<memory(?=[\s/>])/gi;
+  let cursor = 0;
+
+  for (;;) {
+    openPattern.lastIndex = cursor;
+    const open = openPattern.exec(text);
+    if (!open) return blocks;
+
+    const start = open.index;
+    const headEnd = openTagEnd(text, start);
+    if (headEnd < 0) return blocks;
+    const head = text.slice(start, headEnd);
+
+    let end;
+    if (/\/\s*>$/.test(head)) {
+      end = headEnd;
+    } else {
+      const closePattern = /<\/memory\s*>/gi;
+      closePattern.lastIndex = headEnd;
+      const close = closePattern.exec(text);
+      const nextPattern = /<memory(?=[\s/>])/gi;
+      nextPattern.lastIndex = headEnd;
+      const next = nextPattern.exec(text);
+      if (close && (!next || close.index < next.index)) {
+        end = close.index + close[0].length;
+      } else {
+        let stop = next ? next.index : text.length;
+        while (stop > headEnd && /\s/.test(text[stop - 1])) stop -= 1;
+        end = stop;
+      }
+    }
+
+    blocks.push({ start, end, attrs: memoryAttrsOf(head) });
+    cursor = end;
+  }
+}
+
+/**
+ * rendered -> 条目。块与块之间用服务端的分隔符（OpenViking 是单个换行）连着，
+ * 靠每条的 sep 记住「它前面原本隔着什么」，拼回去才能逐字一致。
+ *
+ * 块外的散落文本（服务端偶尔加的抬头、尾注）各自留一条，不静默丢掉：
+ * 丢了之后条数与原文对不上，只能靠猜。纯空白不单独立条，它是分隔本身：
+ * 跟着 sep 走，拼回去照样一个字节不少。
+ *
+ * 返回空数组表示一个块都没认出来，调用方退到「整段一条」。
+ */
+function renderedItemsOf(rendered) {
+  const blocks = memoryBlocksOf(rendered);
+  if (!blocks.length) return [];
+
+  const items = [];
+  let cursor = 0;
+  let pending = "";
+
+  const keepStray = (chunk) => {
+    const body = chunk.trim();
+    if (!body) {
+      pending += chunk;
+      return;
+    }
+    const lead = chunk.length - chunk.trimStart().length;
+    pending += chunk.slice(0, lead);
+    items.push({ ...recallItem(body), sep: pending });
+    pending = chunk.slice(lead + body.length);
+  };
+
+  for (const block of blocks) {
+    if (block.start > cursor) keepStray(rendered.slice(cursor, block.start));
+    items.push({ ...recallItem(rendered.slice(block.start, block.end), block.attrs), sep: pending });
+    pending = "";
+    cursor = block.end;
+  }
+  if (cursor < rendered.length) keepStray(rendered.slice(cursor));
+  return items;
+}
+
 /**
  * 从召回响应里读出候选条目，只认实测过的三处，按服务端"最省事到最原始"排列：
- *   1. rendered —— mode=context 时服务端拼好的扁平 XML 块，视为单条；
+ *   1. rendered —— mode=context 时服务端拼好的扁平 XML 块，按 `<memory>` 块拆条；
  *   2. digest   —— 摘要，视为单条；
  *   3. entries[].text —— 原始命中条目，逐条保留，跳过空项。
  * 其余形状一律给空数组（调用方据此 return undefined 并告警一次），不猜字段名。
  *
+ * rendered 必须拆：它是一整段字符串里装着十几个块，整段当一条会让精排的入口条件
+ * （条数 ≥ 2）永远不成立，去重与按分精排也无从下手，十条无关记忆原样注入。
+ * 拆不出块时退回「整段一条」——真实服务端可能有别的形态，降级路径必须留着。
+ *
  * 精排与组装都必须在拼成一段文本之前做，所以这里保留条目边界；
- * 元信息（uri / 分数 / 时间 / 门牌）尽量带上，缺失降级成空值，不会因此丢条目。
+ * 元信息（uri / 分数 / 时间 / 门牌 / 类别 / 档位）尽量带上，缺失降级成空值，不会因此丢条目。
  * extractRecallText 只是把它按原有规则拼回去。
  */
 export function extractRecallItems(value) {
@@ -1865,7 +2007,10 @@ export function extractRecallItems(value) {
   if (!value || typeof value !== "object") return [];
 
   const rendered = textOf(value.rendered);
-  if (rendered) return [recallItem(rendered)];
+  if (rendered) {
+    const items = renderedItemsOf(rendered);
+    return items.length ? items : [recallItem(rendered)];
+  }
 
   const digest = textOf(value.digest);
   if (digest) return [recallItem(digest)];
@@ -1880,12 +2025,21 @@ export function extractRecallItems(value) {
   return [];
 }
 
+/**
+ * 条目 -> 一段文本。有 sep 的照抄原始分隔（rendered 拆出来的那些），
+ * 没有的按空行连（entries / digest / 字符串形态，与加拆条之前的行为一致）。
+ * 于是「拆开再拼回来」对 rendered 是逐字无损的。
+ */
 export function extractRecallText(value) {
-  const text = extractRecallItems(value)
-    .map((item) => item.text)
-    .join("\n\n")
-    .trim();
-  return text;
+  const items = extractRecallItems(value);
+  if (!items.length) return "";
+
+  let text = items[0].text;
+  for (let index = 1; index < items.length; index += 1) {
+    const sep = typeof items[index].sep === "string" ? items[index].sep : ITEM_SEPARATOR;
+    text += sep + items[index].text;
+  }
+  return text.trim();
 }
 
 /** 只报一次：响应形状未识别 + 顶层键名，方便对着真实服务端改代码。 */

@@ -159,6 +159,41 @@ export function hasCredential(text) {
   );
 }
 
+/** 段与段之间的默认拼法：空行。 */
+const SEGMENT_SEPARATOR = "\n\n";
+
+/** ordered 是否保住了 clean 的相对顺序（按对象身份看，去重后的子序列也算保住）。 */
+function keepsOrder(clean, ordered) {
+  const at = new Map(clean.map((item, index) => [item, index]));
+  let last = -1;
+  for (const item of ordered) {
+    const index = at.get(item);
+    if (index === undefined || index <= last) return false;
+    last = index;
+  }
+  return true;
+}
+
+/**
+ * 拼正文。
+ *
+ * 条目自带 sep（rendered 按块拆出来的那些）且顺序没被打乱时，照抄原始分隔，
+ * 拼回去与拆分前逐字一致——拆条不该改变注入文本。
+ * 顺序被精排改过、或者本来就没有 sep（entries 那几种形态），就没有「原来隔着什么」可言，
+ * 回到空行。
+ */
+function joinSegments(list, keepSeps) {
+  let text = "";
+  list.forEach((item, index) => {
+    const body = typeof item?.text === "string" ? item.text : "";
+    if (index > 0) {
+      text += keepSeps && typeof item?.sep === "string" ? item.sep : SEGMENT_SEPARATOR;
+    }
+    text += body;
+  });
+  return text;
+}
+
 /**
  * 组装：候选列表 -> { text, refs, dropped }。
  *
@@ -166,7 +201,8 @@ export function hasCredential(text) {
  * 认不出的值回 rules，因为去重与精排不花时间，漏掉的代价只是白留一条。
  *
  * text 是这一段的正文（未包标记、未按预算截断）；recall.js 接着交给 memoryBlock。
- * 一条候选占一段，段与段之间空一行，与加这一层之前的拼法一致。
+ * 一条候选占一段。段与段之间默认空一行；候选自带 sep 且顺序未变时（rendered 拆条，
+ * 服务端本来用单换行分隔）用原始分隔，拼回去与拆分前逐字一致。
  *
  * refs 与段落一一对应：一条文本为空的候选也占一行，宁可多一行空记录，
  * 也不让序号与段落错位（真实链路上 extractRecallItems 已经滤掉了空文本）。
@@ -189,10 +225,7 @@ export function assembleCandidates(items, mode = "rules") {
     clean.push(item);
   }
   const ordered = mode === "off" ? clean.slice() : sortByScore(dedupeCandidates(clean));
-  const text = ordered
-    .map((item) => (typeof item?.text === "string" ? item.text : ""))
-    .join("\n\n")
-    .trim();
+  const text = joinSegments(ordered, keepsOrder(clean, ordered)).trim();
   const refs = ordered.map((item, index) => refOf(item, index + 1));
   return { text, refs, dropped: { credential: droppedCredential } };
 }
