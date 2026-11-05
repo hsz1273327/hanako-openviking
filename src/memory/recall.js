@@ -36,7 +36,12 @@ import {
   serviceTimeoutOrDefault,
 } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
-import { assembleCandidates, peerOfUri } from "./assemble.js";
+import {
+  assembleCandidates,
+  dedupeCandidates,
+  dropCredentialCandidates,
+  peerOfUri,
+} from "./assemble.js";
 import {
   MEMORY_TAG_CLOSE,
   MEMORY_TAG_OPEN,
@@ -2265,12 +2270,24 @@ export function createRecallHandler(sdk, options = {}) {
     // 只记档位与数字，不记任何正文：日志不该成为凭据的第二个落点。
     // 它仍然受探针总开关管（switches.probe），关着就不写——那是“我不要任何探针”，
     // 不是“这一轮没发生”。
+    //
+    // 链路上的账（后一个数都是前一个数减出来的，对不上就是有人改了顺序）：
+    //   recalled = deduped + 去重丢掉的副本数
+    //   deduped  = droppedCredential + 进精排的条数
+    //   进精排的条数 = droppedByKeep + rerank.kept（精排没跑时两者都空，kept 就是进精排那些）
+    // 于是正常一轮里：recalled = deduped + 副本 = droppedCredential + droppedByKeep + kept。
+    // 一个例外：精排全票否决（所有候选都被打 0 分）时 kept=0、droppedByKeep=0，
+    // 差出来的那几条是「明确不要」，不归任何一档，也不该算成超编。
     const summary = {
       // off 表示这一档关着；passed 表示判过且要召回；skipped:* 表示跳过及其原因。
       gate: switches.recallGate === "off" ? "off" : "passed",
       // gate 就跳过的那一轮根本没有查询文本，先按 gate 看的那句话记，查到再改。
       query: { mode: switches.queryMode, chars: charLength(lastText) },
       recalled: 0,
+      // 去重与凭据过滤都在精排之前：这两个数是那一步留下的账。
+      // 不放进 rerank 那一段，是因为精排可能压根没跑（默认 off），而这两步总是跑。
+      deduped: null,
+      droppedCredential: null,
       rerank: null,
       assemble: null,
       injected: null,
@@ -2440,8 +2457,24 @@ export function createRecallHandler(sdk, options = {}) {
     }
 
     const items = extractRecallItems(result);
-    // 召回数记过滤前的候选条数：后面精排与组装各自会减，三个数摆在一起才知道减在哪一步。
+    // 召回数记过滤前的候选条数：后面去重、凭据过滤、精排、组装各自会减，
+    // 五个数摆在一起才知道减在哪一步。
     summary.recalled = items.length;
+
+    // 去重与凭据过滤提前到精排之前。
+    //
+    // 顺序为什么是关键：截条数（rerankKeep）若发生在去重之后，名额会先被副本吃掉——
+    // 十条里有两对同 uri 的副本，截出来的五条可能只剩三条真正不同的内容；
+    // 带凭据的候选同理，它在精排里占了名额、到组装才被丢掉，实际注入就比上限少。
+    //
+    // 去重按身份合并、留分数高的那条（见 dedupeCandidates）：留第一条会让精排看到低分那份，
+    // 等于把分数最高的副本丢了。凭据过滤命中整条丢，判据与组装那一层同一个。
+    const deduped = dedupeCandidates(items);
+    const screened = dropCredentialCandidates(deduped);
+    const candidates = screened.items;
+    summary.deduped = deduped.length;
+    summary.droppedCredential = screened.dropped;
+
     if (!items.length) {
       warnShapeOnce(sdk, result);
       log(sdk, "info", `skip: no text in response (session=${sessionId})`);
@@ -2451,19 +2484,21 @@ export function createRecallHandler(sdk, options = {}) {
 
     // 精排必须在拼成一段文本之前做：拼完就分不清候选边界了。
     // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
-    let kept = items;
-    if (switches.rerank === "llm" && items.length >= 2) {
+    // 这里的「候选」是去重与凭据过滤之后剩下的：名额只发给真正能进上下文的条目。
+    let kept = candidates;
+    if (switches.rerank === "llm" && candidates.length >= 2) {
       // 兜底不可关，所以这里不存在「没有路可跑」那一种状态：配置里没有 model 通道时
       // 由 rerankLanesOf 补一条，它至少能在主路垮了之后接一手。
       const lanes = rerankLanesOf(switches);
       // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
-      writeRerankSample(sdk, sessionId, { query: lastText, items });
+      // 留的是精排真正看过的那批（去重 + 凭据过滤之后），否则复跑的分母对不上。
+      writeRerankSample(sdk, sessionId, { query: lastText, items: candidates });
 
       const outcome = await runRerankChannels({
         sdk,
         switches,
         query: lastText,
-        items,
+        items: candidates,
         channels: lanes,
       });
       kept = outcome.kept;
@@ -2507,7 +2542,11 @@ export function createRecallHandler(sdk, options = {}) {
           await options.probe("recall/rerank", {
             session,
             query: lastText,
-            candidates: items.length,
+            // 精排真正看到的条数：去重与凭据过滤之后剩下的那一批。
+            candidates: candidates.length,
+            // 这一批是怎么来的：召回原始条数去掉副本、再去掉带凭据的。
+            deduped: deduped.length,
+            droppedCredential: screened.dropped,
             // 配置里那几条路的总数（含没被叫上的兜底那一路）；下面 channels 里只有真跑了的。
             enabledChannels: outcome.laneCount,
             channels: outcome.channels,
@@ -2535,12 +2574,14 @@ export function createRecallHandler(sdk, options = {}) {
     // 组装：精排之后、拼成一段文本之前的最后一步。
     //
     // 这个位置不能再往下：再往下一步就只剩一个字符串，去重与按分精排只能靠猜。
-    // off 档原样拼（与加这一层之前逐字一致）；rules 档去重 + 按分精排。
+    // 去重与凭据过滤在这里是第二道网（精排之前已经做过一遍），正常情况下一条都丢不掉：
+    // assembled.dropped.credential 不是 0，说明有东西绕过了前面那道（比如兜底返回的候
+    // 选），值得看。off 档原样拼；rules 档去重 + 按分精排。
     // 预算裁剪仍然在下面的 memoryBlock 里做（按拼好之后的文本算 token）。
     const assembled = assembleCandidates(kept, switches.assembleMode);
     const text = assembled.text;
-    // kept 是组装之后的段数（凭据过滤已经在这里发生过），droppedCredential 单独记；
-    // 记条数不记原文，命中内容进了日志等于又把凭据搬了一处。
+    // kept 是组装之后的段数；第二道网这一轮又滤掉多少条也单独记（只记条数不记原文，
+    // 命中内容进了日志等于又把凭据搬了一处）。
     summary.assemble = {
       mode: switches.assembleMode,
       kept: assembled.refs.length,

@@ -159,6 +159,27 @@ export function hasCredential(text) {
   );
 }
 
+/**
+ * 凭据过滤：命中 hasCredential 的整条丢，返回 { items, dropped }。
+ *
+ * 放在这里是因为它有两条调用路径：recall.js 在精排之前先滤一遍（不让带凭据的候选
+ * 占掉 rerankKeep 的名额），组装时再滤一遍（幂等的第二道网，挡的是精排之后才出现的
+ * 东西，比如兜底返回的结果）。两处必须同一个判据，否则第二道网会漏掉第一道认得出的。
+ */
+export function dropCredentialCandidates(items) {
+  const list = Array.isArray(items) ? items : [];
+  const kept = [];
+  let dropped = 0;
+  for (const item of list) {
+    if (hasCredential(item?.text)) {
+      dropped += 1;
+      continue;
+    }
+    kept.push(item);
+  }
+  return { items: kept, dropped };
+}
+
 /** 段与段之间的默认拼法：空行。 */
 const SEGMENT_SEPARATOR = "\n\n";
 
@@ -200,6 +221,11 @@ function joinSegments(list, keepSeps) {
  * mode 只认字面 "off"（原样拼），其余一律按规则档走。这与配置归一化同一个取舍：
  * 认不出的值回 rules，因为去重与精排不花时间，漏掉的代价只是白留一条。
  *
+ * 这一层的去重与凭据过滤现在是**第二道网**：recall.js 在精排之前已经做过一遍，
+ * 所以正常情况下这里一条都丢不掉（dropped.credential 应为 0）。留着是因为精排之后
+ * 还可能冒出新东西（兜底返回的候选），而这时再往下一步就只剩一个字符串了。
+ * 换句话说：off 档「原样拼」指的是这一层不再加工，不是「上游没做过去重」。
+ *
  * text 是这一段的正文（未包标记、未按预算截断）；recall.js 接着交给 memoryBlock。
  * 一条候选占一段。段与段之间默认空一行；候选自带 sep 且顺序未变时（rendered 拆条，
  * 服务端本来用单换行分隔）用原始分隔，拼回去与拆分前逐字一致。
@@ -214,16 +240,9 @@ function joinSegments(list, keepSeps) {
  * 干净的那条才能被留下；反过来先去重，脏的那条可能因为分数高而把干净的挤掉。
  */
 export function assembleCandidates(items, mode = "rules") {
-  const list = Array.isArray(items) ? items : [];
-  let droppedCredential = 0;
-  const clean = [];
-  for (const item of list) {
-    if (hasCredential(item?.text)) {
-      droppedCredential += 1;
-      continue;
-    }
-    clean.push(item);
-  }
+  const screened = dropCredentialCandidates(items);
+  const droppedCredential = screened.dropped;
+  const clean = screened.items;
   const ordered = mode === "off" ? clean.slice() : sortByScore(dedupeCandidates(clean));
   const text = joinSegments(ordered, keepsOrder(clean, ordered)).trim();
   const refs = ordered.map((item, index) => refOf(item, index + 1));

@@ -3232,7 +3232,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
     const assembleProbe = probes.find((probe) => probe.event === "recall/assemble");
     eq(
-      "探针里有一份回指表：mode / kept / refs（序号从 1 开始、带 peer）",
+      "探针里有一份回指表：mode / kept / refs（序号从 1 开始、带 peer）—此处上游已去重，组装这一层只拼两条",
       [
         assembleProbe?.invocation.assemble.mode,
         assembleProbe?.invocation.assemble.kept,
@@ -3240,7 +3240,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         "rules",
-        3,
+        2,
         [
           { index: 1, uri: "viking://user/default/peers/mbp-01/memories/a.md", peer: "mbp-01", score: 0.9 },
           { index: 2, uri: "", peer: "", score: null },
@@ -3253,12 +3253,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       injected,
     );
     check(
-      "日志有一行 assemble: mode / kept / segments",
-      infos.some((message) => message.includes("assemble: mode=rules kept=3 segments=2")),
+      "日志有一行 assemble: mode / kept / segments（kept 是这一层的输入条数：上游去重后只剩两条）",
+      infos.some((message) => message.includes("assemble: mode=rules kept=2 segments=2")),
       infos.join(" | "),
     );
 
-    // off 档：同一批候选不再去重，按服务端给的顺序拼。
+    // off 档：本层不再去重、不再按分精排，但去重已经在精排之前（更早一步）发生过。
+    // 任务书把去重提到了整条链路的前面，所以 off 档能关掉的只是「组装这一层再去一遍」。
     const mockOff = mockFetch({
       body: {
         status: "ok",
@@ -3289,8 +3290,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     const offInjected = asText(asList(offResult?.payload?.messages)[0]?.content);
     check(
-      "off 档：同 uri 两条都在、顺序按服务端给的来（与改动前的拼法一致）",
-      offInjected.includes("低分的旧版本\n\n高分的新版本"),
+      "off 档：本层不排序、不去重，但上游已去过重——同 uri 只剩高分那条",
+      offInjected.includes("高分的新版本") && !offInjected.includes("低分的旧版本"),
       offInjected,
     );
     check(
@@ -3413,7 +3414,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     assembleCard.includes("<NSwitch") &&
       assembleCard.includes('setForm("assembleMode"') &&
       assembleCard.includes(
-        "规则档按来源去重、按分数精排、再按预算裁剪；模型档（合并重写）还没做。",
+        "规则档按分数排序、再按预算裁剪；模型档（合并重写）还没做。去重与凭据过滤",
       ),
     assembleCard.slice(assembleCard.indexOf("<template>")),
   );
@@ -5816,6 +5817,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gate: "skipped:llm",
     query: { mode: "last", chars: 4 },
     recalled: 0,
+    deduped: null,
+    droppedCredential: null,
     rerank: null,
     assemble: null,
     injected: null,
@@ -5825,8 +5828,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gate: "passed",
     query: { mode: "context", chars: 120 },
     recalled: 10,
+    deduped: 8,
+    droppedCredential: 1,
     rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
-    assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
+    assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
     injected: { chars: 3000, tokens: 900 },
   });
   // 脏值：类型不对的当缺失，不能洗成 0。
@@ -5835,6 +5840,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gate: "",
     query: { mode: "context", chars: "120" },
     recalled: "10",
+    deduped: "8",
+    droppedCredential: null,
     rerank: { mode: "llm", lanes: 1, kept: null, droppedByKeep: null, fallback: "none" },
     assemble: null,
     injected: { chars: 3000 },
@@ -5847,7 +5854,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .map((line) => JSON.parse(line));
 
   eq(
-    "recall/result 的形状：档位 / 失败类别 / 查询 / 召回数 / 精排 / 组装 / 注入，没跑的那几段是 null",
+    "recall/result 的形状：档位 / 失败类别 / 查询 / 召回数 / 去重 / 凭据 / 精排 / 组装 / 注入，没跑的那几段是 null",
     [lines.length, lines[0].event, lines[0].shape, lines[1].shape],
     [
       3,
@@ -5857,6 +5864,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         error: null,
         query: { mode: "last", chars: 4, turns: null, truncated: null },
         recalled: 0,
+        deduped: null,
+        droppedCredential: null,
         rerank: null,
         assemble: null,
         injected: null,
@@ -5866,8 +5875,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         error: null,
         query: { mode: "context", chars: 120, turns: null, truncated: null },
         recalled: 10,
+        deduped: 8,
+        droppedCredential: 1,
         rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
-        assemble: { mode: "rules", kept: 9, droppedCredential: 1 },
+        assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
         injected: { chars: 3000, tokens: 900 },
       },
     ],
@@ -5877,12 +5888,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [
       lines[2].shape.query.chars,
       lines[2].shape.recalled,
+      lines[2].shape.deduped,
       lines[2].shape.rerank.kept,
       lines[2].shape.assemble,
       lines[2].shape.injected.tokens,
       lines[2].shape.gate,
     ],
-    [null, null, null, null, null, null],
+    [null, null, null, null, null, null, null],
   );
   eq(
     "recall/result 只收档位与计数：查询那一段只有 mode / chars / turns / truncated，没地方放正文",
@@ -5934,10 +5946,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   await probe("recall/rerank", {
     session,
     query: "这一轮的查询正文",
-    candidates: 10,
+    candidates: 8,
+    deduped: 9,
+    droppedCredential: 1,
     enabledChannels: 2,
     kept: 5,
-    droppedByKeep: 5,
+    droppedByKeep: 3,
     fallback: "none",
     elapsedMs: 42,
     channels: [{ type: "rerank", url: "http://127.0.0.1:9999", model: "bge", scores: [0.1, 0.9] }],
@@ -5949,7 +5963,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const line = JSON.parse(fs.readFileSync(path.join(dir, "probe.log"), "utf8").trim());
   eq(
-    "recall/rerank 的形状：候选 / 截掉几条 / 保留都进日志；scores 只留 uri 与分数（正文与端点都不进）",
+    "recall/rerank 的形状：候选 / 去重 / 凭据 / 截掉几条 / 保留都进日志；scores 只留 uri 与分数（正文与端点都不进）",
     [
       line.shape,
       JSON.stringify(line).includes("这一轮的查询正文"),
@@ -5957,10 +5971,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
     [
       {
-        candidates: 10,
+        candidates: 8,
+        deduped: 9,
+        droppedCredential: 1,
         enabledChannels: 2,
         kept: 5,
-        droppedByKeep: 5,
+        droppedByKeep: 3,
         fallback: "none",
         elapsedMs: 42,
         scores: [
@@ -12563,6 +12579,185 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   resetRuntimeTransport();
 }
 
+// ================= 去重与凭据过滤在精排之前 =================
+{
+  // 链路：召回 → 去重 → 凭据过滤 → 精排 → 截 N → 组装。
+  //
+  // 为什么守这一节：截条数发生在去重之前，名额会被副本吃掉——十条里若有两对同 uri 的
+  // 副本，截出来的五条可能只剩三条不同内容，另外两个名额白费。带凭据的候选同理：
+  // 它在精排里占一个名额，到组装才被丢掉，实际注入就比 rerankKeep 少。
+  const SCREEN_DIR = path.join(import.meta.dirname, ".tmp-screen-before-rerank");
+  fs.rmSync(SCREEN_DIR, { recursive: true, force: true });
+
+  const SCREEN_LANE = {
+    type: "rerank",
+    url: "http://127.0.0.1:9999",
+    model: "bge",
+    weight: 1,
+    enabled: true,
+  };
+
+  // 精排服务按「它收到的第几条」给分：分数由用例按位置给，不看正文。
+  const scoreByPosition = (scores) => async (url) => {
+    if (!String(url).includes("/v1/rerank")) throw new Error("这一轮只该打精排端点");
+    return new Response(
+      JSON.stringify({
+        results: scores.map((score, index) => ({ index, relevance_score: score })),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  let SCREEN_SESSION = 0;
+  const runScreen = async ({ entries, scores, values = {} }) => {
+    SCREEN_SESSION += 1;
+    const probes = [];
+    const recallMock = mockFetch({ body: { status: "ok", result: { entries } } });
+    const rerankFetch = scoreByPosition(scores);
+    const handler = createRecallHandler(
+      recallSdk({
+        values: {
+          enabled: true,
+          apiKey: "k",
+          serverUrl: "http://h:1",
+          probe: true,
+          rerank: "llm",
+          rerankKeep: 5,
+          rerankLaneSchema: String(RERANK_LANE_SCHEMA),
+          rerankChannels: JSON.stringify([SCREEN_LANE]),
+          ...values,
+        },
+        fetchImpl: (url, init) =>
+          String(url).includes("/v1/rerank")
+            ? rerankFetch(url, init)
+            : recallMock.fetchImpl(url, init),
+        dataDir: SCREEN_DIR,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上次那批稿子改到哪了？" }] },
+      session: { sessionId: `screen-${SCREEN_SESSION}` },
+    });
+    return {
+      row: probes.find((probe) => probe.event === "recall/result")?.invocation,
+      detail: probes.find((probe) => probe.event === "recall/rerank")?.invocation,
+      assembled: probes.find((probe) => probe.event === "recall/assemble")?.invocation,
+      injected: asText(asList(result?.payload?.messages)[0]?.content),
+    };
+  };
+
+  // 十条候选，两对同 uri 副本：a 与 b 各有低分旧版 / 高分新版。
+  const PAIR_ENTRIES = [
+    { text: "甲的低分旧版", uri: "viking://user/default/m/a.md", score: 0.2 },
+    { text: "乙的低分旧版", uri: "viking://user/default/m/b.md", score: 0.3 },
+    { text: "甲的高分新版", uri: "viking://user/default/m/a.md", score: 0.9 },
+    { text: "乙的高分新版", uri: "viking://user/default/m/b.md", score: 0.8 },
+    { text: "丙", uri: "viking://user/default/m/c.md" },
+    { text: "丁", uri: "viking://user/default/m/d.md" },
+    { text: "戊", uri: "viking://user/default/m/e.md" },
+    { text: "己", uri: "viking://user/default/m/f.md" },
+    { text: "庚", uri: "viking://user/default/m/g.md" },
+    { text: "辛", uri: "viking://user/default/m/h.md" },
+  ];
+  const pair = await runScreen({
+    entries: PAIR_ENTRIES,
+    // 去重后八条按位置给分：前五条分高，后三条分低。
+    scores: [0.9, 0.85, 0.8, 0.75, 0.7, 0.1, 0.05, 0.02],
+  });
+
+  eq(
+    "十条含两对同 uri 副本：去重后八条，且留下的是分数高的那两条副本",
+    [
+      pair.row?.recalled,
+      pair.row?.deduped,
+      pair.injected.includes("甲的高分新版"),
+      pair.injected.includes("乙的高分新版"),
+      pair.injected.includes("甲的低分旧版"),
+      pair.injected.includes("乙的低分旧版"),
+    ],
+    [10, 8, true, true, false, false],
+  );
+
+  // 反向对照：先去重再截五，五条各不相同；若先截五再去重，只剩三条不同内容。
+  // 这就是「名额被副本吃掉」的完整账，也是把去重提早的那一条理由。
+  const keptRefs = pair.assembled?.assemble?.refs || [];
+  eq(
+    "去重发生在截条数之前：八条里取前五，五条的身份互不相同（不是先取五再去重剩三条）",
+    [
+      keptRefs.length,
+      new Set(keptRefs.map((ref) => ref.uri)).size,
+      dedupeCandidates(PAIR_ENTRIES.slice(0, 5)).length,
+    ],
+    [5, 5, 3],
+  );
+
+  // 凭据候选不占名额：一条含密钥、其余九条干净、上限 5 → 保留 5 条干净的。
+  const CRED_ENTRIES = [
+    { text: "网关原样拄下来的 key: sk-live-4f9a2b7c8d1e6f3a", uri: "viking://user/default/m/dirty.md", score: 0.99 },
+    ...Array.from({ length: 9 }, (_, index) => ({
+      text: `干净记录${index + 1}`,
+      uri: `viking://user/default/m/clean${index}.md`,
+    })),
+  ];
+  const cred = await runScreen({
+    entries: CRED_ENTRIES,
+    scores: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+  });
+  eq(
+    "带凭据的候选不占 rerankKeep 的名额：一条含量具、其余九条正常、上限 5 → 保留 5 条干净的",
+    [
+      cred.row?.recalled,
+      cred.row?.deduped,
+      cred.row?.droppedCredential,
+      cred.detail?.candidates,
+      cred.row?.rerank?.kept,
+      cred.detail?.kept,
+      cred.injected.includes("sk-live-4f9a2b7c8d1e6f3a"),
+      Array.from({ length: 5 }, (_, index) => `干净记录${index + 1}`).every((text) =>
+        cred.injected.includes(text),
+      ),
+    ],
+    [10, 10, 1, 9, 5, 5, false, true],
+  );
+
+  // 四个数与不变式：后一个数都是前一个数减出来的。
+  const invariantOf = ({ row, detail, assembled }) => ({
+    // recalled = deduped + 去重丢掉的那几条（副本数由这两个数相减得出）
+    dedupe: row.recalled - row.deduped >= 0 && row.deduped + (row.recalled - row.deduped) === row.recalled,
+    // deduped = droppedCredential + droppedByKeep + kept
+    chain: row.deduped === row.droppedCredential + row.rerank.droppedByKeep + row.rerank.kept,
+    // 精排看到的条数 = 去重后减掉凭据那几条
+    seen: detail.candidates === row.deduped - row.droppedCredential,
+    // 汇总行与细节探针说的是同一件事
+    same: detail.kept === row.rerank.kept && detail.droppedByKeep === row.rerank.droppedByKeep,
+    // 组装已是幂等的第二道网：正常路径上一条都丢不掉，段数就是精排留下的条数
+    idempotent: assembled.assemble.droppedCredential === 0 && assembled.assemble.kept === row.rerank.kept,
+  });
+  eq(
+    "计数对得上：recalled / deduped / droppedCredential / droppedByKeep / kept 五个数的不变式都成立",
+    [invariantOf(pair), invariantOf(cred)],
+    [
+      { dedupe: true, chain: true, seen: true, same: true, idempotent: true },
+      { dedupe: true, chain: true, seen: true, same: true, idempotent: true },
+    ],
+  );
+  eq(
+    "两轮的四则算术都写得出具体数字：副本 2 条被去重吃掉 / 凭据 1 条在精排前就被拿走",
+    [
+      [pair.row?.recalled, pair.row?.deduped, pair.row?.droppedCredential, pair.row?.rerank?.droppedByKeep, pair.row?.rerank?.kept],
+      [cred.row?.recalled, cred.row?.deduped, cred.row?.droppedCredential, cred.row?.rerank?.droppedByKeep, cred.row?.rerank?.kept],
+    ],
+    [
+      [10, 8, 0, 3, 5],
+      [10, 10, 1, 4, 5],
+    ],
+  );
+
+  fs.rmSync(SCREEN_DIR, { recursive: true, force: true });
+  resetRuntimeTransport();
+}
+
 // ================= 每轮一条 recall/result：正常那轮也得有记录 =================
 {
   // 为什么要这一节：探针原来只有三个点，全是异常分支（跳过 / 精排跑过 / 组装跑过）。
@@ -12693,9 +12888,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   });
   eq(
-    "组装关闭也记一条：mode=off，kept 是拼进去的条数（不去重，三条都在）",
-    [offAssemble.rows[0]?.assemble, offAssemble.rows[0]?.recalled],
-    [{ mode: "off", kept: 3, droppedCredential: 0 }, 3],
+    "组装关闭也记一条：mode=off，kept 是拼进去的条数（本层不去重，但上游已去重：三条进、两条出）",
+    [offAssemble.rows[0]?.assemble, offAssemble.rows[0]?.recalled, offAssemble.rows[0]?.deduped],
+    [{ mode: "off", kept: 2, droppedCredential: 0 }, 3, 2],
   );
 
   // ---- 5. 精排跑过：这一格就是“精排跑没跑”的正面证据 ----
@@ -12745,15 +12940,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   });
   const dirtyContent = asText(asList(dirty.result?.payload?.messages)[0]?.content);
   eq(
-    "两条带凭据的候选在组装这一步被丢掉：召回 3 / 组装 1 / 命中 2，注入文本里一条都没有",
+    "两条带凭据的候选在精排之前就被丢掉：召回 3 / 去重 3 / 凭据命中 2 / 组装 1 且组装层命中 0，注入文本里一条都没有",
     [
       dirty.rows[0]?.recalled,
+      dirty.rows[0]?.deduped,
+      dirty.rows[0]?.droppedCredential,
       dirty.rows[0]?.assemble,
       dirtyContent.includes("sk-live-4f9a2b7c8d1e6f3a"),
       dirtyContent.includes("x-opencode-session"),
       dirtyContent.includes("干净的记录"),
     ],
-    [3, { mode: "rules", kept: 1, droppedCredential: 2 }, false, false, true],
+    [3, 3, 2, { mode: "rules", kept: 1, droppedCredential: 0 }, false, false, true],
   );
   check(
     "日志里（含细节探针）不出现命中的原文：只记条数，不记内容",
@@ -12762,10 +12959,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     JSON.stringify(dirty.probes).slice(0, 400),
   );
   eq(
-    "组装细节探针也带命中数（droppedCredential=2），两个事件的口径一致",
-    dirty.probes.find((probe) => probe.event === "recall/assemble")?.invocation.assemble
-      .droppedCredential,
-    2,
+    "组装那一层现在是幂等的第二道网：它的 droppedCredential 是 0，命中数都在前面那一步（汇总行的 2）",
+    [
+      dirty.probes.find((probe) => probe.event === "recall/assemble")?.invocation.assemble
+        .droppedCredential,
+      dirty.rows[0]?.droppedCredential,
+    ],
+    [0, 2],
   );
 
   // ---- 7. 探针总开关 ----
