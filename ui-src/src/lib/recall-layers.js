@@ -86,6 +86,58 @@ export function normalizeAssembleMode(value) {
   return oneOf(value, ASSEMBLE_MODES, "rules");
 }
 
+// 近重复的默认值 / 边界 / 步长，与 src/ov/settings.js 的 DEDUPE_THRESHOLD_* 同值。
+// 步长只影响数字框的加减手感，不是归一化要圆整到的格点。
+export const DEDUPE_THRESHOLD_DEFAULT = 0.8;
+export const DEDUPE_THRESHOLD_MIN = 0.5;
+export const DEDUPE_THRESHOLD_MAX = 1;
+export const DEDUPE_THRESHOLD_STEP = 0.05;
+
+/**
+ * 与 src/ov/settings.js 的 normalizeDedupeNear 同口径：只认布尔，其余（含缺项）一律当开着。
+ *
+ * 回「开」而不是「关」：这一层不花时间、不联网，漏掉重复的代价是白占精排名额。
+ */
+export function normalizeDedupeNear(value) {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return true;
+}
+
+/**
+ * 与 src/ov/settings.js 的 normalizeDedupeThreshold 同口径：
+ * 0.5–1.0 之间（含两端）给数字，空串 / 非数字 / 越界一律回 0.8。
+ * 越界值不夹到边界：夹成 0.5 会把「填错了」静默变成「最激进地合并」。
+ */
+export function normalizeDedupeThreshold(value) {
+  let parsed;
+  if (typeof value === "number") parsed = value;
+  else if (typeof value === "string" && value.trim()) parsed = Number(value.trim());
+  else return DEDUPE_THRESHOLD_DEFAULT;
+  if (!Number.isFinite(parsed)) return DEDUPE_THRESHOLD_DEFAULT;
+  if (parsed < DEDUPE_THRESHOLD_MIN || parsed > DEDUPE_THRESHOLD_MAX) {
+    return DEDUPE_THRESHOLD_DEFAULT;
+  }
+  return parsed;
+}
+
+/** 阈值数字框旁边那句小字。方向要写出来：调低合并得更多，不是「查得更准」。 */
+export const DEDUPE_THRESHOLD_HINT =
+  "0.8 为默认；调低合并更多（0.6 更激进），调高更保守";
+
+/** 近重复那段说明：算法是什么、拓什么、拓不住什么。组件直接吐这几句。 */
+export const DEDUPE_NEAR_NOTE =
+  "纯算法，不调模型：先归一化（全角转半角、英文转小写、去掉空白与标点），再按字符切 3-gram，算两个集合的 Jaccard 相似度（交集 / 并集），相似度 ≥ 阈值就当同一段内容，只留分数高的那条。拓得住重复提取、加了抬头或前缀、标点 / 换行 / 大小写 / 全半角不同、截取长度不同。";
+
+/** 拓不住什么也要写清：不然用户会以为它是语义去重。 */
+export const DEDUPE_NEAR_LIMIT_NOTE =
+  "拓不住换一种说法的同义改写——那需要 embedding（语义相似度），不在这一层的能力范围里。它是字面判重，不是语义判重。";
+
+/** 精确去重恒开，只作说明不给开关：它没有取舍。 */
+export const DEDUPE_EXACT_NOTE =
+  "精确去重恒开，不可关：uri 相同、或去掉空白后字面完全相同的两条只留一条（分数高的）。它没有取舍可调，关掉只会多注入副本，所以这里不给开关。";
+
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 export const RERANK_CHANNELS_MAX = 8;
 
@@ -991,6 +1043,14 @@ export function paintAssembleConfig(out) {
   return { assembleMode: normalizeAssembleMode(out?.assembleMode) };
 }
 
+/** 去重自己的字段：近重复开关 + 阈值。脏值 / 缺项一律画成开 / 0.8。 */
+export function paintDedupeConfig(out) {
+  return {
+    dedupeNear: normalizeDedupeNear(out?.dedupeNear),
+    dedupeThreshold: normalizeDedupeThreshold(out?.dedupeThreshold),
+  };
+}
+
 /** 模型下拉的首项：空值代表“用宿主辅助模型”，也就是 utility 通道。 */
 export const DEFAULT_MODEL_OPTION = Object.freeze({
   value: "",
@@ -1020,13 +1080,14 @@ export function modelOptions(models) {
   return out;
 }
 
-/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 精排 + 组装 + 打分服务。 */
+/** 面板用的完整投影：判断 / 查询 + 两份判据 Prompt（llm / decision）+ 精排 + 去重 + 组装 + 打分服务。 */
 export function paintRecallConfig(out) {
   return {
     ...paintLayers(out),
     ...paintGateConfig(out),
     ...paintDecisionConfig(out),
     ...paintGateFallbackConfig(out),
+    ...paintDedupeConfig(out),
     ...paintRerankConfig(out),
     ...paintAssembleConfig(out),
     ...paintScoringConfig(out),

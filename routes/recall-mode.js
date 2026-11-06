@@ -29,6 +29,9 @@ import {
   rerankLaneSchemaIsLegacy,
   serializeRerankLaneSchema,
   normalizeAssembleMode,
+  normalizeDedupeNear,
+  normalizeDedupeThreshold,
+  serializeDedupeThreshold,
   normalizeGateContext,
   normalizeGateContextPrompt,
   normalizeGateContextTurns,
@@ -198,6 +201,9 @@ async function current(ctx) {
       await ctx.config.get("gateDecisionThreshold"),
     ),
     gateModel: normalizeGateModel(await ctx.config.get("gateModel")),
+    // 近重复：开关 + 阈值。阈值存的是数字串（与召回门槛 / 保留条数同口径）。
+    dedupeNear: normalizeDedupeNear(await ctx.config.get("dedupeNear")),
+    dedupeThreshold: serializeDedupeThreshold(await ctx.config.get("dedupeThreshold")),
     rerank: normalizeRerank(await ctx.config.get("rerank")),
     // 保留条数：存的是数字串，投影也是串（与门槛 / 轮数同口径），"0" = 不限。
     // 没配过时 normalizeRerankKeep(undefined) 给默认 5。
@@ -349,6 +355,25 @@ export default function registerRecallModeRoutes(app, ctx) {
       const problem = modelRefError(body.gateModel);
       if (problem) return c.json({ ok: false, error: problem }, 400);
       changes.push(["gateModel", String(body.gateModel).trim()]);
+    }
+
+    // 近重复开关：只收布尔（这是这一单里第一个布尔项，其他枚举项都是字符串）。
+    // 形状不对就整单拒；缺项不提交，读侧对脏值一律当开着（与 readSwitches 同口径）。
+    if (has(body, "dedupeNear")) {
+      if (typeof body.dedupeNear !== "boolean") {
+        return c.json({ ok: false, error: "dedupeNear 只能是 true / false" }, 400);
+      }
+      changes.push(["dedupeNear", body.dedupeNear]);
+    }
+
+    // 近重复阈值：数字 / 数字串 / null 都收（null = 面板清空 = 回默认 0.8），
+    // 一律归一化后存数字串。与召回门槛同一取舍：填错了不打断整单，也不把脏值留在配置里。
+    if (has(body, "dedupeThreshold")) {
+      const raw = body.dedupeThreshold;
+      if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+        return c.json({ ok: false, error: "dedupeThreshold 必须是数字、字符串或 null" }, 400);
+      }
+      changes.push(["dedupeThreshold", serializeDedupeThreshold(raw)]);
     }
 
     if (has(body, "rerankPrompt")) {

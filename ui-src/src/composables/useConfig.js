@@ -63,6 +63,7 @@ export function useConfig() {
     setDecisionThreshold: (...args) => store.setDecisionThreshold(...args),
     setGateContextTurns: (...args) => store.setGateContextTurns(...args),
     setRerankKeep: (...args) => store.setRerankKeep(...args),
+    setDedupeThreshold: (...args) => store.setDedupeThreshold(...args),
     setControlsNumber: (...args) => store.setControlsNumber(...args),
     saveConnection: (...args) => store.saveConnection(...args),
     saveLayers: (...args) => store.saveLayers(...args),

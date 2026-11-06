@@ -40,6 +40,7 @@ import {
   assembleCandidates,
   dedupeCandidates,
   dropCredentialCandidates,
+  nearDedupeCandidates,
   peerOfUri,
 } from "./assemble.js";
 import {
@@ -2272,10 +2273,12 @@ export function createRecallHandler(sdk, options = {}) {
     // 不是“这一轮没发生”。
     //
     // 链路上的账（后一个数都是前一个数减出来的，对不上就是有人改了顺序）：
-    //   recalled = deduped + 去重丢掉的副本数
-    //   deduped  = droppedCredential + 进精排的条数
+    //   recalled = deduped + droppedExact（精确去重丢掉的副本）
+    //   deduped  = droppedNear + droppedCredential + 进精排的条数
     //   进精排的条数 = droppedByKeep + rerank.kept（精排没跑时两者都空，kept 就是进精排那些）
-    // 于是正常一轮里：recalled = deduped + 副本 = droppedCredential + droppedByKeep + kept。
+    // 于是正常一轮里：
+    //   recalled = deduped + droppedExact
+    //   deduped  = droppedNear + droppedCredential + droppedByKeep + kept
     // 一个例外：精排全票否决（所有候选都被打 0 分）时 kept=0、droppedByKeep=0，
     // 差出来的那几条是「明确不要」，不归任何一档，也不该算成超编。
     const summary = {
@@ -2284,9 +2287,14 @@ export function createRecallHandler(sdk, options = {}) {
       // gate 就跳过的那一轮根本没有查询文本，先按 gate 看的那句话记，查到再改。
       query: { mode: switches.queryMode, chars: charLength(lastText) },
       recalled: 0,
-      // 去重与凭据过滤都在精排之前：这两个数是那一步留下的账。
-      // 不放进 rerank 那一段，是因为精排可能压根没跑（默认 off），而这两步总是跑。
+      // 去重（精确 / 近重复）与凭据过滤都在精排之前：这三个数是那一步留下的账。
+      // 不放进 rerank 那一段，是因为精排可能压根没跑（默认 off），而这三步总是跑。
       deduped: null,
+      // 精确去重（uri 相同 / 去掉空白后字面相同）丢掉的副本数。
+      droppedExact: null,
+      // 近重复（字符 3-gram 的 Jaccard ≥ 阈值）合并掉的条数。与 droppedExact 分开记：
+      // 一个抓的是同一个身份，一个抓的是「同一段话的另一种存法」，混成一个数就查不出谁在起作用。
+      droppedNear: null,
       droppedCredential: null,
       rerank: null,
       assemble: null,
@@ -2461,7 +2469,7 @@ export function createRecallHandler(sdk, options = {}) {
     // 五个数摆在一起才知道减在哪一步。
     summary.recalled = items.length;
 
-    // 去重与凭据过滤提前到精排之前。
+    // 去重（精确 + 近重复）与凭据过滤提前到精排之前。
     //
     // 顺序为什么是关键：截条数（rerankKeep）若发生在去重之后，名额会先被副本吃掉——
     // 十条里有两对同 uri 的副本，截出来的五条可能只剩三条真正不同的内容；
@@ -2469,10 +2477,20 @@ export function createRecallHandler(sdk, options = {}) {
     //
     // 去重按身份合并、留分数高的那条（见 dedupeCandidates）：留第一条会让精排看到低分那份，
     // 等于把分数最高的副本丢了。凭据过滤命中整条丢，判据与组装那一层同一个。
+    // 近重复排在凭据过滤之后：先把带凭据的那条拿走，干净的那条才能当代表——
+    // 反过来先合近重复，脏的那条可能因为分数高而把干净的挤掉。
+    //
+    // 近重复只是同一层里的第二步，与精确去重分开记账（droppedNear / droppedExact）：
+    // 一个抓的是同一个身份，一个抓的是「同一段话的另一种存法」，两者共用一个数字就查不出谁在起作用。
     const deduped = dedupeCandidates(items);
     const screened = dropCredentialCandidates(deduped);
-    const candidates = screened.items;
+    const near = switches.dedupeNear
+      ? nearDedupeCandidates(screened.items, { threshold: switches.dedupeThreshold })
+      : { items: screened.items, dropped: 0 };
+    const candidates = near.items;
     summary.deduped = deduped.length;
+    summary.droppedExact = items.length - deduped.length;
+    summary.droppedNear = near.dropped;
     summary.droppedCredential = screened.dropped;
 
     if (!items.length) {
@@ -2484,14 +2502,14 @@ export function createRecallHandler(sdk, options = {}) {
 
     // 精排必须在拼成一段文本之前做：拼完就分不清候选边界了。
     // 默认 off，一次通道都不跑；只有 llm 且候选 ≥ 2 条才值得精排。
-    // 这里的「候选」是去重与凭据过滤之后剩下的：名额只发给真正能进上下文的条目。
+    // 这里的「候选」是精确去重、凭据过滤、近重复之后剩下的：名额只发给真正能进上下文的条目。
     let kept = candidates;
     if (switches.rerank === "llm" && candidates.length >= 2) {
       // 兜底不可关，所以这里不存在「没有路可跑」那一种状态：配置里没有 model 通道时
       // 由 rerankLanesOf 补一条，它至少能在主路垮了之后接一手。
       const lanes = rerankLanesOf(switches);
       // 面板「测试」按钮要拿最近一轮的真实候选复跑；先留样本，失败不影响本轮。
-      // 留的是精排真正看过的那批（去重 + 凭据过滤之后），否则复跑的分母对不上。
+      // 留的是精排真正看过的那批（精确去重 + 凭据过滤 + 近重复之后），否则复跑的分母对不上。
       writeRerankSample(sdk, sessionId, { query: lastText, items: candidates });
 
       const outcome = await runRerankChannels({
@@ -2542,10 +2560,12 @@ export function createRecallHandler(sdk, options = {}) {
           await options.probe("recall/rerank", {
             session,
             query: lastText,
-            // 精排真正看到的条数：去重与凭据过滤之后剩下的那一批。
+            // 精排真正看到的条数：精确去重、凭据过滤、近重复之后剩下的那一批。
             candidates: candidates.length,
-            // 这一批是怎么来的：召回原始条数去掉副本、再去掉带凭据的。
+            // 这一批是怎么来的：召回原始条数去掉精确副本，再去掉近重复与带凭据的。
             deduped: deduped.length,
+            droppedExact: items.length - deduped.length,
+            droppedNear: near.dropped,
             droppedCredential: screened.dropped,
             // 配置里那几条路的总数（含没被叫上的兜底那一路）；下面 channels 里只有真跑了的。
             enabledChannels: outcome.laneCount,

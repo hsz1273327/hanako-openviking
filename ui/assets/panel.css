@@ -301,11 +301,12 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 /* NText 默认 14px；面板整体是 12px 档，不随组件默认值为了“正常”而变胖。 */
 .hint-body { font-size: 12px; line-height: 1.35; }
 
-/* ---------- 记忆页（召回 / 精排 / 组装 / 候选池 四个子页签） ---------- */
+/* ---------- 记忆页（召回 / 去重 / 精排 / 组装 / 候选池 五个子页签） ---------- */
 
-/* 召回 / 精排 / 组装卡按内容定高，不吃余量：它们的伸缩由外面的子页容器负责。
+/* 召回 / 去重 / 精排 / 组装卡按内容定高，不吃余量：它们的伸缩由外面的子页容器负责。
    shrink 也写 0，免得矮屏时被压扁、把控件挤出卡片边界。 */
 .recall-card,
+.dedupe-card,
 .rerank-card,
 .assemble-card { flex: 0 0 auto; }
 
@@ -338,9 +339,10 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   flex-direction: column;
 }
 
-/* 召回 / 精排 / 组装的内容比一屏高时，由子页容器自己滚（滚动条贴内容区右缘），
+/* 召回 / 去重 / 精排 / 组装的内容比一屏高时，由子页容器自己滚（滚动条贴内容区右缘），
    不再让整页长出去。候选池的滚动交给卡内的 .peer-scroll，所以这一页裁掉溢出。 */
 #memory-panel-recall,
+#memory-panel-dedupe,
 #memory-panel-rerank,
 #memory-panel-assemble { overflow-x: hidden; overflow-y: auto; }
 #memory-panel-peers { overflow: hidden; }

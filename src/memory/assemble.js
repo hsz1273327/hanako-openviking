@@ -17,6 +17,9 @@
 //
 // 回指表 refs 与文本同源：第 N 段的 index 就是 N。它进探针和日志，不进注入文本。
 //
+// 候选级的判据都收在这里：精确去重（身份）、凭据判据、近重复（字符 3-gram 的 Jaccard）。
+// 三者在链路上挨着跑（召回之后、精排之前），放在一起才不会出现两份口径。
+//
 // 这个文件不 import 任何东西：纯函数，冒烟与面板文案都能直接测。
 
 /**
@@ -83,6 +86,159 @@ export function dedupeCandidates(items) {
     if (next !== null && (current === null || next > current)) kept[at] = item;
   }
   return kept;
+}
+
+/* ---------------- 近重复：字符 3-gram 的 Jaccard ----------------
+ *
+ * 精确去重只认「身份相同」或「字面一字不差」。同一段内容被提取两遍、加了个抬头、
+ * 标点 / 换行 / 大小写不同、或者截取长度不同，精确去重一条都抓不住，两条都留下，
+ * 白占精排的保留名额。这一层补的就是这些。
+ *
+ * 算法（不调任何模型、零依赖）：
+ *   1. 归一化：全角转半角、英文转小写、去掉所有空白与标点
+ *   2. 按字符切 3-gram 得到集合（中文按字，英文按字符）
+ *   3. 两两比较：|A ∩ B| / |A ∪ B|
+ *   4. 相似度 ≥ 阈值即视为同一件事
+ *
+ * 抓得住：同一段内容重复提取、加了抬头 / 前缀、标点与空白不同、大小写与全半角不同、
+ * 截取长度不同（3-gram 的交集仍然很大）。
+ * 抓不住：换一种说法的同义改写。那需要 embedding，不在这一层的能力范围里——
+ * 别把这里当语义去重。
+ *
+ * 候选最多十几条，两两比较完全不是负担，所以不建索引也不做剪枝。
+ */
+
+/** 单个 gram 的长度。3 是中文与英文都能吃到的那个折中：再短就误杀，再长就不认改写。 */
+export const NEAR_DUPE_GRAM_SIZE = 3;
+
+/**
+ * 近重复的默认阈值。与 src/ov/settings.js 的 DEDUPE_THRESHOLD_DEFAULT 同值
+ * （那一份是配置的默认值，这一份只给不传参的调用方兜底；冒烟里断言两者相等）。
+ */
+export const NEAR_DUPE_THRESHOLD = 0.8;
+
+/** 归一化后还留得下的字符：任何文字的字母与数字（标点、符号、空白全丢）。 */
+const KEEP_CHAR_RE = /[\p{L}\p{N}]/u;
+
+/** 全角 ASCII 段（！到 ～）与半角之间的码点差，以及那个全角空格。 */
+const FULLWIDTH_FIRST = 0xff01;
+const FULLWIDTH_LAST = 0xff5e;
+const FULLWIDTH_OFFSET = 0xfee0;
+const IDEOGRAPHIC_SPACE = 0x3000;
+
+/**
+ * 归一化：全角转半角、英文转小写、去掉所有空白与标点。
+ *
+ * 为什么按码点走而不是一串 replace：全角转半角用一个码点偏移就够，
+ * 正则里塞一堆区间既难读也容易漏掉某个区段；「留不留这个字符」交给一条
+ * Unicode 属性类判断，中文 / 英文 / 数字都照收，标点与符号一律不留。
+ */
+export function normalizeForGram(text) {
+  const raw = String(text ?? "");
+  if (!raw) return "";
+  let folded = "";
+  for (const char of raw) {
+    const code = char.codePointAt(0);
+    if (code === IDEOGRAPHIC_SPACE) continue;
+    if (code >= FULLWIDTH_FIRST && code <= FULLWIDTH_LAST) {
+      folded += String.fromCodePoint(code - FULLWIDTH_OFFSET);
+      continue;
+    }
+    folded += char;
+  }
+  let kept = "";
+  for (const char of folded.toLowerCase()) {
+    if (KEEP_CHAR_RE.test(char)) kept += char;
+  }
+  return kept;
+}
+
+/**
+ * 归一化后按字符切 gram，得到去重后的集合。
+ *
+ * 归一化后什么都不剩（空文本、只剩标点）时给空集合：没有可比的字面证据，
+ * 就谁也不像谁（见 jaccardOf 对空集的处理）。
+ * 短于一个 gram 的文本（比如单个汉字）整个当一条 gram，否则它跟任何东西的
+ * 相似度都是 0，两条一模一样的两字短句也就永远合并不了。
+ */
+export function charGrams(text, size = NEAR_DUPE_GRAM_SIZE) {
+  const chars = Array.from(normalizeForGram(text));
+  const grams = new Set();
+  if (!chars.length) return grams;
+  const width = Number.isInteger(size) && size > 0 ? size : NEAR_DUPE_GRAM_SIZE;
+  if (chars.length <= width) {
+    grams.add(chars.join(""));
+    return grams;
+  }
+  for (let i = 0; i + width <= chars.length; i += 1) {
+    grams.add(chars.slice(i, i + width).join(""));
+  }
+  return grams;
+}
+
+/**
+ * 两个 gram 集合的 Jaccard 相似度：交集大小 / 并集大小。
+ *
+ * 任一边为空集时给 0：分母是 0，而且「没有字面证据」不该被当成「一样」。
+ * 两集合相同时给 1（含两边都只有一个 gram、且那一个 gram 相同的情况）。
+ */
+export function jaccardOf(left, right) {
+  if (!(left instanceof Set) || !(right instanceof Set)) return 0;
+  if (!left.size || !right.size) return 0;
+  const [small, big] = left.size <= right.size ? [left, right] : [right, left];
+  let shared = 0;
+  for (const gram of small) {
+    if (big.has(gram)) shared += 1;
+  }
+  return shared / (left.size + right.size - shared);
+}
+
+/** 两段文本的相似度（各切一次 gram 再算 Jaccard）。冒烟与文档都直接用它。 */
+export function textSimilarity(left, right) {
+  return jaccardOf(charGrams(left), charGrams(right));
+}
+
+/**
+ * 近重复去重：相似度 ≥ 阈值的那些只留一条。
+ *
+ * 留分数最高的那条；分数相同（含两条都没有分数）留先出现的——与 dedupeCandidates
+ * 同一套取舍，两条去重不会因为谁先谁后给出不同的结果。
+ *
+ * 怎么做到的：按「分数降序、同分靠前」逐个当代表，凡是与已收下的某个代表相似度 ≥ 阈值
+ * 就丢掉。以代表为准而不是两两连锁：A 像 B、B 像 C 但 A 不像 C 时，只留代表那一条，
+ * 不把三句话连成一坨（连锁合并会一路吃掉整批候选，那正是「阈值调到 0.5 就乱合」的来源）。
+ *
+ * 输出保持输入顺序（按留下来的那条原本的位置），后面的排序仍然由 sortByScore 决定。
+ * threshold 不合法（非数字）时用 NEAR_DUPE_THRESHOLD。
+ *
+ * 返回 { items, dropped }：与 dropCredentialCandidates 同形，调用方只加一笔账。
+ */
+export function nearDedupeCandidates(items, options = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const raw = options?.threshold;
+  const threshold = Number.isFinite(raw) ? raw : NEAR_DUPE_THRESHOLD;
+  if (list.length < 2) return { items: list.slice(), dropped: 0 };
+
+  const grams = list.map((item) => charGrams(item?.text));
+  const order = list
+    .map((_, index) => index)
+    .sort((a, b) => {
+      const left = scoreOf(list[a]);
+      const right = scoreOf(list[b]);
+      if (left === null && right === null) return a - b;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      if (right !== left) return right - left;
+      return a - b;
+    });
+
+  const kept = [];
+  for (const index of order) {
+    const twin = kept.some((at) => jaccardOf(grams[at], grams[index]) >= threshold);
+    if (!twin) kept.push(index);
+  }
+  kept.sort((a, b) => a - b);
+  return { items: kept.map((index) => list[index]), dropped: list.length - kept.length };
 }
 
 /**

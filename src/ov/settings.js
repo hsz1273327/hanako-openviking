@@ -91,6 +91,20 @@ export const RERANK_KEEP_MIN = 1;
 export const RERANK_KEEP_MAX = 20;
 export const RERANK_KEEP_STEP = 1;
 
+/**
+ * 近重复的阈值：字符 3-gram 的 Jaccard 相似度 ≥ 这个值就算同一段内容。
+ *
+ * 默认 0.8。范围夹在 0.5–1.0：低于 0.5 时两句只是碰巧用词相近的话就会合到一起，
+ * 高于 1 没有意义（1 就是字面完全一样，那一档已经由精确去重做掉了）。
+ * 越界不夹回边界，一律回默认值：夹成 0.5 会把「填错了」静默变成「最激进地合并」，
+ * 反而比回默认更难查。算法本身在 src/memory/assemble.js（纯函数、零依赖）。
+ */
+export const DEDUPE_THRESHOLD_DEFAULT = 0.8;
+export const DEDUPE_THRESHOLD_MIN = 0.5;
+export const DEDUPE_THRESHOLD_MAX = 1;
+/** 步长只影响数字框的加减手感，不是归一化要圆整到的格点。 */
+export const DEDUPE_THRESHOLD_STEP = 0.05;
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -118,6 +132,10 @@ export const DEFAULTS = {
   gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
+  // 近重复检测：纯算法（字符 3-gram 的 Jaccard），不调模型。默认开着，
+  // 关掉就只剩精确去重（uri 相同 / 去掉空白后字面相同）。
+  dedupeNear: true,
+  dedupeThreshold: DEDUPE_THRESHOLD_DEFAULT,
   rerank: "off",
   // 精排保留条数上限。缺省 5；存 0 / 空串 / 脏值都读成「不限」（见 normalizeRerankKeep）。
   rerankKeep: RERANK_KEEP_DEFAULT,
@@ -336,6 +354,42 @@ export function normalizeRerank(raw) {
 
 export function normalizeAssembleMode(raw) {
   return oneOf(raw, ASSEMBLE_MODES, DEFAULTS.assembleMode);
+}
+
+/**
+ * 近重复开关的归一化：只认布尔（以及存成字串的 "true" / "false"），其余回默认开。
+ *
+ * 认不出的值回「开」而不是回「关」：这一层不花时间、不联网，漏掉重复的代价是
+ * 白占精排名额，比多合一条的代价更难发现。
+ */
+export function normalizeDedupeNear(raw) {
+  if (typeof raw === "boolean") return raw;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return DEFAULTS.dedupeNear;
+}
+
+/**
+ * 近重复阈值的归一化：0.5–1.0 之间（含两端）给数字，其余一律回 0.8。
+ *
+ * 数字串接受（与门槛 / 超时同一口径），读出来是数字。
+ * 越界不夹边界，理由见 DEDUPE_THRESHOLD_DEFAULT 那段注释。
+ */
+export function normalizeDedupeThreshold(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return DEDUPE_THRESHOLD_DEFAULT;
+  if (!Number.isFinite(value)) return DEDUPE_THRESHOLD_DEFAULT;
+  if (value < DEDUPE_THRESHOLD_MIN || value > DEDUPE_THRESHOLD_MAX) {
+    return DEDUPE_THRESHOLD_DEFAULT;
+  }
+  return value;
+}
+
+/** 写回配置的形状：一律存归一化后的数字串（与门槛 / 保留条数同一口径）。 */
+export function serializeDedupeThreshold(raw) {
+  return String(normalizeDedupeThreshold(raw));
 }
 
 /**
@@ -867,6 +921,9 @@ export async function readSwitches(sdk) {
     // 只在 decision 档生效；别的档读到了也不用（见 src/memory/recall.js 的调用处）。
     gateDecisionThreshold: normalizeGateDecisionThreshold(await read(sdk, "gateDecisionThreshold")),
     gateModel: normalizeGateModel(await read(sdk, "gateModel")),
+    // 近重复：开关与阈值。阈值在精排之前用它判重，关掉就只剩精确去重。
+    dedupeNear: normalizeDedupeNear(await read(sdk, "dedupeNear")),
+    dedupeThreshold: normalizeDedupeThreshold(await read(sdk, "dedupeThreshold")),
     rerank: normalizeRerank(await read(sdk, "rerank")),
     // 0 = 不限。read() 把缺失项换成默认 5，所以「从没配过」与「填了空串」在这里分得开。
     rerankKeep: normalizeRerankKeep(await read(sdk, "rerankKeep")),

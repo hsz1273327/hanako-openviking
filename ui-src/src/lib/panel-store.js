@@ -20,6 +20,7 @@
 //   7. peer 名单整单提交，写路径不回读列表，只按服务端存下的名单重算标记。
 
 import {
+  DEDUPE_THRESHOLD_DEFAULT,
   DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT,
@@ -42,6 +43,8 @@ import {
   isCompleteRerankChannel,
   modelOptions,
   normalizeAssembleMode,
+  normalizeDedupeNear,
+  normalizeDedupeThreshold,
   normalizeGateContext,
   normalizeGateContextPrompt,
   normalizeGateContextTurns,
@@ -215,6 +218,9 @@ export function createPanelStore(deps = {}) {
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
       rerank: "off",
+      // 近重复：默认开着（纯算法、不花时间），阈值默认 0.8。首次 refresh 后以服务端投影为准。
+      dedupeNear: true,
+      dedupeThreshold: DEDUPE_THRESHOLD_DEFAULT,
       // 精排保留条数：初始值就是默认 5。0 是另一回事（= 不限），由归一化给出。
       rerankKeep: RERANK_KEEP_DEFAULT,
       // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
@@ -349,6 +355,8 @@ export function createPanelStore(deps = {}) {
     "gateContextTurns",
     "gateDecisionThreshold",
     "queryMode",
+    "dedupeNear",
+    "dedupeThreshold",
     "rerank",
     "rerankKeep",
     "assembleMode",
@@ -377,6 +385,10 @@ export function createPanelStore(deps = {}) {
       }
       if (key === "gateContextTurns") {
         return normalizeGateContextTurns(live) !== normalizeGateContextTurns(sent);
+      }
+      // 阈值也是「数字存成串」：不归一化就会把同一个值看成飞行期间又改了一笔。
+      if (key === "dedupeThreshold") {
+        return normalizeDedupeThreshold(live) !== normalizeDedupeThreshold(sent);
       }
       // 保留条数也是「数字存成串」：不归一化就会把同一个值看成飞行期间又改了一笔。
       if (key === "rerankKeep") {
@@ -499,6 +511,10 @@ export function createPanelStore(deps = {}) {
         normalizeGateDecisionThreshold(state.form.gateDecisionThreshold),
       ),
       queryMode: state.form.queryMode,
+      // 近重复：开关原样发（服务端只认布尔）；阈值归一化后序列化成字符串再发
+      // （0.5–1.0 之外的值在这里就回 0.8，不把脏值发上去）。
+      dedupeNear: normalizeDedupeNear(state.form.dedupeNear),
+      dedupeThreshold: String(normalizeDedupeThreshold(state.form.dedupeThreshold)),
       // 两份判据分开存、分开提交：改一份不会动另一份，切档也不丢内容。
       gatePrompt: normalizeGatePrompt(state.prompts.gate),
       gateDecisionPrompt: normalizeGateDecisionPrompt(state.prompts.decision),
@@ -540,7 +556,7 @@ export function createPanelStore(deps = {}) {
           before: state.layers,
           next,
           send: (body) => {
-            const { rerankChannels, gateDecisionThreshold, gateContextTurns, rerankKeep, ...rest } = body;
+            const { rerankChannels, gateDecisionThreshold, gateContextTurns, rerankKeep, dedupeThreshold, ...rest } = body;
             return post("/recall-mode", {
               ...rest,
               // commitLayers 的 normalize（paintRecallConfig）会把门槛与轮数收成数字给界面用，
@@ -550,6 +566,7 @@ export function createPanelStore(deps = {}) {
                 normalizeGateDecisionThreshold(gateDecisionThreshold),
               ),
               rerankKeep: String(normalizeRerankKeep(rerankKeep)),
+              dedupeThreshold: String(normalizeDedupeThreshold(dedupeThreshold)),
               rerankChannels: rerankChannelsText(rerankChannels),
             });
           },
@@ -574,6 +591,9 @@ export function createPanelStore(deps = {}) {
     "gateContextTurns",
     "gateDecisionThreshold",
     "queryMode",
+    // 近重复的两项与召回策略同一单：漏在这里，切开关会看起来「没改」，一单都不发。
+    "dedupeNear",
+    "dedupeThreshold",
     "gatePrompt",
     "gateDecisionPrompt",
     "gateContextPrompt",
@@ -617,6 +637,12 @@ export function createPanelStore(deps = {}) {
       // 会让一单永远看起来「有变化」。
       if (key === "rerankKeep") {
         return normalizeRerankKeep(a?.[key]) === normalizeRerankKeep(b?.[key]);
+      }
+      // 近重复阈值同理：存的是数字串、界面上是数字，不归一化就永远看起来「有变化」。
+      if (key === "dedupeThreshold") {
+        return (
+          normalizeDedupeThreshold(a?.[key]) === normalizeDedupeThreshold(b?.[key])
+        );
       }
       return a?.[key] === b?.[key];
     });
@@ -700,6 +726,18 @@ export function createPanelStore(deps = {}) {
     state.form.rerankKeep = normalizeRerankKeep(
       value === null || value === undefined ? 0 : value,
     );
+    return saveLayers();
+  }
+
+  /**
+   * 近重复阈值：与门槛同一种数字格，但清空语义不同。
+   *
+   * 清空（null / undefined / 空串）= 回默认 0.8，并且要真的提交：这一格的说明书
+   * 就是「留空用默认」，与保留条数的「留空 = 不限」同一种语义，不是「还没填完」。
+   * 越界 / 非数字也走同一条路：归一化成 0.8 再发，不把脏值发上去。
+   */
+  function setDedupeThreshold(value) {
+    state.form.dedupeThreshold = normalizeDedupeThreshold(value);
     return saveLayers();
   }
 
@@ -1101,6 +1139,7 @@ export function createPanelStore(deps = {}) {
     setDecisionThreshold,
     setGateContextTurns,
     setRerankKeep,
+    setDedupeThreshold,
     setControlsNumber,
     saveConnection,
     saveLayers,

@@ -108,13 +108,15 @@ function shapeOf(event, invocation) {
   }
 
   // 精排：候选 / 条数上限截掉几条 / 保留三个数摆在一起，才知道减在哪一步。
-  // deduped / droppedCredential 是进精排之前那一步的账（去重、凭据过滤），
-  // 有了它们才能把「召回 10 条怎么变成精排看得到的 N 条」验算一遍。
+  // deduped / droppedExact / droppedNear / droppedCredential 是进精排之前那一步的账
+  // （精确去重、近重复、凭据过滤），有了它们才能把「召回 10 条怎么变成精排看得到的 N 条」验算一遍。
   // scores 只记身份与分数（合并后降序，最多 10 条），正文与端点都不进来。
   if (event === "recall/rerank") {
     return {
       candidates: countOf(invocation.candidates),
       deduped: countOf(invocation.deduped),
+      droppedExact: countOf(invocation.droppedExact),
+      droppedNear: countOf(invocation.droppedNear),
       droppedCredential: countOf(invocation.droppedCredential),
       enabledChannels: countOf(invocation.enabledChannels),
       kept: countOf(invocation.kept),
@@ -127,8 +129,9 @@ function shapeOf(event, invocation) {
 
   // 每轮一条汇总：档位与计数，不带任何正文。
   // 少哪一段就给 null，不拿 0 或空串填坑——「没跑」与「跑了但是 0」必须分得开。
-  // deduped / droppedCredential 摆在 recalled 旁边（而不是塞进 rerank）：去重与凭据过滤
-  // 在精排之前，而精排默认是关的，塞进去就会在多数轮里连那笔账一起消失。
+  // deduped / droppedExact / droppedNear / droppedCredential 摆在 recalled 旁边（而不是塞进 rerank）：
+  // 去重与凭据过滤在精排之前，而精排默认是关的，塞进去就会在多数轮里连那笔账一起消失。
+  // droppedExact 与 droppedNear 分开记：一个抓同一身份，一个抓「同一段话的另一种存法」。
   // error 只记类别（timeout / network），不记地址也不记响应正文。
   if (event === "recall/result") {
     return {
@@ -137,6 +140,8 @@ function shapeOf(event, invocation) {
       query: queryOf(invocation.query),
       recalled: countOf(invocation.recalled),
       deduped: countOf(invocation.deduped),
+      droppedExact: countOf(invocation.droppedExact),
+      droppedNear: countOf(invocation.droppedNear),
       droppedCredential: countOf(invocation.droppedCredential),
       rerank: rerankOf(invocation.rerank),
       assemble: assembleOf(invocation.assemble),

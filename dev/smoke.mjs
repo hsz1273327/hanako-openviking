@@ -109,6 +109,13 @@ import {
   SERVICE_TIMEOUT_LIMITS,
   ASSEMBLE_MODES,
   normalizeAssembleMode,
+  DEDUPE_THRESHOLD_DEFAULT,
+  DEDUPE_THRESHOLD_MIN,
+  DEDUPE_THRESHOLD_MAX,
+  DEDUPE_THRESHOLD_STEP,
+  normalizeDedupeNear,
+  normalizeDedupeThreshold,
+  serializeDedupeThreshold,
   normalizeQueryChars,
   normalizeRecallTimeoutMs,
   QUERY_CHARS_DEFAULT,
@@ -226,11 +233,18 @@ import {
 import {
   assembleCandidates,
   candidateKey,
+  charGrams,
   dedupeCandidates,
   hasCredential,
+  jaccardOf,
+  nearDedupeCandidates,
+  normalizeForGram,
   peerOfUri,
   scoreOf,
   sortByScore,
+  textSimilarity,
+  NEAR_DUPE_GRAM_SIZE,
+  NEAR_DUPE_THRESHOLD,
 } from "../src/memory/assemble.js";
 import {
   readSession,
@@ -311,6 +325,17 @@ import {
   ASSEMBLE_MODES as UI_ASSEMBLE_MODES,
   normalizeAssembleMode as uiNormalizeAssembleMode,
   paintAssembleConfig,
+  DEDUPE_THRESHOLD_DEFAULT as UI_DEDUPE_THRESHOLD_DEFAULT,
+  DEDUPE_THRESHOLD_MIN as UI_DEDUPE_THRESHOLD_MIN,
+  DEDUPE_THRESHOLD_MAX as UI_DEDUPE_THRESHOLD_MAX,
+  DEDUPE_THRESHOLD_STEP as UI_DEDUPE_THRESHOLD_STEP,
+  DEDUPE_THRESHOLD_HINT as UI_DEDUPE_THRESHOLD_HINT,
+  DEDUPE_NEAR_NOTE as UI_DEDUPE_NEAR_NOTE,
+  DEDUPE_NEAR_LIMIT_NOTE as UI_DEDUPE_NEAR_LIMIT_NOTE,
+  DEDUPE_EXACT_NOTE as UI_DEDUPE_EXACT_NOTE,
+  normalizeDedupeNear as uiNormalizeDedupeNear,
+  normalizeDedupeThreshold as uiNormalizeDedupeThreshold,
+  paintDedupeConfig,
   RERANK_CHANNELS_MAX as UI_RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_TIMEOUT_DEFAULTS as UI_RERANK_CHANNEL_TIMEOUT_DEFAULTS,
   SCORING_SERVICES,
@@ -2879,12 +2904,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     selectTabBody,
   );
 }
-// ================= 记忆页：四个子页签 =================
+// ================= 记忆页：五个子页签 =================
 {
   eq(
-    "记忆页子页签的名字逐字是 召回 / 精排 / 组装 / 候选池",
+    "记忆页子页签的名字逐字是 召回 / 去重 / 精排 / 组装 / 候选池",
     MEMORY_TABS.map((name) => MEMORY_TAB_LABELS[name]),
-    ["召回", "精排", "组装", "候选池"],
+    ["召回", "去重", "精排", "组装", "候选池"],
   );
   eq(
     "记忆页默认停在召回；非法页名回落到召回",
@@ -2892,9 +2917,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["recall", "recall"],
   );
   eq(
-    "任一时刻只有一个子页可见（剩下三块只靠 hidden 隐藏，不卸载）",
+    "任一时刻只有一个子页可见（剩下四块只靠 hidden 隐藏，不卸载）",
     MEMORY_TABS.map((active) => MEMORY_TABS.filter((name) => memoryPaneVisible(active, name))),
-    [["recall"], ["rerank"], ["assemble"], ["peers"]],
+    [["recall"], ["dedupe"], ["rerank"], ["assemble"], ["peers"]],
   );
   eq(
     "子页签键盘换页：左右循环 / Home / End / 其它键不接管",
@@ -2906,19 +2931,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       nextMemoryTab("rerank", "End"),
       nextMemoryTab("recall", "Enter"),
     ],
-    ["rerank", "recall", "peers", "recall", "peers", null],
+    ["dedupe", "recall", "peers", "recall", "peers", null],
   );
 
   const panel = uiCode("components/MemoryPanel.vue");
   const paneTags = [...panel.matchAll(/<div\b[^>]*class="memory-pane"[^>]*>/g)].map((m) => m[0]);
-  eq("记忆页里四个子页容器都在 DOM 里（不靠 v-if 重建组件）", paneTags.length, 4);
+  eq("记忆页里五个子页容器都在 DOM 里（不靠 v-if 重建组件）", paneTags.length, 5);
   check(
-    "四个子页容器都不用 v-if / v-show / 动态 :key 重建",
+    "五个子页容器都不用 v-if / v-show / 动态 :key 重建",
     paneTags.every((tag) => !/v-if|v-show|:key/.test(tag)),
     paneTags.join("\n"),
   );
   for (const [name, label] of [
     ["recall", "召回"],
+    ["dedupe", "去重"],
     ["rerank", "精排"],
     ["assemble", "组装"],
     ["peers", "候选池"],
@@ -2934,11 +2960,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
   eq(
-    "四个子组件各挂一次（RecallCard / RerankCard / AssembleCard / PeerList 都不在条件分支里）",
-    ["RecallCard", "RerankCard", "AssembleCard", "PeerList"].map(
+    "五个子组件各挂一次（RecallCard / DedupeCard / RerankCard / AssembleCard / PeerList 都不在条件分支里）",
+    ["RecallCard", "DedupeCard", "RerankCard", "AssembleCard", "PeerList"].map(
       (name) => (panel.match(new RegExp(`<${name}\\b`, "g")) || []).length,
     ),
-    [1, 1, 1, 1],
+    [1, 1, 1, 1, 1],
   );
   check(
     "子页签是 NTabs line + small，不是卡片式（不与四个主页面签抢层次）",
@@ -4091,16 +4117,76 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
   {
-    // 拆的是视图，不是提交：三张卡都只调 store 的动作，谁都不自己发请求。
+    // 去重卡：近重复开关 + 阈值数字格，两格都进召回策略那一单（与精排 / 组装同一套回滚）。
+    const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
+    eq(
+      "首屏去重读回默认：近重复开着、阈值 0.8（服务端投影缺项也画成这一对）",
+      [state.form.dedupeNear, state.form.dedupeThreshold],
+      [true, 0.8],
+    );
+
+    const before = saves().length;
+    await ui.setForm("dedupeNear", false);
+    const switchBody = saves().at(-1).body;
+    eq(
+      "切近重复开关走同一单：body 里是布尔 false，整单里还带着召回 / 精排 / 组装那几个键",
+      [
+        saves().length - before,
+        switchBody.dedupeNear,
+        typeof switchBody.dedupeNear,
+        switchBody.rerank,
+        switchBody.assembleMode,
+        state.form.dedupeNear,
+      ],
+      [1, false, "boolean", "off", "rules", false],
+    );
+
+    await ui.setDedupeThreshold(0.6);
+    let body = saves().at(-1).body;
+    eq(
+      "阈值 0.6 落整单：body 里是数字串 \"0.6\"，界面上是数字 0.6",
+      [body.dedupeThreshold, typeof body.dedupeThreshold, state.form.dedupeThreshold],
+      ["0.6", "string", 0.6],
+    );
+
+    const cleaned = [];
+    for (const raw of ["", null, 2, "abc"]) {
+      await ui.setDedupeThreshold(raw);
+      cleaned.push([saves().at(-1).body.dedupeThreshold, state.form.dedupeThreshold]);
+    }
+    eq(
+      "阈值留空 / 越界 / 非数字：都当 0.8 提交（「留空用默认」是这一格自己的语义）",
+      cleaned,
+      [
+        ["0.8", 0.8],
+        ["0.8", 0.8],
+        ["0.8", 0.8],
+        ["0.8", 0.8],
+      ],
+    );
+
+    rejectNextPost = "dedupeNear 只能是 true / false";
+    await ui.setForm("dedupeNear", true);
+    eq(
+      "被拒后回滚到上一次确认的值（开关退回 false），提示位显示服务端原文",
+      [state.form.dedupeNear, state.note.text, state.note.bad],
+      [false, "dedupeNear 只能是 true / false", true],
+    );
+    // 复位：后面几段按「近重复开着」的草稿走。
+    await ui.setForm("dedupeNear", true);
+  }
+  {
+    // 拆的是视图，不是提交：五张卡都只调 store 的动作，谁都不自己发请求。
     const cards = [
       "components/RecallCard.vue",
+      "components/DedupeCard.vue",
       "components/RerankCard.vue",
       "components/AssembleCard.vue",
     ].map((name) => uiCode(name));
     const offenders = ["post(", "fetch(", "createPanelStore"].filter((needle) =>
       cards.some((code) => code.includes(needle)),
     );
-    eq("RecallCard / RerankCard / AssembleCard 都不自己发请求（整单没有被拆成三单）", offenders, []);
+    eq("RecallCard / DedupeCard / RerankCard / AssembleCard 都不自己发请求（整单没有被拆成四单）", offenders, []);
 
     // 召回页两个数字格：标签逐字、id 就是配置键、提交口是 setControlsNumber（与注入预算同一条）。
     const recallCard = cards[0];
@@ -4998,7 +5084,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- llm 的提示词与判断模型：归一化 + 整单收笔 ----
   eq(
-    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、精排与组装配置、通道与打分服务",
+    "llm 配置归一化非法值 / 形状不对的模型标识当空（回到默认通道） / 完整投影包含两层、llm、两份判据提示词、去重、精排与组装配置、通道与打分服务",
     [paintGateConfig({
       gatePrompt: "字".repeat(GATE_PROMPT_MAX + 10),
       gateModel: "  p1/m1  ",
@@ -5017,6 +5103,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gateContextPrompt: "",
     gateDecisionThreshold: 0.45,
     gateFallback: "recall",
+    dedupeNear: true,
+    dedupeThreshold: 0.8,
     rerank: "off",
     rerankKeep: 5,
     rerankPrompt: "",
@@ -5818,6 +5906,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     query: { mode: "last", chars: 4 },
     recalled: 0,
     deduped: null,
+    droppedExact: null,
+    droppedNear: null,
     droppedCredential: null,
     rerank: null,
     assemble: null,
@@ -5829,6 +5919,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     query: { mode: "context", chars: 120 },
     recalled: 10,
     deduped: 8,
+    droppedExact: 2,
+    droppedNear: 1,
     droppedCredential: 1,
     rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
     assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
@@ -5854,7 +5946,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     .map((line) => JSON.parse(line));
 
   eq(
-    "recall/result 的形状：档位 / 失败类别 / 查询 / 召回数 / 去重 / 凭据 / 精排 / 组装 / 注入，没跑的那几段是 null",
+    "recall/result 的形状：档位 / 失败类别 / 查询 / 召回数 / 精确去重 / 近重复 / 凭据 / 精排 / 组装 / 注入，没跑的那几段是 null",
     [lines.length, lines[0].event, lines[0].shape, lines[1].shape],
     [
       3,
@@ -5865,6 +5957,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         query: { mode: "last", chars: 4, turns: null, truncated: null },
         recalled: 0,
         deduped: null,
+        droppedExact: null,
+        droppedNear: null,
         droppedCredential: null,
         rerank: null,
         assemble: null,
@@ -5876,6 +5970,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         query: { mode: "context", chars: 120, turns: null, truncated: null },
         recalled: 10,
         deduped: 8,
+        droppedExact: 2,
+        droppedNear: 1,
         droppedCredential: 1,
         rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
@@ -5948,6 +6044,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     query: "这一轮的查询正文",
     candidates: 8,
     deduped: 9,
+    droppedExact: 1,
+    droppedNear: 2,
     droppedCredential: 1,
     enabledChannels: 2,
     kept: 5,
@@ -5963,7 +6061,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const line = JSON.parse(fs.readFileSync(path.join(dir, "probe.log"), "utf8").trim());
   eq(
-    "recall/rerank 的形状：候选 / 去重 / 凭据 / 截掉几条 / 保留都进日志；scores 只留 uri 与分数（正文与端点都不进）",
+    "recall/rerank 的形状：候选 / 精确去重 / 近重复 / 凭据 / 截掉几条 / 保留都进日志；scores 只留 uri 与分数（正文与端点都不进）",
     [
       line.shape,
       JSON.stringify(line).includes("这一轮的查询正文"),
@@ -5973,6 +6071,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       {
         candidates: 8,
         deduped: 9,
+        droppedExact: 1,
+        droppedNear: 2,
         droppedCredential: 1,
         enabledChannels: 2,
         kept: 5,
@@ -12756,6 +12856,436 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   fs.rmSync(SCREEN_DIR, { recursive: true, force: true });
   resetRuntimeTransport();
+}
+
+// ================= 近重复：字符 3-gram 的 Jaccard（纯算法，不调模型） =================
+{
+  // 为什么要有这一节：精确去重只认「身份相同」或「字面一字不差」。同一段内容被提取两遍、
+  // 加了个抬头、标点 / 换行 / 大小写不同，精确去重一条都抓不住，两条都留下白占精排名额。
+  // 近重复补的就是这些，但它只认字面：同义改写它抓不住，这一点要在界面说明里写清。
+
+  // ---- 1. 归一化：全角转半角、英文小写、去掉空白与标点 ----
+  eq(
+    "归一化：全角压回半角、英文转小写、空白与标点全丢；只剩标点的一个字不剩",
+    [
+      normalizeForGram("ＡＢＣ  ab，c！"),
+      normalizeForGram("季度复盘会：确定的三个节点，与责任人。"),
+      normalizeForGram("  \n\t ，。！ ").length,
+      normalizeForGram(null),
+    ],
+    ["abcabc", "季度复盘会确定的三个节点与责任人", 0, ""],
+  );
+
+  // ---- 2. 切 gram：按字符、不去重前先落集合；短于一 gram 的整句当一条 ----
+  eq(
+    "按字符切 3-gram 得到集合：abcd → abc / bcd；单字 / 两字整句当一条 gram；空文本给空集",
+    [
+      ["abcd"].map((text) => [...charGrams(text)]),
+      [...charGrams("丙")],
+      [...charGrams("复盘")],
+      charGrams("！？").size,
+      NEAR_DUPE_GRAM_SIZE,
+    ],
+    [[["abc", "bcd"]], ["丙"], ["复盘"], 0, 3],
+  );
+
+  // ---- 3. Jaccard：一模一样 1.0；只差标点与空白接近 1；加前缀仍过阈值；无关远低于 0.5 ----
+  const BASE = "季度复盘会确定的三个交付节点与责任人";
+  const PREFIXED = "补记：季度复盘会确定的三个交付节点与责任人";
+  const PUNCTUATED = "季度复盘会确定的三个交付节点，与责任人。";
+  const UNRELATED = "晚饭吃什么都还没定下来";
+  eq(
+    "相似度：完全相同 1.0 / 只差标点与空白 1.0（≥ 0.95）/ 加了一段前缀仍 ≥ 阈值 / 无关 < 0.5 / 空集不算像",
+    [
+      textSimilarity(BASE, BASE),
+      textSimilarity(PUNCTUATED, BASE) >= 0.95,
+      textSimilarity(PREFIXED, BASE) >= DEDUPE_THRESHOLD_DEFAULT,
+      textSimilarity(UNRELATED, BASE) < 0.5,
+      jaccardOf(new Set(), charGrams(BASE)),
+    ],
+    [1, true, true, true, 0],
+  );
+
+  // ---- 4. 阈值边界：相似度正好等于阈值时算重复（>=），高一点点就不算 ----
+  const edge = textSimilarity(PREFIXED, BASE);
+  eq(
+    "阈值边界：相似度正好等于阈值算重复（>=），高出一丁点就不算；阈值 1 只合并字面完全相同的",
+    [
+      nearDedupeCandidates([{ text: BASE }, { text: PREFIXED }], { threshold: edge }).dropped,
+      nearDedupeCandidates([{ text: BASE }, { text: PREFIXED }], { threshold: edge + 1e-6 })
+        .dropped,
+      nearDedupeCandidates([{ text: BASE }, { text: BASE }], { threshold: 1 }).dropped,
+    ],
+    [1, 0, 1],
+  );
+
+  // ---- 5. 留分数高的那条：分数故意反过来放（高的在后），验证不是留第一条 ----
+  const reversed = nearDedupeCandidates([
+    { text: BASE, score: 0.2 },
+    { text: PREFIXED, score: 0.9 },
+  ]);
+  const tied = nearDedupeCandidates([
+    { text: BASE, score: 0.5 },
+    { text: PUNCTUATED, score: 0.5 },
+  ]);
+  eq(
+    "合并留分数高的那条（高分在后也留它，不是留第一条）；分数相同则留先出现的",
+    [reversed.dropped, reversed.items.map((item) => item.text), tied.items.map((item) => item.text)],
+    [1, [PREFIXED], [BASE]],
+  );
+
+  // ---- 6. 三条近重复夹两条无关的 → 合并后剩三条 ----
+  const mixed = nearDedupeCandidates([
+    { text: BASE, score: 0.4 },
+    { text: PREFIXED, score: 0.95 },
+    { text: PUNCTUATED, score: 0.7 },
+    { text: UNRELATED, score: 0.3 },
+    { text: "明天下午三点开评审会", score: 0.2 },
+  ]);
+  eq(
+    "三条近重复夹两条无关：只剩三条，留下的是那一组里分数最高的一条",
+    [mixed.dropped, mixed.items.length, mixed.items[0].text],
+    [2, 3, PREFIXED],
+  );
+  eq(
+    "只一条时不进两两比较，原样返回（零条同理）",
+    [nearDedupeCandidates([{ text: BASE }]).dropped, nearDedupeCandidates([]).items.length],
+    [0, 0],
+  );
+
+  // ---- 7. 链路：近重复在精确去重与凭据过滤之后、精排之前，两笔账分开记 ----
+  const DIR = path.join(import.meta.dirname, ".tmp-near-dedupe");
+  fs.rmSync(DIR, { recursive: true, force: true });
+
+  const ENTRIES = [
+    { text: BASE, uri: "viking://user/default/m/n1.md", score: 0.4 },
+    { text: PREFIXED, uri: "viking://user/default/m/n2.md", score: 0.95 },
+    { text: PUNCTUATED, uri: "viking://user/default/m/n3.md", score: 0.7 },
+    { text: UNRELATED, uri: "viking://user/default/m/n4.md", score: 0.3 },
+    // 这一条与上一条字面一字不差、uri 也相同：归精确去重，不归近重复。
+    { text: UNRELATED, uri: "viking://user/default/m/n4.md", score: 0.6 },
+    { text: "明天下午三点开评审会", uri: "viking://user/default/m/n6.md", score: 0.2 },
+  ];
+
+  let NEAR_SESSION = 0;
+  const runNear = async (values = {}) => {
+    NEAR_SESSION += 1;
+    const probes = [];
+    const mock = mockFetch({ body: { status: "ok", result: { entries: ENTRIES } } });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true, ...values },
+        fetchImpl: mock.fetchImpl,
+        dataDir: DIR,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    const result = await handler({
+      payload: { messages: [{ role: "user", content: "上次那批稿子改到哪了？" }] },
+      session: { sessionId: `near-${NEAR_SESSION}` },
+    });
+    return {
+      row: probes.find((probe) => probe.event === "recall/result")?.invocation,
+      detail: probes.find((probe) => probe.event === "recall/rerank")?.invocation,
+      assembled: probes.find((probe) => probe.event === "recall/assemble")?.invocation,
+      injected: asText(asList(result?.payload?.messages)[0]?.content),
+    };
+  };
+
+  const on = await runNear();
+  eq(
+    "近重复开着（默认）：六条进，精确去重吃掉 1 条副本，近重复再合掉 2 条，只剩三条",
+    [
+      on.row?.recalled,
+      on.row?.deduped,
+      on.row?.droppedExact,
+      on.row?.droppedNear,
+      on.row?.droppedCredential,
+      on.row?.rerank,
+      on.row?.assemble?.kept,
+    ],
+    [6, 5, 1, 2, 0, null, 3],
+  );
+  eq(
+    "近重复静下来的是字面副本：注入文本里有加前缀的那条，没有它的两个孪生（含那个只差标点的）",
+    [
+      on.injected.includes("补记：季度复盘会确定的三个交付节点与责任人"),
+      on.injected.includes("，与责任人。"),
+      on.injected.includes(UNRELATED),
+      on.injected.includes("明天下午三点开评审会"),
+    ],
+    [true, false, true, true],
+  );
+  eq(
+    "不变式：recalled = deduped + droppedExact；deduped = droppedNear + droppedCredential + droppedByKeep + kept",
+    [
+      on.row?.recalled === on.row?.deduped + on.row?.droppedExact,
+      on.row?.deduped === on.row?.droppedNear + on.row?.droppedCredential + 0 + on.row?.assemble?.kept,
+    ],
+    [true, true],
+  );
+
+  const off = await runNear({ dedupeNear: false });
+  eq(
+    "dedupeNear 关掉：近重复不合并（droppedNear 0、五条全留），精确副本照旧合并",
+    [
+      off.row?.deduped,
+      off.row?.droppedExact,
+      off.row?.droppedNear,
+      off.row?.assemble?.kept,
+      off.injected.includes("，与责任人。"),
+      off.injected.includes("补记：季度复盘会确定的三个交付节点与责任人"),
+    ],
+    [5, 1, 0, 5, true, true],
+  );
+
+  // 阈值调高到 1：只剩「归一化后一字不差」才合并——也就是只差标点与空白那一对，
+  // 加前缀的那条（0.888）留在外面。两笔账仍然分得开。
+  const strict = await runNear({ dedupeThreshold: 1 });
+  eq(
+    "阈值 1.0 时只有归一化后一字不差的那一对合并：只差标点的留下一条，加前缀的那条不合",
+    [
+      strict.row?.droppedNear,
+      strict.row?.assemble?.kept,
+      strict.injected.includes("，与责任人。"),
+      strict.injected.includes("补记：季度复盘会确定的三个交付节点与责任人"),
+    ],
+    [1, 4, true, true],
+  );
+
+  fs.rmSync(DIR, { recursive: true, force: true });
+  resetRuntimeTransport();
+
+  // ---- 8. 配置：默认 / 边界 / 归一化两端同值；manifest 声明了这两个键 ----
+  const props = JSON.parse(
+    fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+  ).contributes.settings.schema.properties;
+  eq(
+    "近重复阈值两端同值：默认 0.8 / 边界 0.5–1.0 / 步长 0.05；空串、非数字、越界都回 0.8；manifest 声明为 string、默认 \"0.8\"",
+    [
+      [DEDUPE_THRESHOLD_DEFAULT, UI_DEDUPE_THRESHOLD_DEFAULT],
+      [DEDUPE_THRESHOLD_MIN, UI_DEDUPE_THRESHOLD_MIN],
+      [DEDUPE_THRESHOLD_MAX, UI_DEDUPE_THRESHOLD_MAX],
+      [DEDUPE_THRESHOLD_STEP, UI_DEDUPE_THRESHOLD_STEP],
+      ["", "abc", 0.4, 1.2, null, undefined, "0.6", 0.5, 1].map(normalizeDedupeThreshold),
+      ["", "abc", 0.4, 1.2, null, undefined, "0.6", 0.5, 1].map(uiNormalizeDedupeThreshold),
+      [props.dedupeThreshold?.type, props.dedupeThreshold?.default],
+      DEFAULTS.dedupeThreshold,
+    ],
+    [
+      [0.8, 0.8],
+      [0.5, 0.5],
+      [1, 1],
+      [0.05, 0.05],
+      [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.5, 1],
+      [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.5, 1],
+      ["string", "0.8"],
+      0.8,
+    ],
+  );
+  eq(
+    "近重复开关两端同值：默认开；脏值（含缺项、类型不对、字串变体）两端都当开",
+    [
+      [DEFAULTS.dedupeNear, props.dedupeNear?.type, props.dedupeNear?.default],
+      [undefined, "", null, 1, "yes"].map(normalizeDedupeNear),
+      [undefined, "", null, 1, "yes"].map(uiNormalizeDedupeNear),
+      ["true", "false", true, false].map(normalizeDedupeNear),
+      ["true", "false", true, false].map(uiNormalizeDedupeNear),
+    ],
+    [
+      [true, "boolean", true],
+      [true, true, true, true, true],
+      [true, true, true, true, true],
+      [true, false, true, false],
+      [true, false, true, false],
+    ],
+  );
+  eq(
+    "写回配置的形状：存归一化后的数字串（空串 / 非数字 / 越界都存 \"0.8\"，0.6 与 1 照存）",
+    ["", "abc", 0.4, 1.2, null, 0.6, 1].map(serializeDedupeThreshold),
+    ["0.8", "0.8", "0.8", "0.8", "0.8", "0.6", "1"],
+  );
+  eq(
+    "算法与配置的默认值同一份：assemble 的兜底阈值 0.8 就是配置的默认 0.8，gram 长度是 3",
+    [NEAR_DUPE_THRESHOLD, DEDUPE_THRESHOLD_DEFAULT, NEAR_DUPE_GRAM_SIZE],
+    [0.8, 0.8, 3],
+  );
+
+  // ---- 9. 路由：GET 投影 / POST 整单校验（布尔开关 + 数字格两种形状）----
+  {
+    const handlers = {};
+    const app = {
+      get: (route, handler) => {
+        handlers[`GET ${route}`] = handler;
+      },
+      post: (route, handler) => {
+        handlers[`POST ${route}`] = handler;
+      },
+    };
+    const store = {};
+    const writes = [];
+    const ctx = {
+      config: {
+        get: async (key) => store[key],
+        set: async (key, value) => {
+          writes.push([key, value]);
+          store[key] = value;
+        },
+      },
+    };
+    registerRecallModeRoutes(app, ctx);
+    const get = () =>
+      handlers["GET /recall-mode"]({ json: (payload, status) => ({ body: payload, status }) });
+    const post = (body) =>
+      handlers["POST /recall-mode"]({
+        req: { json: async () => body },
+        json: (payload, status) => ({ body: payload, status }),
+      });
+
+    const defaults = await get();
+    eq(
+      "GET 没配过时投影成「开 + 阈值 \"0.8\"（字符串）」",
+      [defaults.body.dedupeNear, defaults.body.dedupeThreshold, typeof defaults.body.dedupeThreshold],
+      [true, "0.8", "string"],
+    );
+
+    writes.length = 0;
+    const savedSwitch = await post({ dedupeNear: false });
+    eq(
+      "dedupeNear=false 能落库并回显 / applied 里带它 / 存的是布尔",
+      [
+        savedSwitch.status,
+        store.dedupeNear,
+        savedSwitch.body.dedupeNear,
+        savedSwitch.body.applied.includes("dedupeNear"),
+        writes.length,
+      ],
+      [200, false, false, true, 1],
+    );
+    writes.length = 0;
+    const badSwitch = await post({ dedupeNear: "off" });
+    eq(
+      "dedupeNear 传字串（\"off\"）整单被拒 400，零写入",
+      [badSwitch.status, store.dedupeNear, writes.length],
+      [400, false, 0],
+    );
+
+    writes.length = 0;
+    const savedThreshold = await post({ dedupeThreshold: 0.6 });
+    eq(
+      "dedupeThreshold=0.6（数字）能落库并回显 / 存的是字符串 \"0.6\"",
+      [
+        savedThreshold.status,
+        store.dedupeThreshold,
+        savedThreshold.body.dedupeThreshold,
+        writes.length,
+      ],
+      [200, "0.6", "0.6", 1],
+    );
+    const cleaned = [];
+    for (const raw of ["", "abc", 2, null]) {
+      store.dedupeThreshold = "0.6";
+      const out = await post({ dedupeThreshold: raw });
+      cleaned.push([out.status, store.dedupeThreshold]);
+    }
+    eq(
+      "阈值留空 / 非数字 / 越界都归一化成 \"0.8\" 再落库（不打断整单，也不留脏值）",
+      cleaned,
+      [
+        [200, "0.8"],
+        [200, "0.8"],
+        [200, "0.8"],
+        [200, "0.8"],
+      ],
+    );
+    writes.length = 0;
+    const badType = await post({ dedupeThreshold: [0.6] });
+    eq(
+      "dedupeThreshold 类型不对（数组）整单被拒 400，零写入",
+      [badType.status, writes.length],
+      [400, 0],
+    );
+  }
+
+  // ---- 10. 子页签：五个、顺序正确、「去重」在召回与精排之间 ----
+  const panel = uiCode("components/MemoryPanel.vue");
+  eq(
+    "子页签五个，顺序是召回 → 去重 → 精排 → 组装 → 候选池（「去重」夹在召回与精排之间）",
+    [
+      MEMORY_TABS.length,
+      MEMORY_TABS.indexOf("dedupe") - MEMORY_TABS.indexOf("recall"),
+      MEMORY_TABS.indexOf("rerank") - MEMORY_TABS.indexOf("dedupe"),
+    ],
+    [5, 1, 1],
+  );
+  const dedupeAt = panel.indexOf('id="memory-panel-dedupe"');
+  check(
+    "记忆页里「去重」那块按链路位置摆在召回与精排之间（DOM 顺序也是）",
+    dedupeAt > panel.indexOf('id="memory-panel-recall"') &&
+      dedupeAt < panel.indexOf('id="memory-panel-rerank"'),
+    panel.slice(panel.indexOf('id="memory-panel-dedupe"') - 120, dedupeAt + 160),
+  );
+
+  // ---- 11. 去重卡：近重复开关 + 阈值数字格 + 算法说明；精确去重只作说明，不给开关 ----
+  const card = uiCode("components/DedupeCard.vue");
+  eq(
+    "去重卡只有一个开关（近重复）；精确去重没有开关，只有说明",
+    [
+      (card.match(/<NSwitch\b/g) || []).length,
+      card.includes("'dedupeNear'"),
+      card.includes("setForm(\"dedupeNear\""),
+      card.includes("DEDUPE_EXACT_NOTE"),
+    ],
+    [1, true, true, true],
+  );
+  check(
+    "阈值数字格：0.5–1.0、步长 0.05、留空用默认、id 就是配置键、提交口是 setDedupeThreshold",
+    card.includes("'dedupeThreshold'") &&
+      card.includes("DEDUPE_THRESHOLD_MIN") &&
+      card.includes("DEDUPE_THRESHOLD_MAX") &&
+      card.includes("DEDUPE_THRESHOLD_STEP") &&
+      card.includes('placeholder="默认 0.8"') &&
+      card.includes("setDedupeThreshold"),
+    card.slice(card.indexOf("dedupeThreshold") - 160, card.indexOf("dedupeThreshold") + 260),
+  );
+  check(
+    "去重卡自己不反思请求（只调 store，整单没有因此多一单）",
+    ["post(", "fetch(", "createPanelStore"].every((needle) => card.includes(needle) === false),
+    card.slice(0, 1400),
+  );
+  check(
+    "说明里写清了算法（字符 3-gram 的 Jaccard）、抓得住什么、抓不住同义改写（要 embedding）、精确去重恒开不可关",
+    [UI_DEDUPE_NEAR_NOTE, UI_DEDUPE_NEAR_LIMIT_NOTE, UI_DEDUPE_EXACT_NOTE].every(
+      (note) => note.length > 0,
+    ) &&
+      UI_DEDUPE_NEAR_NOTE.includes("3-gram") &&
+      UI_DEDUPE_NEAR_NOTE.includes("Jaccard") &&
+      UI_DEDUPE_NEAR_NOTE.includes("重复提取") &&
+      UI_DEDUPE_NEAR_LIMIT_NOTE.includes("embedding") &&
+      UI_DEDUPE_EXACT_NOTE.includes("恒开") &&
+      UI_DEDUPE_EXACT_NOTE.includes("不可关"),
+    `${UI_DEDUPE_NEAR_NOTE} | ${UI_DEDUPE_NEAR_LIMIT_NOTE} | ${UI_DEDUPE_EXACT_NOTE}`,
+  );
+  check(
+    "阈值小字把方向说清（调低合并更多、调高更保守），且引用了默认值 0.8",
+    UI_DEDUPE_THRESHOLD_HINT.includes("调低合并更多") &&
+      UI_DEDUPE_THRESHOLD_HINT.includes("调高更保守") &&
+      UI_DEDUPE_THRESHOLD_HINT.includes("0.8"),
+    UI_DEDUPE_THRESHOLD_HINT,
+  );
+  eq(
+    "去重配置的投影：缺项画成开 + 0.8，脏值也收敛到这两个值",
+    [paintDedupeConfig(undefined), paintDedupeConfig({ dedupeNear: "x", dedupeThreshold: 2 })],
+    [
+      { dedupeNear: true, dedupeThreshold: 0.8 },
+      { dedupeNear: true, dedupeThreshold: 0.8 },
+    ],
+  );
+  check(
+    "这几处新写的代码里没有「重排」（链路那一步统一叫精排）",
+    [card, uiCode("lib/recall-layers.js")].every((code) => code.includes("重排") === false),
+    card.slice(0, 600),
+  );
 }
 
 // ================= 每轮一条 recall/result：正常那轮也得有记录 =================
