@@ -58,6 +58,7 @@ import {
   gateContextOptions,
   gateFallbackOptions,
   gateHasFailurePath,
+  RECALL_LAYER_NOTE,
   recallGateOptions,
   recallPromptField,
   recallPromptKey,
@@ -241,6 +242,13 @@ function onNumberChange(key, value) {
         </div>
       </NGridItem>
     </NGrid>
+
+    <!-- 分层判据：只读说明，不给开关。哪几类不衰减、半衰期、两个门槛都是判断，
+         不是偏好；文案与数字由 lib/recall-layers.js 统一生成，组件不写死。 -->
+    <div class="field" :class="{ dim: !enabled }">
+      <span class="field-label">记忆分层</span>
+      <span class="field-hint">{{ RECALL_LAYER_NOTE }}</span>
+    </div>
 
     <!-- 只有 recallGate=llm / decision 时才展开。提示词框里放的就是当前生效的那一份：
          llm 坐 gatePrompt，decision 坐 gateDecisionPrompt —— 同一个位置，两份值互不影响。 -->

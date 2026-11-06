@@ -43,6 +43,7 @@ import {
   nearDedupeCandidates,
   peerOfUri,
 } from "./assemble.js";
+import { applyLayerWeights, layerCandidates } from "./layer.js";
 import {
   MEMORY_TAG_CLOSE,
   MEMORY_TAG_OPEN,
@@ -1663,7 +1664,7 @@ async function scoreRerankLane({ sdk, switches, channel, query, candidates, inst
  *   none  主路成功，没触发兜底
  *   model 主路垮了，走了兜底（它自己也失败是另一层：fallbackError 非空）
  */
-export async function runRerankChannels({ sdk, switches, query, items, channels } = {}) {
+export async function runRerankChannels({ sdk, switches, query, items, channels, now } = {}) {
   const startedAt = Date.now();
   // 接受 [{text}] 与纯字符串两种候选，测试可直接传文本。
   const candidates = (Array.isArray(items) ? items : []).map((item) =>
@@ -1714,13 +1715,19 @@ export async function runRerankChannels({ sdk, switches, query, items, channels 
   // 合并不出结果（主路全垮且兜底也垮）时原样保留全部候选，上限同样不掺和：
   // 没有任何分数可排的时候，按条数砍人等于瞎砍。
   const keepLimit = rerankKeepOf(switches);
+  // 分层权重乘在**合并后的分**上，排序与探针分数表都用它：
+  // 乘在服务端原始分上会被随后的批内标准化重新拉伸，等于白乘；
+  // 乘在合并分上，排序看的就是这一轮真正用来取舍的那个数。
+  // merged 本身仍按原样返回（那是「各路的加权平均」，不是最终的排序分）。
+  // 合并失败（null）时没有分数可排，也不在这一层排序，与现有语义一致。
+  const layered = merged === null ? null : applyLayerWeights(merged, candidates, { now });
   const capped = merged === null
     ? { indexes: candidates.map((_, index) => index), dropped: 0 }
-    : dropByKeepIndexes(dropRejectedIndexes(rankRerankIndexes(merged), results), keepLimit);
+    : dropByKeepIndexes(dropRejectedIndexes(rankRerankIndexes(layered), results), keepLimit);
   const indexes = capped.indexes;
   const droppedByKeep = capped.dropped;
   // 分数表只在有合并结果时才有意义；没结果就是空表，不拿 null 填坑。
-  const scores = merged === null ? [] : rerankScoreRows(merged, candidates);
+  const scores = merged === null ? [] : rerankScoreRows(layered, candidates);
 
   return {
     // 探针把两段数字都留下：原始分数看量纲，标准化分数看实际贡献。
@@ -2274,13 +2281,16 @@ export function createRecallHandler(sdk, options = {}) {
     //
     // 链路上的账（后一个数都是前一个数减出来的，对不上就是有人改了顺序）：
     //   recalled = deduped + droppedExact（精确去重丢掉的副本）
-    //   deduped  = droppedNear + droppedCredential + 进精排的条数
+    //   deduped  = droppedEmpty + droppedStale + droppedNear + droppedCredential + 进精排的条数
     //   进精排的条数 = droppedByKeep + rerank.kept（精排没跑时两者都空，kept 就是进精排那些）
     // 于是正常一轮里：
     //   recalled = deduped + droppedExact
-    //   deduped  = droppedNear + droppedCredential + droppedByKeep + kept
+    //   deduped  = droppedEmpty + droppedStale + droppedNear + droppedCredential + droppedByKeep + kept
     // 一个例外：精排全票否决（所有候选都被打 0 分）时 kept=0、droppedByKeep=0，
     // 差出来的那几条是「明确不要」，不归任何一档，也不该算成超编。
+    //
+    // 分层（类型权重 + 时间衰减）排在近重复之后、精排之前，所以它丢掉的空壳与过时条目
+    // 与去重那几笔并列记；没走到这一层的轮次（gate 跳过、请求失败）三项保持 null。
     const summary = {
       // off 表示这一档关着；passed 表示判过且要召回；skipped:* 表示跳过及其原因。
       gate: switches.recallGate === "off" ? "off" : "passed",
@@ -2296,6 +2306,11 @@ export function createRecallHandler(sdk, options = {}) {
       // 一个抓的是同一个身份，一个抓的是「同一段话的另一种存法」，混成一个数就查不出谁在起作用。
       droppedNear: null,
       droppedCredential: null,
+      // 分层那一步丢掉的条数：正文不足门槛的空壳 / 分层后低于过时门槛的条目。
+      droppedEmpty: null,
+      droppedStale: null,
+      // 进入分层那一步的候选按类型计数（含随后被丢掉的）；这一层跑过就是对象，没跑是 null。
+      byType: null,
       rerank: null,
       assemble: null,
       injected: null,
@@ -2487,11 +2502,18 @@ export function createRecallHandler(sdk, options = {}) {
     const near = switches.dedupeNear
       ? nearDedupeCandidates(screened.items, { threshold: switches.dedupeThreshold })
       : { items: screened.items, dropped: 0 };
-    const candidates = near.items;
+    // 分层排在近重复之后、精排之前：名额只发给真能进上下文的条目，
+    // 空壳与过时的条目不该占精排的保留名额——与「去重与凭据过滤提早到精排之前」同一条逻辑。
+    // 只做过滤与记账，不排序：排序仍然在精排那一段。
+    const layered = layerCandidates(near.items, { now: Date.now() });
+    const candidates = layered.items;
     summary.deduped = deduped.length;
     summary.droppedExact = items.length - deduped.length;
     summary.droppedNear = near.dropped;
     summary.droppedCredential = screened.dropped;
+    summary.droppedEmpty = layered.droppedEmpty;
+    summary.droppedStale = layered.droppedStale;
+    summary.byType = layered.byType;
 
     if (!items.length) {
       warnShapeOnce(sdk, result);
@@ -2567,6 +2589,8 @@ export function createRecallHandler(sdk, options = {}) {
             droppedExact: items.length - deduped.length,
             droppedNear: near.dropped,
             droppedCredential: screened.dropped,
+            droppedEmpty: layered.droppedEmpty,
+            droppedStale: layered.droppedStale,
             // 配置里那几条路的总数（含没被叫上的兜底那一路）；下面 channels 里只有真跑了的。
             enabledChannels: outcome.laneCount,
             channels: outcome.channels,

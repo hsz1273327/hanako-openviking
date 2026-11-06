@@ -139,6 +139,64 @@ export const DEDUPE_NEAR_LIMIT_NOTE =
 export const DEDUPE_EXACT_NOTE =
   "精确去重恒开，不可关：uri 相同、或去掉空白后字面完全相同的两条只留一条（分数高的）。它没有取舍可调，关掉只会多注入副本，所以这里不给开关。";
 
+// 召回分层的数值与文案。这一层没有开关（它是判断，不是偏好），
+// 面板只把判据写出来，所以数字只在这里存一份，句子由 RECALL_LAYER_PROFILE 生成，
+// 不把 90 / 0.02 / 40 之类的字面写死在文案里。冒烟会拿它与 src/memory/layer.js 的常量逐项对。
+export const RECALL_LAYER_DECAY_TYPES = Object.freeze(["events", "trajectories", "unknown"]);
+
+export const RECALL_LAYER_PROFILE = Object.freeze({
+  weights: Object.freeze({
+    entities: 1,
+    preferences: 0.95,
+    cases: 0.9,
+    events: 0.75,
+    trajectories: 0.7,
+    unknown: 0.75,
+  }),
+  halfLifeDays: 90,
+  staleFloor: 0.02,
+  minBodyChars: 40,
+});
+
+/** 类型的中文说法：文案里同时带上类型名与它是什么，查日志时才对得上。 */
+export const RECALL_LAYER_TYPE_LABELS = Object.freeze({
+  entities: "长期事实",
+  preferences: "偏好",
+  cases: "案例",
+  events: "过程记录",
+  trajectories: "轨迹记录",
+  unknown: "认不出类型",
+});
+
+/**
+ * 分层说明的正文：权重、哪几类不衰减、半衰期、两个门槛全部从 profile 取。
+ *
+ * 权重按 profile.weights 的键序排（与后端 MEMORY_TYPES + unknown 同序），
+ * 不衰减的那些是「不在 RECALL_LAYER_DECAY_TYPES 里」的键——这样加一种类型时
+ * 只要改数字表，句子跟着变，不会留在旧说法里。
+ */
+export function recallLayerNote(
+  profile = RECALL_LAYER_PROFILE,
+  decayTypes = RECALL_LAYER_DECAY_TYPES,
+) {
+  const entries = Object.entries(profile?.weights || {});
+  const weights = entries
+    .map(([type, weight]) => `${RECALL_LAYER_TYPE_LABELS[type] || type}（${type}）×${weight}`)
+    .join("，");
+  const stable = entries
+    .filter(([type]) => !decayTypes.includes(type))
+    .map(([type]) => type)
+    .join(" / ");
+  const decayed = entries
+    .filter(([type]) => decayTypes.includes(type))
+    .map(([type]) => type)
+    .join(" / ");
+  const halfLife = profile.halfLifeDays;
+  return `召回结果按记忆类型加权：${weights}。${stable} 不随时间衰减；${decayed} 按半衰期 ${halfLife} 天衰减（${halfLife} 天前的一半，${halfLife * 2} 天前的四分之一）。分层后的分数低于 ${profile.staleFloor} 的整条丢掉；正文不足 ${profile.minBodyChars} 字的整条丢掉（只有 uri 的占位条也算空壳）。这是判断，不给开关。`;
+}
+
+export const RECALL_LAYER_NOTE = recallLayerNote();
+
 export const RERANK_CHANNEL_TYPES = Object.freeze(["rerank", "systemone", "model"]);
 export const RERANK_CHANNELS_MAX = 8;
 

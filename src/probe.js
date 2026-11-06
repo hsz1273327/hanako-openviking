@@ -16,6 +16,16 @@ const MAX_TEXT = 120;
 // 精排分数表最多记这么多条：与 src/memory/recall.js 的 RERANK_SCORES_MAX 同一个数，
 // 但不去 import 它：探针只依赖自己，日志形状不跟着召回模块改动而变。
 const SCORE_ROWS_MAX = 10;
+// 记忆类型的键序，与 src/memory/layer.js 的 MEMORY_TYPES / unknown 一致。
+// 这里另存一份而不是去 import：探针只依赖自己，日志形状不跟着召回模块改动而变。
+const MEMORY_TYPE_KEYS = Object.freeze([
+  "entities",
+  "preferences",
+  "cases",
+  "events",
+  "trajectories",
+  "unknown",
+]);
 
 export function createProbe({ dataDir, logger } = {}) {
   const file = path.join(dataDir || ".", "probe.log");
@@ -108,8 +118,10 @@ function shapeOf(event, invocation) {
   }
 
   // 精排：候选 / 条数上限截掉几条 / 保留三个数摆在一起，才知道减在哪一步。
-  // deduped / droppedExact / droppedNear / droppedCredential 是进精排之前那一步的账
-  // （精确去重、近重复、凭据过滤），有了它们才能把「召回 10 条怎么变成精排看得到的 N 条」验算一遍。
+  // deduped / droppedExact / droppedNear / droppedCredential / droppedEmpty / droppedStale
+  // 是进精排之前那一步的账（精确去重、近重复、凭据过滤、分层），
+  // 有了它们才能把「召回 10 条怎么变成精排看得到的 N 条」验算一遍。
+  // 被分层丢掉的条数与 recall/result 用同一次链路上的数，两处必须对得上。
   // scores 只记身份与分数（合并后降序，最多 10 条），正文与端点都不进来。
   if (event === "recall/rerank") {
     return {
@@ -118,6 +130,8 @@ function shapeOf(event, invocation) {
       droppedExact: countOf(invocation.droppedExact),
       droppedNear: countOf(invocation.droppedNear),
       droppedCredential: countOf(invocation.droppedCredential),
+      droppedEmpty: countOf(invocation.droppedEmpty),
+      droppedStale: countOf(invocation.droppedStale),
       enabledChannels: countOf(invocation.enabledChannels),
       kept: countOf(invocation.kept),
       droppedByKeep: countOf(invocation.droppedByKeep),
@@ -129,8 +143,11 @@ function shapeOf(event, invocation) {
 
   // 每轮一条汇总：档位与计数，不带任何正文。
   // 少哪一段就给 null，不拿 0 或空串填坑——「没跑」与「跑了但是 0」必须分得开。
-  // deduped / droppedExact / droppedNear / droppedCredential 摆在 recalled 旁边（而不是塞进 rerank）：
-  // 去重与凭据过滤在精排之前，而精排默认是关的，塞进去就会在多数轮里连那笔账一起消失。
+  // deduped / droppedExact / droppedNear / droppedCredential / droppedEmpty / droppedStale
+  // 摆在 recalled 旁边（而不是塞进 rerank）：去重、凭据过滤与分层都在精排之前，
+  // 而精排默认是关的，塞进去就会在多数轮里连那笔账一起消失。
+  // droppedEmpty / droppedStale 是分层那一步丢掉的空壳与过时条目；
+  // byType 记进入那一层的候选按类型计数：这一层跑过给对象（空批次是 {}），没跑给 null。
   // droppedExact 与 droppedNear 分开记：一个抓同一身份，一个抓「同一段话的另一种存法」。
   // error 只记类别（timeout / network），不记地址也不记响应正文。
   if (event === "recall/result") {
@@ -143,6 +160,9 @@ function shapeOf(event, invocation) {
       droppedExact: countOf(invocation.droppedExact),
       droppedNear: countOf(invocation.droppedNear),
       droppedCredential: countOf(invocation.droppedCredential),
+      droppedEmpty: countOf(invocation.droppedEmpty),
+      droppedStale: countOf(invocation.droppedStale),
+      byType: byTypeOf(invocation.byType),
       rerank: rerankOf(invocation.rerank),
       assemble: assembleOf(invocation.assemble),
       injected: injectedOf(invocation.injected),
@@ -165,6 +185,22 @@ function textOf(value) {
 
 function countOf(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * byType 的探针形状：只认已知类型键 + unknown，值为有限数字，缺项给 null。
+ *
+ * 空对象与 null 必须分得开：{} 表示这一层跑过但没有候选，null 表示压根没走到这一层。
+ * 认不出的键直接丢掉，不让探针跟着上游的数据形状长出新字段。
+ */
+function byTypeOf(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const out = {};
+  for (const type of MEMORY_TYPE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(value, type)) continue;
+    out[type] = countOf(value[type]);
+  }
+  return out;
 }
 
 /**

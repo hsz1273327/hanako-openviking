@@ -249,6 +249,29 @@ import {
   DEDUPE_BASIS_HEAD_CHARS,
   DEDUPE_BASIS_MIN_CHARS,
 } from "../src/memory/assemble.js";
+// 召回分层：类型权重 + 只对过程类做时间衰减（纯函数，冒烟直接验）。
+import {
+  MEMORY_TYPES,
+  MEMORY_TYPE_UNKNOWN,
+  MEMORY_TYPE_WEIGHTS,
+  LAYER_DECAY_TYPES,
+  LAYER_HALF_LIFE_DAYS,
+  LAYER_STALE_FLOOR,
+  LAYER_MIN_BODY_CHARS,
+  LAYER_DAY_MS,
+  memoryTypeOfUri,
+  memoryTypeOfItem,
+  typeWeightOf,
+  decaysWithTime,
+  uriDateOf,
+  timeDateOf,
+  ageDaysOf,
+  decayFactorOf,
+  bodyLengthOf,
+  layerScoreOf,
+  applyLayerWeights,
+  layerCandidates,
+} from "../src/memory/layer.js";
 import {
   readSession,
   patchSession,
@@ -409,6 +432,11 @@ import {
   recallGateOptions,
   recallPromptField,
   recallPromptKey,
+  RECALL_LAYER_PROFILE,
+  RECALL_LAYER_NOTE,
+  RECALL_LAYER_DECAY_TYPES,
+  RECALL_LAYER_TYPE_LABELS,
+  recallLayerNote,
   rerankPromptDraft,
   rerankPromptStatus,
   rerankChannelsText,
@@ -482,6 +510,24 @@ function eq(label, actual, expected) {
 // 负向断言（期望 false）同理，缺字段必须仍然红，那种地方用 `?.` 让值变 undefined。
 const asList = (value) => (Array.isArray(value) ? value : []);
 const asText = (value) => (typeof value === "string" ? value : "");
+
+// 召回分层给正文设了门槛（去掉空白后不足 40 字算空壳），链路夹具里的候选要像真实记忆
+// 那样有正文。这里只补长度与内容，不改断言想验的东西：原来那几个字的标签仍然是开头，
+// 断言里的 includes 照旧成立。每条的填充各不相同，避免近重复把互不相关的用例判成重复。
+const BODY_FILLERS = [
+  "原型评审定在本周四下午三点，走查清单提前一天发到项目群里，阿岚负责收尾那两处文案与标题，评审当天早上再对一遍。",
+  "内测版要先接鉴权，第三方回调的字段名还在等对面确认，本地先拿假服务把整条链路跑通，确认无误再接真回调。",
+  "机房搬迁的演练脚本写了两份，先跑只切读流量的那一份，全量的等下周挑晚上再做，每一步都要留回滚口令。",
+  "交接文档按交付节点分三节，每节写清交付物、验收人和回滚办法，明天先看大纲，定稿后再补时间表。",
+  "日志默认保留三十天，审计那一路单独存一年，冷备归档在对象存储上按月打包，取回时先校验摘要。",
+  "监控告警改了阈值与收件人，旧机器上的规则已经停掉，磁盘水位那条调到百分之九十，短信只发给值班的人。",
+  "域名证书已经续过，内网自签的那几张还在等运维统一换，换完之前浏览器会跳安全提示，点继续访问不影响联调。",
+  "共享盘里最新一版原型的文件名带 v7，旧的那几版都标了归档，拿之前先看清版本号，别把评审过的稿子覆盖掉。",
+  "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量，失败就按演练脚本回退到旧库。",
+  "下周三晚上做切换演练，脚本先在仿真环境里过一遍，确认退出码再上真机，演练结束把耗时和异常都记进值班表。",
+];
+const withBody = (text, seed = 0) =>
+  `${text}${BODY_FILLERS[Math.abs(Number(seed) || 0) % BODY_FILLERS.length]}`;
 
 // ---- ui-src 源码读取：只用于两条 a11y / 切页零副作用的契约 ----
 const UI_SRC_DIR = path.join(import.meta.dirname, "../ui-src/src");
@@ -3226,13 +3272,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         result: {
           entries: [
             {
-              text: "低分的旧版本",
+              text: withBody("低分的旧版本", 0),
               uri: "viking://user/default/peers/mbp-01/memories/a.md",
               score: 0.2,
             },
-            { text: "没分数的一条" },
+            { text: withBody("没分数的一条", 1) },
             {
-              text: "高分的新版本",
+              text: withBody("高分的新版本", 2),
               uri: "viking://user/default/peers/mbp-01/memories/a.md",
               score: 0.9,
             },
@@ -3256,7 +3302,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const injected = asText(asList(result?.payload?.messages)[0]?.content);
     check(
       "注入文本走的是规则档：同 uri 只留一条、留高分那条，没分数的排后面",
-      injected.includes("高分的新版本\n\n没分数的一条") && !injected.includes("低分的旧版本"),
+      injected.includes(`${withBody("高分的新版本", 2)}\n\n${withBody("没分数的一条", 1)}`) &&
+        !injected.includes("低分的旧版本"),
       injected,
     );
     const assembleProbe = probes.find((probe) => probe.event === "recall/assemble");
@@ -3294,9 +3341,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         status: "ok",
         result: {
           entries: [
-            { text: "低分的旧版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.2 },
-            { text: "高分的新版本", uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.9 },
-            { text: "网关原样拄下来的 x-opencode-session: 2f1c8d40", score: 0.95 },
+            { text: withBody("低分的旧版本", 0), uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.2 },
+            { text: withBody("高分的新版本", 2), uri: "viking://user/default/peers/mbp-01/memories/a.md", score: 0.9 },
+            { text: withBody("网关原样拄下来的 x-opencode-session: 2f1c8d40", 3), score: 0.95 },
           ],
         },
       },
@@ -5912,6 +5959,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     droppedExact: null,
     droppedNear: null,
     droppedCredential: null,
+    droppedEmpty: null,
+    droppedStale: null,
+    byType: null,
     rerank: null,
     assemble: null,
     injected: null,
@@ -5925,6 +5975,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     droppedExact: 2,
     droppedNear: 1,
     droppedCredential: 1,
+    droppedEmpty: 1,
+    droppedStale: 2,
+    // 只认已知类型键：bogus 丢掉；值不是有限数字的给 null；空对象与 null 要分得开。
+    byType: { entities: 3, cases: "x", events: 2, unknown: 1, bogus: 9 },
     rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
     assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
     injected: { chars: 3000, tokens: 900 },
@@ -5937,6 +5991,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     recalled: "10",
     deduped: "8",
     droppedCredential: null,
+    droppedEmpty: "3",
+    droppedStale: null,
+    byType: {},
     rerank: { mode: "llm", lanes: 1, kept: null, droppedByKeep: null, fallback: "none" },
     assemble: null,
     injected: { chars: 3000 },
@@ -5963,6 +6020,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         droppedExact: null,
         droppedNear: null,
         droppedCredential: null,
+        droppedEmpty: null,
+        droppedStale: null,
+        byType: null,
         rerank: null,
         assemble: null,
         injected: null,
@@ -5976,6 +6036,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         droppedExact: 2,
         droppedNear: 1,
         droppedCredential: 1,
+        droppedEmpty: 1,
+        droppedStale: 2,
+        byType: { entities: 3, cases: null, events: 2, unknown: 1 },
         rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
         injected: { chars: 3000, tokens: 900 },
@@ -5992,8 +6055,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       lines[2].shape.assemble,
       lines[2].shape.injected.tokens,
       lines[2].shape.gate,
+      lines[2].shape.droppedEmpty,
+      lines[2].shape.droppedStale,
     ],
-    [null, null, null, null, null, null, null],
+    [null, null, null, null, null, null, null, null, null],
+  );
+  eq(
+    "byType 只收已知类型键：脏值给 null、未知键丢掉；{}（这一层跑过、没有候选）与 null（没走这一层）分得开",
+    [lines[1].shape.byType, lines[2].shape.byType, lines[0].shape.byType],
+    [{ entities: 3, cases: null, events: 2, unknown: 1 }, {}, null],
   );
   eq(
     "recall/result 只收档位与计数：查询那一段只有 mode / chars / turns / truncated，没地方放正文",
@@ -6050,6 +6120,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     droppedExact: 1,
     droppedNear: 2,
     droppedCredential: 1,
+    droppedEmpty: 2,
+    droppedStale: 1,
     enabledChannels: 2,
     kept: 5,
     droppedByKeep: 3,
@@ -6077,6 +6149,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         droppedExact: 1,
         droppedNear: 2,
         droppedCredential: 1,
+        droppedEmpty: 2,
+        droppedStale: 1,
         enabledChannels: 2,
         kept: 5,
         droppedByKeep: 3,
@@ -8343,7 +8417,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const infos = [];
   const probes = [];
-  const mock = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+  const mock = mockFetch({ body: { status: "ok", result: { rendered: withBody("不该召回") } } });
   const sdk = recallSdk({
     values: {
       enabled: true,
@@ -8409,7 +8483,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq("probe 开关关着时不写探针", probesOff.length, 0);
 
   // 反例：含指代词的短句照常召回。
-  const recallMock = mockFetch({ body: { status: "ok", result: { rendered: "该召回" } } });
+  const recallMock = mockFetch({ body: { status: "ok", result: { rendered: withBody("该召回") } } });
   const recallHandler = createRecallHandler(
     recallSdk({
       values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", recallGate: "rules" },
@@ -8435,7 +8509,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // 用例 1：rules + context + 短指令 + 长历史 -> 跳过，不发请求。
   {
-    const m = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+    const m = mockFetch({ body: { status: "ok", result: { rendered: withBody("不该召回") } } });
     const h = createRecallHandler(
       recallSdk({
         values: {
@@ -8460,7 +8534,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // 用例 2：rules + context + 带指代词 -> 不跳过，查询是拼接结果。
   {
-    const m = mockFetch({ body: { status: "ok", result: { rendered: "上下文召回" } } });
+    const m = mockFetch({ body: { status: "ok", result: { rendered: withBody("上下文召回") } } });
     const h = createRecallHandler(
       recallSdk({
         values: {
@@ -8489,7 +8563,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // 用例 3：rules + last + 短指令 + 无历史 -> 跳过。
   {
-    const m = mockFetch({ body: { status: "ok", result: { rendered: "不该召回" } } });
+    const m = mockFetch({ body: { status: "ok", result: { rendered: withBody("不该召回") } } });
     const h = createRecallHandler(
       recallSdk({
         values: {
@@ -8512,7 +8586,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // 用例 4：off + context + 短指令 + 有历史 -> 不跳过。
   {
-    const m = mockFetch({ body: { status: "ok", result: { rendered: "关闭判断后照常召回" } } });
+    const m = mockFetch({ body: { status: "ok", result: { rendered: withBody("关闭判断后照常召回") } } });
     const h = createRecallHandler(
       recallSdk({
         values: {
@@ -8540,7 +8614,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   }
 
   // 默认 off：同样的短指令照常召回，行为不比现在更差。
-  const offMock = mockFetch({ body: { status: "ok", result: { rendered: "关闭判断后照常召回" } } });
+  const offMock = mockFetch({ body: { status: "ok", result: { rendered: withBody("关闭判断后照常召回") } } });
   const offModeHandler = createRecallHandler(
     recallSdk({
       values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
@@ -8643,7 +8717,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gatePrompt: DEFAULT_GATE_PROMPT,
     probe: true,
   };
-  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+  const recallBody = { status: "ok", result: { rendered: withBody("该召回") } };
 
   // ---- default：走 utility，说不需 -> 跳过 ----
   {
@@ -8942,7 +9016,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 {
   const dir = path.join(import.meta.dirname, ".tmp-recall-gate-decision");
   fs.rmSync(dir, { recursive: true, force: true });
-  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+  const recallBody = { status: "ok", result: { rendered: withBody("该召回") } };
   const values = {
     enabled: true,
     apiKey: "k",
@@ -9810,7 +9884,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 {
   const dir = path.join(import.meta.dirname, ".tmp-recall-gate-fallback");
   fs.rmSync(dir, { recursive: true, force: true });
-  const recallBody = { status: "ok", result: { rendered: "该召回" } };
+  const recallBody = { status: "ok", result: { rendered: withBody("该召回") } };
 
   const base = {
     enabled: true,
@@ -10314,7 +10388,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankLaneSchema: String(RERANK_LANE_SCHEMA),
     rerankChannels: modelChannelJson,
   };
-  const entries = [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }];
+  const entries = [
+    { text: withBody("第一条", 0) },
+    { text: withBody("第二条", 1) },
+    { text: withBody("第三条", 2) },
+  ];
   const bodyWith = (list) => ({ status: "ok", result: { rendered: "", digest: "", entries: list } });
   const contentOf = (result) => result?.payload?.messages?.[0]?.content || "";
 
@@ -10483,7 +10561,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 候选只有 1 条：没有可挑的，不问模型 ----
   {
-    const mock = mockFetch({ body: bodyWith([{ text: "唯一一条" }]) });
+    const mock = mockFetch({ body: bodyWith([{ text: withBody("唯一一条", 0) }]) });
     const fake = modelSdk({ utility: () => ({ text: "无" }) });
     const handler = createRecallHandler(
       recallSdk({ values, fetchImpl: mock.fetchImpl, dataDir: dir, models: fake.models }),
@@ -11843,7 +11921,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         result: {
           rendered: "",
           digest: "",
-          entries: [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }],
+          entries: [
+            { text: withBody("第一条", 0) },
+            { text: withBody("第二条", 1) },
+            { text: withBody("第三条", 2) },
+          ],
         },
       },
     });
@@ -11967,7 +12049,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       result: {
         rendered: "",
         digest: "",
-        entries: [{ text: "第一条" }, { text: "第二条" }, { text: "第三条" }],
+        entries: [
+          { text: withBody("第一条", 0) },
+          { text: withBody("第二条", 1) },
+          { text: withBody("第三条", 2) },
+        ],
       },
     };
     const serviceOk = () =>
@@ -12626,7 +12712,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 端到端：探针与汇总行都要看得到 ----
   {
     const probes = [];
-    const entries = KEEP_ITEMS.map((item) => ({ ...item }));
+    const entries = KEEP_ITEMS.map((item, index) => ({ ...item, text: withBody(item.text, index) }));
     const rerankFetch = rerankLaneOf(KEEP_SCORES);
     const recallFetch = mockFetch({ body: { status: "ok", result: { entries } } }).fetchImpl;
     const handler = createRecallHandler(
@@ -12753,18 +12839,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 十条候选，两对同 uri 副本：a 与 b 各有低分旧版 / 高分新版。
   // 每条带一段各自的正文：标签只有几个字，近重复默认开着（阈值 0.6），只靠几个字的标签会把
   // 互不相关的条目判成近重复——那是夹具失真，这一节要测的是「去重先于截条数」而不是判重。
-  const PAIR_FILLER = [
-    "原型评审定在本周四下午，走查清单提前一天发到群里，阿岚负责收尾那两处文案。",
-    "内测版要先接鉴权，第三方回调的字段名还在等对面确认，本地先拿假服务跑通。",
-    "机房搬迁的演练脚本写了两份，先跑只切读流量的那一份，全量的等下周。",
-    "交接文档按交付节点分三节，每节写交付物、验收人和回滚办法，明天先看大纲。",
-    "日志默认保留三十天，审计那一路单独存一年，冷备归档在对象存储上按月打包。",
-    "监控告警改了阈值与收件人，旧机器上的规则已经停掉，磁盘水位调到百分之九十。",
-    "域名证书已经续过，内网自签的那几张还在等运维统一换，换完之前会跳安全提示。",
-    "共享盘里最新一版原型的文件名带 v7，旧的那几版我标了归档，别拿错。",
-    "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量。",
-    "下周三晚上做切换演练，脚本先在仿真环境里过一遍，确认退出码再上真机。",
-  ];
+  const PAIR_FILLER = BODY_FILLERS;
   const PAIR_ENTRIES = [
     { text: `甲的低分旧版。${PAIR_FILLER[0]}`, uri: "viking://user/default/m/a.md", score: 0.2 },
     { text: `乙的低分旧版。${PAIR_FILLER[1]}`, uri: "viking://user/default/m/b.md", score: 0.3 },
@@ -12813,7 +12888,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const CRED_ENTRIES = [
     { text: "网关原样拄下来的 key: sk-live-4f9a2b7c8d1e6f3a", uri: "viking://user/default/m/dirty.md", score: 0.99 },
     ...Array.from({ length: 9 }, (_, index) => ({
-      text: `干净记录${index + 1}`,
+      text: withBody(`干净记录${index + 1}`, index),
       uri: `viking://user/default/m/clean${index}.md`,
     })),
   ];
@@ -12838,21 +12913,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [10, 10, 1, 9, 5, 5, false, true],
   );
 
-  // 四个数与不变式：后一个数都是前一个数减出来的。
+  // 六个数与不变式：后一个数都是前一个数减出来的。
   const invariantOf = ({ row, detail, assembled }) => ({
     // recalled = deduped + 去重丢掉的那几条（副本数由这两个数相减得出）
     dedupe: row.recalled - row.deduped >= 0 && row.deduped + (row.recalled - row.deduped) === row.recalled,
-    // deduped = droppedCredential + droppedByKeep + kept
-    chain: row.deduped === row.droppedCredential + row.rerank.droppedByKeep + row.rerank.kept,
-    // 精排看到的条数 = 去重后减掉凭据那几条
-    seen: detail.candidates === row.deduped - row.droppedCredential,
+    // deduped = droppedEmpty + droppedStale + droppedNear + droppedCredential + droppedByKeep + kept
+    chain:
+      row.deduped ===
+      row.droppedEmpty +
+        row.droppedStale +
+        row.droppedNear +
+        row.droppedCredential +
+        row.rerank.droppedByKeep +
+        row.rerank.kept,
+    // 精排看到的条数 = 去重后减掉凭据、空壳与过时那几条
+    seen:
+      detail.candidates ===
+      row.deduped - row.droppedCredential - row.droppedEmpty - row.droppedStale,
     // 汇总行与细节探针说的是同一件事
-    same: detail.kept === row.rerank.kept && detail.droppedByKeep === row.rerank.droppedByKeep,
+    same:
+      detail.kept === row.rerank.kept &&
+      detail.droppedByKeep === row.rerank.droppedByKeep &&
+      detail.droppedEmpty === row.droppedEmpty &&
+      detail.droppedStale === row.droppedStale,
     // 组装已是幂等的第二道网：正常路径上一条都丢不掉，段数就是精排留下的条数
     idempotent: assembled.assemble.droppedCredential === 0 && assembled.assemble.kept === row.rerank.kept,
   });
   eq(
-    "计数对得上：recalled / deduped / droppedCredential / droppedByKeep / kept 五个数的不变式都成立",
+    "计数对得上：recalled / deduped / droppedEmpty / droppedStale / droppedNear / droppedCredential / droppedByKeep / kept 的不变式都成立",
     [invariantOf(pair), invariantOf(cred)],
     [
       { dedupe: true, chain: true, seen: true, same: true, idempotent: true },
@@ -12873,6 +12961,372 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   fs.rmSync(SCREEN_DIR, { recursive: true, force: true });
   resetRuntimeTransport();
+}
+
+// ================= 召回分层：类型权重与时间衰减 =================
+{
+  // 为什么要有这一节：共享库里最多的是过程记录（events / trajectories），真正有用的长期事实
+  // （entities / preferences / cases）数量少，只按相似度排会被过程记录按数量淹掉。
+  // 这一层按类型给权重，并只让过程类随时间衰减；两个门槛（正文 / 过时）负责把空壳与过时条目
+  // 在精排之前拿掉，不占保留名额。它没有开关，所以这一节把判据全钉住。
+  const LAYER_NOW = Date.UTC(2026, 10, 27);
+  const dayString = (days) => new Date(LAYER_NOW - days * LAYER_DAY_MS).toISOString().slice(0, 10);
+  const segmentedUri = (type, days) => {
+    const [year, month, day] = dayString(days).split("-");
+    return `viking://user/default/memories/${type}/${year}/${month}/${day}/note.md`;
+  };
+  const singleUri = (type, days) =>
+    `viking://user/default/memories/${type}/${dayString(days)}/note.md`;
+
+  // ---- 1. 类型解析：五个类型段 + 跨门牌写法，其余一律 unknown ----
+  const TYPE_URIS = Object.freeze({
+    entities: "viking://user/default/memories/entities/nas.md",
+    preferences: "viking://user/default/memories/preferences/style.md",
+    cases: "viking://user/default/memories/cases/incident.md",
+    events: "viking://user/default/memories/events/log.md",
+    trajectories: "viking://user/default/memories/trajectories/run.md",
+  });
+  eq(
+    "类型解析：五种类型各解对（含 peers/<name>/memories 的跨门牌写法）；空串 / 非字符串 / 没有 memories 段 / 段名不认识都归 unknown，永不返回空串",
+    [
+      MEMORY_TYPES.map((type) => memoryTypeOfUri(TYPE_URIS[type])),
+      memoryTypeOfUri("viking://user/default/peers/hermes/memories/trajectories/2026/10/27/x.md"),
+      ["", null, 12, "viking://user/default/other/entities/a.md", "viking://user/default/memories", "viking://user/default/memories/skills/a.md"].map(memoryTypeOfUri),
+    ],
+    [MEMORY_TYPES, "trajectories", Array.from({ length: 6 }, () => MEMORY_TYPE_UNKNOWN)],
+  );
+  eq(
+    "条目自带 type 只在 uri 解不出时兜底：uri 认得出就以 uri 为准；两者都认不出才 unknown",
+    [
+      memoryTypeOfItem({ uri: "viking://user/default/m/a.md", type: "events" }),
+      memoryTypeOfItem({ uri: "viking://user/default/memories/entities/a.md", type: "events" }),
+      memoryTypeOfItem({ type: "trajectories" }),
+      memoryTypeOfItem({ type: "skills" }),
+      memoryTypeOfItem({}),
+    ],
+    ["events", "entities", "trajectories", MEMORY_TYPE_UNKNOWN, MEMORY_TYPE_UNKNOWN],
+  );
+  eq(
+    "权重与衰减表逐项对：事实 1 / 偏好 0.95 / 案例 0.9 / 过程 0.75 / 轨迹 0.7；unknown 与认不出的类型都按 0.75，只有过程类衰减",
+    [
+      MEMORY_TYPES.map((type) => typeWeightOf(type)),
+      typeWeightOf("unknown"),
+      typeWeightOf("skills"),
+      MEMORY_TYPES.map((type) => decaysWithTime(type)),
+      decaysWithTime("unknown"),
+      decaysWithTime("skills"),
+    ],
+    [
+      [1, 0.95, 0.9, 0.75, 0.7],
+      0.75,
+      0.75,
+      [false, false, false, true, true],
+      true,
+      true,
+    ],
+  );
+
+  // ---- 2. entities 不衰减：2020 年的机器型号仍是原分（权重 1，时间因子 1） ----
+  const OLD_ENTITY = {
+    uri: "viking://user/default/memories/entities/2020/01/01/nas.md",
+    text: withBody("机器型号与 NAS 地址", 0),
+    score: 0.8,
+  };
+  const oldEntityAge = ageDaysOf(OLD_ENTITY, LAYER_NOW);
+  eq(
+    "entities 不随时间衰减：uri 里带 2020 年的实体，ageDays 是正数、factor 是 1，分层分就是原始分",
+    [
+      uriDateOf(OLD_ENTITY.uri),
+      oldEntityAge > 0,
+      decayFactorOf(memoryTypeOfItem(OLD_ENTITY), oldEntityAge),
+      layerScoreOf(OLD_ENTITY, { now: LAYER_NOW }),
+    ],
+    [{ year: 2020, month: 1, day: 1 }, true, 1, 0.8],
+  );
+
+  // ---- 3. 半衰期：90 天 0.5 / 180 天 0.25 / 0 天 1，两种过程类一样 ----
+  const halfLifeCases = ["events", "trajectories"].map((type) =>
+    [90, 180, 0].map((days) => decayFactorOf(type, ageDaysOf({ uri: segmentedUri(type, days) }, LAYER_NOW))),
+  );
+  eq(
+    "半衰期 90 天：90 天前 0.5 / 180 天前 0.25 / 0 天 1；events 与 trajectories 同一个公式",
+    halfLifeCases,
+    [
+      [0.5, 0.25, 1],
+      [0.5, 0.25, 1],
+    ],
+  );
+
+  // ---- 4. 日期优先级：uri 日期 > 条目 time；都没有给 null；非法日期不滚月 ----
+  const uriDated = { uri: segmentedUri("events", 30), time: "2020-01-01" };
+  const timeOnly = { uri: "viking://user/default/memories/events/note.md", time: dayString(10) };
+  const noTime = { uri: "viking://user/default/memories/events/note.md" };
+  eq(
+    "日期优先级：uri 有日期就用它（条目 time 是另一天也不管）/ uri 没日期才用 time / 两者都没有给 null，factor 仍是 1",
+    [
+      uriDateOf(segmentedUri("events", 30)),
+      ageDaysOf(uriDated, LAYER_NOW),
+      ageDaysOf(timeOnly, LAYER_NOW),
+      ageDaysOf(noTime, LAYER_NOW),
+      decayFactorOf("events", ageDaysOf(noTime, LAYER_NOW)),
+      uriDateOf(singleUri("events", 30)),
+    ],
+    [
+      { year: Number(dayString(30).slice(0, 4)), month: Number(dayString(30).slice(5, 7)), day: Number(dayString(30).slice(8, 10)) },
+      30,
+      10,
+      null,
+      1,
+      { year: Number(dayString(30).slice(0, 4)), month: Number(dayString(30).slice(5, 7)), day: Number(dayString(30).slice(8, 10)) },
+    ],
+  );
+  eq(
+    "非法日期退回 null，不 new Date() 静默滚到下个月：2 月 30 日在单段 / 三段 / time 字段里都不算日期",
+    [
+      uriDateOf("viking://user/default/memories/events/2026-02-30/a.md"),
+      uriDateOf("viking://user/default/memories/events/2026/02/30/a.md"),
+      timeDateOf("2026-02-30"),
+      timeDateOf("2026-02-30T10:00:00Z"),
+      ageDaysOf({ uri: "viking://user/default/memories/events/2026-02-30/a.md" }, LAYER_NOW),
+    ],
+    [null, null, null, null, null],
+  );
+
+  // ---- 4b. 纯数字时间戳：按量级判秒 / 毫秒，两种写法给出同一个时刻 ----
+  // 服务端的 modTime / timestamp 有秒级也有毫秒级（recall.js 把数字也留成串）。
+  // 一律按毫秒读会把秒级落到 1970 年，ageDays 两万天、factor 约等于 0，
+  // 一条 events 会被静默当成过时丢掉——这是整类记忆的损失，不是边角。
+  const secondStamp = Math.floor(Date.UTC(2026, 10, 20, 12) / 1000);
+  const msStamp = secondStamp * 1000;
+  const secondItem = {
+    uri: "viking://user/default/memories/events/note.md",
+    text: withBody("秒级时间戳的一条过程记录", 7),
+    score: 0.1,
+    time: String(secondStamp),
+  };
+  const secondLayer = layerCandidates([secondItem], { now: LAYER_NOW });
+  eq(
+    "纯数字时间戳按量级判秒 / 毫秒：同一时刻的秒级与毫秒级（数字与纯数字字符串）给出同一个 Date；events 的 time 是秒级时不会被判过时",
+    [
+      [timeDateOf(secondStamp)?.getTime(), timeDateOf(String(secondStamp))?.getTime()],
+      [timeDateOf(msStamp)?.getTime(), timeDateOf(String(msStamp))?.getTime()],
+      ageDaysOf(secondItem, LAYER_NOW),
+      layerScoreOf(secondItem, { now: LAYER_NOW }) >= LAYER_STALE_FLOOR,
+      secondLayer.droppedStale,
+      secondLayer.items,
+    ],
+    [
+      [msStamp, msStamp],
+      [msStamp, msStamp],
+      6.5,
+      true,
+      0,
+      [secondItem],
+    ],
+  );
+
+  // ---- 5. 过时门槛：分层后 < 0.02 丢，略高于 0.02 留 ----
+  const staleItem = {
+    uri: "viking://user/default/memories/events/2020/01/01/stale.md",
+    text: withBody("过时的一条过程记录", 1),
+    score: 0.02,
+  };
+  const boundaryItem = {
+    uri: segmentedUri("events", 0),
+    text: withBody("刚好过线的一条过程记录", 2),
+    score: 0.03,
+  };
+  const staleLayer = layerCandidates([staleItem, boundaryItem], { now: LAYER_NOW });
+  eq(
+    "过时门槛：分层后低于 0.02 的整条丢、记 droppedStale；0.03 × 0.75 = 0.0225 刚好高于门槛，留着",
+    [
+      layerScoreOf(staleItem, { now: LAYER_NOW }) < LAYER_STALE_FLOOR,
+      layerScoreOf(boundaryItem, { now: LAYER_NOW }) >= LAYER_STALE_FLOOR,
+      staleLayer.droppedStale,
+      staleLayer.items,
+      staleLayer.byType,
+    ],
+    [true, true, 1, [boundaryItem], { events: 2 }],
+  );
+
+  // ---- 6. 正文门槛：空壳丢、40 字出头留；没有分数不算过时 ----
+  const shortItem = { uri: "viking://user/default/memories/events/short.md", text: "短".repeat(20) };
+  const exactItem = { uri: "viking://user/default/memories/entities/exact.md", text: "正".repeat(LAYER_MIN_BODY_CHARS) };
+  const placeholderItem = {
+    uri: "viking://user/default/memories/events/2026/11/27/ph.md",
+    score: 0.9,
+    text: '<memory uri="viking://user/default/memories/events/2026/11/27/ph.md" type="events" score="0.9"></memory>',
+  };
+  const noScoreItem = { uri: "viking://user/default/memories/entities/noscore.md", text: withBody("没有分数的一条", 3) };
+  const bodyLayer = layerCandidates([shortItem, exactItem, placeholderItem, noScoreItem], { now: LAYER_NOW });
+  eq(
+    "正文门槛：去空白后不足 40 字丢、40 字留；只有 uri 的 <memory> 占位条剥掉标记后是空壳；没有分数的条目 layerScoreOf 是 null、不参与过时判定也不丢",
+    [
+      bodyLengthOf(shortItem),
+      bodyLengthOf(exactItem),
+      bodyLengthOf(placeholderItem),
+      bodyLayer.droppedEmpty,
+      bodyLayer.droppedStale,
+      bodyLayer.items,
+      layerScoreOf(noScoreItem, { now: LAYER_NOW }),
+    ],
+    [20, LAYER_MIN_BODY_CHARS, 0, 2, 0, [exactItem, noScoreItem], null],
+  );
+  eq(
+    "空批次：byType 是 {}（不是 null）、两个丢弃计数都是 0、items 是空数组——这一层跑过就一定有一份账",
+    layerCandidates([], { now: LAYER_NOW }),
+    { items: [], droppedEmpty: 0, droppedStale: 0, byType: {} },
+  );
+
+  // ---- 7. 排序：同分时 2020 年的 entity 排到 30 天前的 event 前面 ----
+  const recentEvent = {
+    uri: segmentedUri("events", 30),
+    text: withBody("三十天前的一次排查过程", 4),
+    score: 0.8,
+  };
+  const entity2020 = {
+    uri: "viking://user/default/memories/entities/2020/01/01/nas.md",
+    text: withBody("2020 年就定下的 NAS 型号", 5),
+    score: 0.8,
+  };
+  const layeredScores = applyLayerWeights([0.8, 0.8], [recentEvent, entity2020], { now: LAYER_NOW });
+  eq(
+    "同分排序：applyLayerWeights 之后 event 被类型权重与衰减压低，rankRerankIndexes 把 entity 排前面",
+    [layeredScores[0] < layeredScores[1], rankRerankIndexes(layeredScores)],
+    [true, [1, 0]],
+  );
+
+  // 真实链路：假精排通道给 event 与 entity 同一个分（0.9），第三条低分只用来让这一路不弃权。
+  // 若没有分层，同分按输入顺序排（event 在前）；有分层则 entity 必须顶上来。
+  {
+    const dir = path.join(import.meta.dirname, ".tmp-layer-rerank");
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetRuntimeTransport();
+    const third = {
+      uri: "viking://user/default/memories/cases/other.md",
+      text: withBody("排在后面的一条案例", 6),
+      score: 0.1,
+    };
+    const fetchImpl = async (url) => {
+      if (!String(url).includes("/v1/rerank")) throw new Error("这一轮只该打精排端点");
+      return new Response(
+        JSON.stringify({
+          results: [
+            { index: 0, relevance_score: 0.9 },
+            { index: 1, relevance_score: 0.9 },
+            { index: 2, relevance_score: 0.1 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const lane = { type: "rerank", url: "http://127.0.0.1:9999", model: "bge", weight: 1, enabled: true };
+    const outcome = await runRerankChannels({
+      sdk: recallSdk({ values: {}, dataDir: dir, fetchImpl }),
+      switches: { rerankChannels: [lane] },
+      query: "分层排序",
+      items: [recentEvent, entity2020, third],
+      channels: [lane],
+      now: LAYER_NOW,
+    });
+    eq(
+      "runRerankChannels 真链路：两条同分候选里 entity 排第一；未分层时同分保持输入顺序（event 本来在前）",
+      [outcome.indexes, outcome.kept.map((item) => item.uri)],
+      [[1, 0, 2], [entity2020.uri, recentEvent.uri, third.uri]],
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetRuntimeTransport();
+  }
+
+  // ---- 8. 计数与不变式：空壳 / 过时 / 类型计数在真实链路上对得上 ----
+  {
+    const dir = path.join(import.meta.dirname, ".tmp-layer-count");
+    fs.rmSync(dir, { recursive: true, force: true });
+    const entries = [
+      { uri: "viking://user/default/memories/entities/nas.md", text: withBody("长期事实一条", 0), score: 0.9 },
+      { uri: "viking://user/default/memories/events/2020/01/01/stale.md", text: withBody("过时的过程一条", 1), score: 0.01 },
+      { uri: segmentedUri("events", 0).replace("note.md", "short.md"), text: "太短", score: 0.8 },
+      { uri: segmentedUri("events", 0), text: withBody("新鲜的过程一条", 2), score: 0.6 },
+      { text: withBody("认不出类型的一条", 3), score: 0.5 },
+    ];
+    const probes = [];
+    const mock = mockFetch({ body: { status: "ok", result: { entries } } });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    await handler({
+      payload: { messages: [{ role: "user", content: "分层这一轮的账" }] },
+      session: { sessionId: "layer-count" },
+    });
+    const row = probes.find((probe) => probe.event === "recall/result")?.invocation;
+    const sumOfByType = Object.values(row?.byType || {}).reduce((sum, value) => sum + value, 0);
+    eq(
+      "分层计数：召回 5 / 空壳 1 / 过时 1 / 进组装 3；byType 各项之和等于进入这一层的条数，键序按 MEMORY_TYPES、unknown 最后",
+      [
+        row?.recalled,
+        row?.deduped,
+        row?.droppedEmpty,
+        row?.droppedStale,
+        row?.droppedNear,
+        row?.droppedCredential,
+        row?.assemble?.kept,
+        row?.byType,
+        Object.keys(row?.byType || {}),
+        sumOfByType,
+      ],
+      [5, 5, 1, 1, 0, 0, 3, { entities: 1, events: 3, unknown: 1 }, ["entities", "events", "unknown"], 5],
+    );
+    eq(
+      "链路不变式：deduped = droppedEmpty + droppedStale + droppedNear + droppedCredential + droppedByKeep + kept（这一轮精排没跑，droppedByKeep 按 0 算）",
+      row?.deduped ===
+        row?.droppedEmpty +
+          row?.droppedStale +
+          row?.droppedNear +
+          row?.droppedCredential +
+          0 +
+          row?.assemble?.kept,
+      true,
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ---- 9. 跨端一致：面板只读说明的数字与后端常量逐项相等 ----
+  eq(
+    "跨端同值：RECALL_LAYER_PROFILE 的 weights / halfLifeDays / staleFloor / minBodyChars 与 src/memory/layer.js 的常量逐项相等",
+    [
+      RECALL_LAYER_PROFILE.weights,
+      RECALL_LAYER_PROFILE.halfLifeDays,
+      RECALL_LAYER_PROFILE.staleFloor,
+      RECALL_LAYER_PROFILE.minBodyChars,
+      RECALL_LAYER_DECAY_TYPES,
+    ],
+    [
+      MEMORY_TYPE_WEIGHTS,
+      LAYER_HALF_LIFE_DAYS,
+      LAYER_STALE_FLOOR,
+      LAYER_MIN_BODY_CHARS,
+      LAYER_DECAY_TYPES,
+    ],
+  );
+  const noteNumbers = [
+    LAYER_HALF_LIFE_DAYS,
+    LAYER_STALE_FLOOR,
+    LAYER_MIN_BODY_CHARS,
+    ...Object.values(MEMORY_TYPE_WEIGHTS),
+  ];
+  check(
+    "分层说明里的数字全部来自常量（半衰期 / 过时门槛 / 正文门槛 / 五个权重），没有写死在句子里",
+    noteNumbers.every((value) => RECALL_LAYER_NOTE.includes(String(value))) &&
+      MEMORY_TYPES.every((type) => RECALL_LAYER_NOTE.includes(type)) &&
+      Object.keys(RECALL_LAYER_TYPE_LABELS).length >= 6 &&
+      recallLayerNote() === RECALL_LAYER_NOTE,
+    `${RECALL_LAYER_NOTE} / ${JSON.stringify(noteNumbers)}`,
+  );
 }
 
 // ================= 近重复：字符 3-gram 的 Jaccard（纯算法，不调模型） =================
@@ -13103,14 +13557,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const DIR = path.join(import.meta.dirname, ".tmp-near-dedupe");
   fs.rmSync(DIR, { recursive: true, force: true });
 
+  // 这一节的 BASE / PREFIXED / PUNCTUATED 只有十几个字，直接喂给召回链路会被分层当成空壳。
+  // 三条补上**同一段**尾部（相似度关系不变），UNRELATED 补另一段，避免它跟那三条凑近。
+  const NEAR_SUFFIX = BODY_FILLERS[0];
+  const BASE_LONG = `${BASE}${NEAR_SUFFIX}`;
+  const PREFIXED_LONG = `${PREFIXED}${NEAR_SUFFIX}`;
+  const PUNCTUATED_LONG = `${PUNCTUATED}${NEAR_SUFFIX}`;
+  const UNRELATED_LONG = `${UNRELATED}${BODY_FILLERS[1]}`;
   const ENTRIES = [
-    { text: BASE, uri: "viking://user/default/m/n1.md", score: 0.4 },
-    { text: PREFIXED, uri: "viking://user/default/m/n2.md", score: 0.95 },
-    { text: PUNCTUATED, uri: "viking://user/default/m/n3.md", score: 0.7 },
-    { text: UNRELATED, uri: "viking://user/default/m/n4.md", score: 0.3 },
+    { text: BASE_LONG, uri: "viking://user/default/m/n1.md", score: 0.4 },
+    { text: PREFIXED_LONG, uri: "viking://user/default/m/n2.md", score: 0.95 },
+    { text: PUNCTUATED_LONG, uri: "viking://user/default/m/n3.md", score: 0.7 },
+    { text: UNRELATED_LONG, uri: "viking://user/default/m/n4.md", score: 0.3 },
     // 这一条与上一条字面一字不差、uri 也相同：归精确去重，不归近重复。
-    { text: UNRELATED, uri: "viking://user/default/m/n4.md", score: 0.6 },
-    { text: "明天下午三点开评审会", uri: "viking://user/default/m/n6.md", score: 0.2 },
+    { text: UNRELATED_LONG, uri: "viking://user/default/m/n4.md", score: 0.6 },
+    { text: withBody("明天下午三点开评审会", 2), uri: "viking://user/default/m/n6.md", score: 0.2 },
   ];
 
   let NEAR_SESSION = 0;
@@ -13163,10 +13624,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [true, false, true, true],
   );
   eq(
-    "不变式：recalled = deduped + droppedExact；deduped = droppedNear + droppedCredential + droppedByKeep + kept",
+    "不变式：recalled = deduped + droppedExact；deduped = droppedEmpty + droppedStale + droppedNear + droppedCredential + droppedByKeep + kept",
     [
       on.row?.recalled === on.row?.deduped + on.row?.droppedExact,
-      on.row?.deduped === on.row?.droppedNear + on.row?.droppedCredential + 0 + on.row?.assemble?.kept,
+      on.row?.deduped ===
+        on.row?.droppedEmpty +
+          on.row?.droppedStale +
+          on.row?.droppedNear +
+          on.row?.droppedCredential +
+          0 +
+          on.row?.assemble?.kept,
     ],
     [true, true],
   );
@@ -13471,7 +13938,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   const TEXT = "什么时候交稿？";
   const entriesOf = (...texts) =>
-    texts.map((text, index) => ({ text, score: 1 - index * 0.1 }));
+    texts.map((text, index) => ({ text: withBody(text, index), score: 1 - index * 0.1 }));
 
   // 跑一轮召回，把探针整份收下来。values 覆盖默认配置，服务端返回的候选由调用方给。
   // messages / fetchImpl 两个可选口用来验 context 拼接与请求失败那两路。
@@ -13585,9 +14052,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     values: { assembleMode: "off" },
     sessionId: "result-assemble-off",
     entries: [
-      { text: "同一段", uri: "viking://user/default/m/a.md", score: 0.2 },
-      { text: "同一段", uri: "viking://user/default/m/a.md", score: 0.9 },
-      { text: "另一段", score: 0.1 },
+      { text: withBody("同一段", 0), uri: "viking://user/default/m/a.md", score: 0.2 },
+      { text: withBody("同一段", 1), uri: "viking://user/default/m/a.md", score: 0.9 },
+      { text: withBody("另一段", 2), score: 0.1 },
     ],
   });
   eq(
@@ -13636,9 +14103,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const dirty = await run({
     sessionId: "result-credential",
     entries: [
-      { text: "干净的记录", score: 0.9 },
-      { text: "网关原样拄下来的 key: sk-live-4f9a2b7c8d1e6f3a", score: 0.8 },
-      { text: "x-opencode-session: 2f1c8d40", score: 0.7 },
+      { text: withBody("干净的记录", 0), score: 0.9 },
+      { text: withBody("网关原样拄下来的 key: sk-live-4f9a2b7c8d1e6f3a", 1), score: 0.8 },
+      { text: withBody("x-opencode-session: 2f1c8d40", 2), score: 0.7 },
     ],
   });
   const dirtyContent = asText(asList(dirty.result?.payload?.messages)[0]?.content);
@@ -13950,7 +14417,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const { calls, fetchImpl } = mockFetch({
     body: {
       status: "ok",
-      result: { rendered: "<memory uri=\"viking://user/default/mem\">周三要交稿。</memory>" },
+      result: { rendered: `<memory uri="viking://user/default/mem">周三要交稿。${BODY_FILLERS[0]}</memory>` },
     },
   });
   const sdk = recallSdk({
@@ -14031,7 +14498,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     recallPeerScope: "all",
     excludedPeers: " hermes , DSH-desktop ,, hermes ",
   };
-  const all = mockFetch({ body: { status: "ok", result: { rendered: "跨门牌的记忆" } } });
+  const all = mockFetch({ body: { status: "ok", result: { rendered: withBody("跨门牌的记忆") } } });
   const allHandler = createRecallHandler(
     recallSdk({ values, fetchImpl: all.fetchImpl, dataDir: dir }),
   );
@@ -14045,7 +14512,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["viking://user/default/peers/hermes", "viking://user/default/peers/DSH-desktop"],
   );
 
-  const self = mockFetch({ body: { status: "ok", result: { rendered: "本机记忆" } } });
+  const self = mockFetch({ body: { status: "ok", result: { rendered: withBody("本机记忆") } } });
   const selfHandler = createRecallHandler(
     recallSdk({ values: { ...values, recallPeerScope: "self" }, fetchImpl: self.fetchImpl, dataDir: dir }),
   );
@@ -14059,7 +14526,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     false,
   );
 
-  const none = mockFetch({ body: { status: "ok", result: { rendered: "全部记忆" } } });
+  const none = mockFetch({ body: { status: "ok", result: { rendered: withBody("全部记忆") } } });
   const noneHandler = createRecallHandler(
     recallSdk({ values: { ...values, excludedPeers: "" }, fetchImpl: none.fetchImpl, dataDir: dir }),
   );
@@ -14241,7 +14708,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const payload = { messages: [{ role: "user", content: "跨门牌找找" }] };
 
   patchSession(dir, "ov-off", { overrides: { autoRecall: false } });
-  const autoOff = mockFetch({ body: { status: "ok", result: { rendered: "不该出现" } } });
+  const autoOff = mockFetch({ body: { status: "ok", result: { rendered: withBody("不该出现") } } });
   const offHandler = createRecallHandler(
     recallSdk({ values, fetchImpl: autoOff.fetchImpl, dataDir: dir }),
   );
@@ -14252,7 +14719,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 
   patchSession(dir, "ov-scope", { overrides: { recallPeerScope: "all", readOnly: true } });
-  const scoped = mockFetch({ body: { status: "ok", result: { rendered: "跨门牌的记忆" } } });
+  const scoped = mockFetch({ body: { status: "ok", result: { rendered: withBody("跨门牌的记忆") } } });
   const scopeHandler = createRecallHandler(
     recallSdk({ values, fetchImpl: scoped.fetchImpl, dataDir: dir }),
   );
@@ -14273,7 +14740,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   fs.rmSync(dir, { recursive: true, force: true });
   const values = { enabled: true, apiKey: "k", serverUrl: "http://h:1" };
   const renderedXml =
-    '<memory uri="viking://user/default/skills" type="skills" score="0.57" detail="overview">\n预览\n</memory>';
+    `<memory uri="viking://user/default/skills" type="skills" score="0.57" detail="overview">\n预览：${BODY_FILLERS[0]}\n</memory>`;
 
   const renderedFetch = mockFetch({
     body: {
@@ -14305,7 +14772,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const digestFetch = mockFetch({
     body: {
       status: "ok",
-      result: { entries: [{ text: "条目也不该赢" }], rendered: "", digest: "只有摘要" },
+      result: { entries: [{ text: "条目也不该赢" }], rendered: "", digest: withBody("只有摘要") },
     },
   });
   const digestHandler = createRecallHandler(
@@ -14327,7 +14794,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     body: {
       status: "ok",
       result: {
-        entries: [{ text: "第一条" }, { text: "" }, { text: "第二条" }],
+        entries: [{ text: withBody("第一条", 0) }, { text: "" }, { text: withBody("第二条", 1) }],
         rendered: "",
         digest: "",
         stats: {},
@@ -14345,7 +14812,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check(
     "entries 兜底：注入成功，用空行拼起来且跳过空项",
     Boolean(entriesResult?.payload) &&
-      entriesText.includes("第一条\n\n第二条"),
+      entriesText.includes(`${withBody("第一条", 0)}\n\n${withBody("第二条", 1)}`),
   );
 
   // ---- 十块 rendered：召回数必须是十条，不是一条 ----
@@ -14361,7 +14828,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "监控告警改了阈值与收件人，旧机器上的规则已经停掉，磁盘水位那条调到百分之九十。",
     "域名证书已经续过，内网自签的那几张还在等运维统一换，换完之前会跳安全提示。",
     "共享盘里最新一版原型的文件名带 v7，旧的那几版都标了归档，拿之前先看清版本号。",
-    "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量。",
+    "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量数据。",
     "下周三晚上做切换演练，脚本先在仿真环境里过一遍，确认退出码再上真机。",
   ];
   const tenBlocks = Array.from(
