@@ -366,7 +366,7 @@ export default function registerRecallModeRoutes(app, ctx) {
       changes.push(["dedupeNear", body.dedupeNear]);
     }
 
-    // 近重复阈值：数字 / 数字串 / null 都收（null = 面板清空 = 回默认 0.8），
+    // 近重复阈值：数字 / 数字串 / null 都收（null = 面板清空 = 回默认值 0.6），
     // 一律归一化后存数字串。与召回门槛同一取舍：填错了不打断整单，也不把脏值留在配置里。
     if (has(body, "dedupeThreshold")) {
       const raw = body.dedupeThreshold;

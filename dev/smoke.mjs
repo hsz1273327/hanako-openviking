@@ -234,6 +234,7 @@ import {
   assembleCandidates,
   candidateKey,
   charGrams,
+  dedupeBasisOf,
   dedupeCandidates,
   hasCredential,
   jaccardOf,
@@ -245,6 +246,8 @@ import {
   textSimilarity,
   NEAR_DUPE_GRAM_SIZE,
   NEAR_DUPE_THRESHOLD,
+  DEDUPE_BASIS_HEAD_CHARS,
+  DEDUPE_BASIS_MIN_CHARS,
 } from "../src/memory/assemble.js";
 import {
   readSession,
@@ -4120,9 +4123,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     // 去重卡：近重复开关 + 阈值数字格，两格都进召回策略那一单（与精排 / 组装同一套回滚）。
     const saves = () => calls.filter((call) => call.method === "POST" && call.path === "/recall-mode");
     eq(
-      "首屏去重读回默认：近重复开着、阈值 0.8（服务端投影缺项也画成这一对）",
+      "首屏去重读回默认：近重复开着、阈值 0.6（服务端投影缺项也画成这一对）",
       [state.form.dedupeNear, state.form.dedupeThreshold],
-      [true, 0.8],
+      [true, 0.6],
     );
 
     const before = saves().length;
@@ -4155,13 +4158,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       cleaned.push([saves().at(-1).body.dedupeThreshold, state.form.dedupeThreshold]);
     }
     eq(
-      "阈值留空 / 越界 / 非数字：都当 0.8 提交（「留空用默认」是这一格自己的语义）",
+      "阈值留空 / 越界 / 非数字：都当 0.6 提交（「留空用默认」是这一格自己的语义）",
       cleaned,
       [
-        ["0.8", 0.8],
-        ["0.8", 0.8],
-        ["0.8", 0.8],
-        ["0.8", 0.8],
+        ["0.6", 0.6],
+        ["0.6", 0.6],
+        ["0.6", 0.6],
+        ["0.6", 0.6],
       ],
     );
 
@@ -5104,7 +5107,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     gateDecisionThreshold: 0.45,
     gateFallback: "recall",
     dedupeNear: true,
-    dedupeThreshold: 0.8,
+    dedupeThreshold: 0.6,
     rerank: "off",
     rerankKeep: 5,
     rerankPrompt: "",
@@ -12748,17 +12751,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   };
 
   // 十条候选，两对同 uri 副本：a 与 b 各有低分旧版 / 高分新版。
+  // 每条带一段各自的正文：标签只有几个字，近重复默认开着（阈值 0.6），只靠几个字的标签会把
+  // 互不相关的条目判成近重复——那是夹具失真，这一节要测的是「去重先于截条数」而不是判重。
+  const PAIR_FILLER = [
+    "原型评审定在本周四下午，走查清单提前一天发到群里，阿岚负责收尾那两处文案。",
+    "内测版要先接鉴权，第三方回调的字段名还在等对面确认，本地先拿假服务跑通。",
+    "机房搬迁的演练脚本写了两份，先跑只切读流量的那一份，全量的等下周。",
+    "交接文档按交付节点分三节，每节写交付物、验收人和回滚办法，明天先看大纲。",
+    "日志默认保留三十天，审计那一路单独存一年，冷备归档在对象存储上按月打包。",
+    "监控告警改了阈值与收件人，旧机器上的规则已经停掉，磁盘水位调到百分之九十。",
+    "域名证书已经续过，内网自签的那几张还在等运维统一换，换完之前会跳安全提示。",
+    "共享盘里最新一版原型的文件名带 v7，旧的那几版我标了归档，别拿错。",
+    "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量。",
+    "下周三晚上做切换演练，脚本先在仿真环境里过一遍，确认退出码再上真机。",
+  ];
   const PAIR_ENTRIES = [
-    { text: "甲的低分旧版", uri: "viking://user/default/m/a.md", score: 0.2 },
-    { text: "乙的低分旧版", uri: "viking://user/default/m/b.md", score: 0.3 },
-    { text: "甲的高分新版", uri: "viking://user/default/m/a.md", score: 0.9 },
-    { text: "乙的高分新版", uri: "viking://user/default/m/b.md", score: 0.8 },
-    { text: "丙", uri: "viking://user/default/m/c.md" },
-    { text: "丁", uri: "viking://user/default/m/d.md" },
-    { text: "戊", uri: "viking://user/default/m/e.md" },
-    { text: "己", uri: "viking://user/default/m/f.md" },
-    { text: "庚", uri: "viking://user/default/m/g.md" },
-    { text: "辛", uri: "viking://user/default/m/h.md" },
+    { text: `甲的低分旧版。${PAIR_FILLER[0]}`, uri: "viking://user/default/m/a.md", score: 0.2 },
+    { text: `乙的低分旧版。${PAIR_FILLER[1]}`, uri: "viking://user/default/m/b.md", score: 0.3 },
+    { text: `甲的高分新版。${PAIR_FILLER[2]}`, uri: "viking://user/default/m/a.md", score: 0.9 },
+    { text: `乙的高分新版。${PAIR_FILLER[3]}`, uri: "viking://user/default/m/b.md", score: 0.8 },
+    { text: `丙。${PAIR_FILLER[4]}`, uri: "viking://user/default/m/c.md" },
+    { text: `丁。${PAIR_FILLER[5]}`, uri: "viking://user/default/m/d.md" },
+    { text: `戊。${PAIR_FILLER[6]}`, uri: "viking://user/default/m/e.md" },
+    { text: `己。${PAIR_FILLER[7]}`, uri: "viking://user/default/m/f.md" },
+    { text: `庚。${PAIR_FILLER[8]}`, uri: "viking://user/default/m/g.md" },
+    { text: `辛。${PAIR_FILLER[9]}`, uri: "viking://user/default/m/h.md" },
   ];
   const pair = await runScreen({
     entries: PAIR_ENTRIES,
@@ -12863,6 +12880,55 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // 为什么要有这一节：精确去重只认「身份相同」或「字面一字不差」。同一段内容被提取两遍、
   // 加了个抬头、标点 / 换行 / 大小写不同，精确去重一条都抓不住，两条都留下白占精排名额。
   // 近重复补的就是这些，但它只认字面：同义改写它抓不住，这一点要在界面说明里写清。
+  // 比的是每条记忆的比对基准（优先 # Summary 段）而不是全文，基准的取法见 0 号那几条。
+
+  // ---- 0. 比对基准：优先 # Summary 段，没有就第一段 / 前 300 字 ----
+  const SECTIONED = [
+    "# Summary",
+    "季度复盘会定下三个交付节点与各自的责任人：八月底交原型，九月中交内测版，十月十五号上线。",
+    "",
+    "# 2026-11-06 14:30 ChatLog",
+    "用户：这批稿子改到哪了？",
+    "助手：原型已交，内测版还要两天。",
+  ].join("\n");
+  eq(
+    "比对基准：有 # Summary 只取那一段（到下一个 # 标题为止，ChatLog 不算进去）/ 没有 Summary 有别的 # 段取第一段 / 一个 # 标题都没有取前 300 字 / 没有正文给空串",
+    [
+      dedupeBasisOf(SECTIONED),
+      dedupeBasisOf("# ChatLog\n用户：稿子改到哪了？\n助手：原型交了，内测版还要两天。"),
+      [...dedupeBasisOf("甲".repeat(400))].length,
+      dedupeBasisOf("甲".repeat(400)) === "甲".repeat(DEDUPE_BASIS_HEAD_CHARS),
+      dedupeBasisOf(null),
+      dedupeBasisOf("   \n "),
+    ],
+    [
+      "季度复盘会定下三个交付节点与各自的责任人：八月底交原型，九月中交内测版，十月十五号上线。",
+      "用户：稿子改到哪了？\n助手：原型交了，内测版还要两天。",
+      300,
+      true,
+      "",
+      "",
+    ],
+  );
+  const SHORT_SUMMARY_ENTRY = [
+    "# Summary",
+    "很短。",
+    "",
+    "# ChatLog",
+    "用户：这批稿子改到哪了？三个节点还在不在？",
+    "助手：还在，原型已交，内测版还要两天。",
+  ].join("\n");
+  eq(
+    "Summary 去空白后短于 20 字就退回整篇正文（太短的概括没有分辨率，不如用全文）；正好 20 字仍用摘要",
+    [
+      dedupeBasisOf(SHORT_SUMMARY_ENTRY) === SHORT_SUMMARY_ENTRY.trim(),
+      dedupeBasisOf(SHORT_SUMMARY_ENTRY).includes("# Summary"),
+      dedupeBasisOf(`# Summary\n${"字".repeat(20)}\n\n# ChatLog\n用户：这批稿子改到哪了？`),
+      DEDUPE_BASIS_MIN_CHARS,
+      DEDUPE_BASIS_HEAD_CHARS,
+    ],
+    [true, true, "字".repeat(20), 20, 300],
+  );
 
   // ---- 1. 归一化：全角转半角、英文小写、去掉空白与标点 ----
   eq(
@@ -12951,6 +13017,86 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "只一条时不进两两比较，原样返回（零条同理）",
     [nearDedupeCandidates([{ text: BASE }]).dropped, nearDedupeCandidates([]).items.length],
     [0, 0],
+  );
+
+  // ---- 6b. 换成基准之后判重结果不一样了：Summary 相同、ChatLog 完全不同 ----
+  // 这是这次改动的核心用例。两条记忆是同一件事提了两遍，摘要几乎逐字相同，
+  // 对话记录却是一次下午、一次早上，全文口径下两条根本不接近。
+  const MEM_SUMMARY =
+    "季度复盘会定下三个交付节点：八月底交原型，九月中交内测版，十月十五号上线，责任人分别是阿岚、老周和我。";
+  const MEM_LOG_A = [
+    "",
+    "用户：上次那批稿子改到哪儿了？",
+    "助手：原型那版已经交了，阿岚在收尾交互稿，内测版的接口还没接上。她说这周只改两处：登录页的报错文案，还有设置里的开关默认值。",
+    "用户：接口那块是谁在做？",
+    "助手：老周在做，他说下周能给一版能跑通的。现在卡在鉴权那一层，第三方回调的字段名跟我们约定好的对不上，要等对面确认。",
+    "用户：对不上的话能不能先本地伪造？",
+    "助手：可以，测试环境已经有一个假的回调服务，把返回体按我们的字段拼就行。但上线前必须换成真的，不然等于没验。",
+    "用户：行，那我先去看原型，晚上给你反馈。",
+    "助手：好的。原型地址在共享盘的 design 目录下，最新一版文件名带 v7，旧的那几版我标了归档。",
+    "用户：另外交接文档别忘了写，尤其是这几个节点的验收标准。",
+    "助手：记下了。交接文档我按节点分三节，每节写清交付物、验收人和回滚办法，明天先给你看大纲。",
+  ].join("\n");
+  const MEM_LOG_B = [
+    "",
+    "用户：机房搬迁那次是不是还没收尾？",
+    "助手：上周把数据库从旧机器挪到新集群了，备份校验跑了两轮，增量同步也开着，目前没有延迟。",
+    "用户：证书呢？",
+    "助手：域名证书已经续过，内网那几张自签的还在等运维统一换。换完之前内网面板会跳安全提示，属于预期。",
+    "用户：监控告警有没有跟着改？",
+    "助手：改了阈值和收件人，旧机器那几条规则我先停掉，免得半夜还在响。历史上误报最多的那条磁盘水位规则调到了百分之九十。",
+    "用户：日志保留多久？",
+    "助手：默认三十天，审计那一路单独存一年。冷备的归档在对象存储上，按月打包。",
+    "用户：那先这样，下周挑个晚上做切换演练。",
+    "助手：好。演练脚本我写了两份，一份全量切换，一份只切读流量，先跑后者。",
+  ].join("\n");
+  const memEntry = (summary, log, stamp) => `# Summary\n\n${summary}\n\n# ${stamp} ChatLog\n${log}`;
+  const MEM_A = memEntry(MEM_SUMMARY, MEM_LOG_A, "2026-11-06 14:30");
+  const MEM_B = memEntry(MEM_SUMMARY, MEM_LOG_B, "2026-11-07 09:10");
+
+  const twin = nearDedupeCandidates([
+    { text: MEM_A, score: 0.4 },
+    { text: MEM_B, score: 0.9 },
+  ]);
+  eq(
+    "Summary 相同、ChatLog 完全不同的两条：判为近重复并合并，留分数高的那条",
+    [
+      dedupeBasisOf(MEM_A) === MEM_SUMMARY,
+      dedupeBasisOf(MEM_B) === MEM_SUMMARY,
+      twin.dropped,
+      twin.items.map((item) => item.text === MEM_B),
+    ],
+    [true, true, 1, [true]],
+  );
+  check(
+    "反向实验：同样这两条拿全文比就没戏了（相似度远低于默认阈值，旧口径会双双留下）——这正是本次改动要修的那个盲点",
+    textSimilarity(MEM_A, MEM_B) < DEDUPE_THRESHOLD_DEFAULT &&
+      jaccardOf(charGrams(dedupeBasisOf(MEM_A)), charGrams(dedupeBasisOf(MEM_B))) >=
+        DEDUPE_THRESHOLD_DEFAULT,
+    `全文 ${textSimilarity(MEM_A, MEM_B).toFixed(4)} / 基准 ${jaccardOf(
+      charGrams(dedupeBasisOf(MEM_A)),
+      charGrams(dedupeBasisOf(MEM_B)),
+    ).toFixed(4)}`,
+  );
+
+  // 反方向：Summary 各写各的（两件事），ChatLog 却大段重合（同一段对话被记了两遍）。
+  // 基准不同 → 不合并，哪怕全文口径下它们看起来很像。
+  const MEM_OTHER_SUMMARY =
+    "机房搬迁的收尾清单：核心库已迁到新集群，域名证书续期完成，内网自签证书等运维统一替换，监控阈值同步调整。";
+  const MEM_C = memEntry(
+    MEM_OTHER_SUMMARY,
+    MEM_LOG_A.replace("改到哪儿了", "改到哪一步了"),
+    "2026-11-07 09:10",
+  );
+  eq(
+    "Summary 不同、ChatLog 有部分重合的两条：不合并（不同的事，哪怕那次对话被重复记了）",
+    [
+      nearDedupeCandidates([{ text: MEM_A, score: 0.4 }, { text: MEM_C, score: 0.9 }]).dropped,
+      jaccardOf(charGrams(dedupeBasisOf(MEM_A)), charGrams(dedupeBasisOf(MEM_C))) <
+        DEDUPE_THRESHOLD_DEFAULT,
+      textSimilarity(MEM_A, MEM_C) >= DEDUPE_THRESHOLD_DEFAULT,
+    ],
+    [0, true, true],
   );
 
   // ---- 7. 链路：近重复在精确去重与凭据过滤之后、精排之前，两笔账分开记 ----
@@ -13061,27 +13207,39 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
   ).contributes.settings.schema.properties;
   eq(
-    "近重复阈值两端同值：默认 0.8 / 边界 0.5–1.0 / 步长 0.05；空串、非数字、越界都回 0.8；manifest 声明为 string、默认 \"0.8\"",
+    "近重复阈值两端同值：默认 0.6 / 边界 0.5–1.0 / 步长 0.05；空串、非数字、越界都回 0.6；manifest 声明为 string、默认 \"0.6\"",
     [
       [DEDUPE_THRESHOLD_DEFAULT, UI_DEDUPE_THRESHOLD_DEFAULT],
       [DEDUPE_THRESHOLD_MIN, UI_DEDUPE_THRESHOLD_MIN],
       [DEDUPE_THRESHOLD_MAX, UI_DEDUPE_THRESHOLD_MAX],
       [DEDUPE_THRESHOLD_STEP, UI_DEDUPE_THRESHOLD_STEP],
-      ["", "abc", 0.4, 1.2, null, undefined, "0.6", 0.5, 1].map(normalizeDedupeThreshold),
-      ["", "abc", 0.4, 1.2, null, undefined, "0.6", 0.5, 1].map(uiNormalizeDedupeThreshold),
+      ["", "abc", 0.4, 1.2, null, undefined, "0.7", 0.5, 1].map(normalizeDedupeThreshold),
+      ["", "abc", 0.4, 1.2, null, undefined, "0.7", 0.5, 1].map(uiNormalizeDedupeThreshold),
       [props.dedupeThreshold?.type, props.dedupeThreshold?.default],
       DEFAULTS.dedupeThreshold,
     ],
     [
-      [0.8, 0.8],
+      [0.6, 0.6],
       [0.5, 0.5],
       [1, 1],
       [0.05, 0.05],
-      [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.5, 1],
-      [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.5, 1],
-      ["string", "0.8"],
-      0.8,
+      [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.7, 0.5, 1],
+      [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.7, 0.5, 1],
+      ["string", "0.6"],
+      0.6,
     ],
+  );
+  // 默认值只决定「没存过时读成什么」：存过的显式值（哪怕就是旧默认 0.8）不被它覆写。
+  const storedThreshold = async (values) => (await readSwitches(sdkWith(values))).dedupeThreshold;
+  eq(
+    "已存的显式阈值不被默认值覆写：存的是 0.8 就读回 0.8（readSwitches 是唯一读入口）",
+    [
+      await storedThreshold({}),
+      await storedThreshold({ dedupeThreshold: "0.8" }),
+      await storedThreshold({ dedupeThreshold: "0.6" }),
+      await storedThreshold({ dedupeThreshold: 1 }),
+    ],
+    [0.6, 0.8, 0.6, 1],
   );
   eq(
     "近重复开关两端同值：默认开；脏值（含缺项、类型不对、字串变体）两端都当开",
@@ -13101,14 +13259,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
   eq(
-    "写回配置的形状：存归一化后的数字串（空串 / 非数字 / 越界都存 \"0.8\"，0.6 与 1 照存）",
-    ["", "abc", 0.4, 1.2, null, 0.6, 1].map(serializeDedupeThreshold),
-    ["0.8", "0.8", "0.8", "0.8", "0.8", "0.6", "1"],
+    "写回配置的形状：存归一化后的数字串（空串 / 非数字 / 越界都存 \"0.6\"，0.8 与 1 照存）",
+    ["", "abc", 0.4, 1.2, null, 0.8, 1].map(serializeDedupeThreshold),
+    ["0.6", "0.6", "0.6", "0.6", "0.6", "0.8", "1"],
   );
   eq(
-    "算法与配置的默认值同一份：assemble 的兜底阈值 0.8 就是配置的默认 0.8，gram 长度是 3",
+    "算法与配置的默认值同一份：assemble 的兜底阈值 0.6 就是配置的默认 0.6，gram 长度是 3",
     [NEAR_DUPE_THRESHOLD, DEDUPE_THRESHOLD_DEFAULT, NEAR_DUPE_GRAM_SIZE],
-    [0.8, 0.8, 3],
+    [0.6, 0.6, 3],
   );
 
   // ---- 9. 路由：GET 投影 / POST 整单校验（布尔开关 + 数字格两种形状）----
@@ -13144,10 +13302,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
     const defaults = await get();
     eq(
-      "GET 没配过时投影成「开 + 阈值 \"0.8\"（字符串）」",
+      "GET 没配过时投影成「开 + 阈值 \"0.6\"（字符串）」",
       [defaults.body.dedupeNear, defaults.body.dedupeThreshold, typeof defaults.body.dedupeThreshold],
-      [true, "0.8", "string"],
+      [true, "0.6", "string"],
     );
+
+    // 存量配置里手填过的 0.8 不被新默认值覆写：读通道原样回显，也不会被写成 0.6。
+    store.dedupeThreshold = "0.8";
+    const stored = await get();
+    eq(
+      "已存 0.8 的配置读通道原样回显（新默认值 0.6 不覆写显式值）",
+      [stored.body.dedupeThreshold, writes.length],
+      ["0.8", 0],
+    );
+    delete store.dedupeThreshold;
 
     writes.length = 0;
     const savedSwitch = await post({ dedupeNear: false });
@@ -13184,18 +13352,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
     const cleaned = [];
     for (const raw of ["", "abc", 2, null]) {
-      store.dedupeThreshold = "0.6";
+      store.dedupeThreshold = "0.8";
       const out = await post({ dedupeThreshold: raw });
       cleaned.push([out.status, store.dedupeThreshold]);
     }
     eq(
-      "阈值留空 / 非数字 / 越界都归一化成 \"0.8\" 再落库（不打断整单，也不留脏值）",
+      "阈值留空 / 非数字 / 越界都归一化成 \"0.6\" 再落库（不打断整单，也不留脏值）",
       cleaned,
       [
-        [200, "0.8"],
-        [200, "0.8"],
-        [200, "0.8"],
-        [200, "0.8"],
+        [200, "0.6"],
+        [200, "0.6"],
+        [200, "0.6"],
+        [200, "0.6"],
       ],
     );
     writes.length = 0;
@@ -13244,7 +13412,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       card.includes("DEDUPE_THRESHOLD_MIN") &&
       card.includes("DEDUPE_THRESHOLD_MAX") &&
       card.includes("DEDUPE_THRESHOLD_STEP") &&
-      card.includes('placeholder="默认 0.8"') &&
+      card.includes('placeholder="默认 0.6"') &&
       card.includes("setDedupeThreshold"),
     card.slice(card.indexOf("dedupeThreshold") - 160, card.indexOf("dedupeThreshold") + 260),
   );
@@ -13254,31 +13422,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     card.slice(0, 1400),
   );
   check(
-    "说明里写清了算法（字符 3-gram 的 Jaccard）、抓得住什么、抓不住同义改写（要 embedding）、精确去重恒开不可关",
+    "说明里写清了比的是 # Summary 段而不是全文、算法（字符 3-gram 的 Jaccard）、抓得住什么、字面判重不是语义判重（且为什么不用 embedding）、精确去重恒开不可关",
     [UI_DEDUPE_NEAR_NOTE, UI_DEDUPE_NEAR_LIMIT_NOTE, UI_DEDUPE_EXACT_NOTE].every(
       (note) => note.length > 0,
     ) &&
+      UI_DEDUPE_NEAR_NOTE.includes("# Summary") &&
+      UI_DEDUPE_NEAR_NOTE.includes("不是全文") &&
       UI_DEDUPE_NEAR_NOTE.includes("3-gram") &&
       UI_DEDUPE_NEAR_NOTE.includes("Jaccard") &&
       UI_DEDUPE_NEAR_NOTE.includes("重复提取") &&
+      UI_DEDUPE_NEAR_LIMIT_NOTE.includes("字面判重") &&
+      UI_DEDUPE_NEAR_LIMIT_NOTE.includes("同义改写") &&
       UI_DEDUPE_NEAR_LIMIT_NOTE.includes("embedding") &&
+      UI_DEDUPE_NEAR_LIMIT_NOTE.includes("召回") &&
       UI_DEDUPE_EXACT_NOTE.includes("恒开") &&
       UI_DEDUPE_EXACT_NOTE.includes("不可关"),
     `${UI_DEDUPE_NEAR_NOTE} | ${UI_DEDUPE_NEAR_LIMIT_NOTE} | ${UI_DEDUPE_EXACT_NOTE}`,
   );
   check(
-    "阈值小字把方向说清（调低合并更多、调高更保守），且引用了默认值 0.8",
+    "阈值小字把方向说清（调低合并更多、调高更保守），且引用了新的默认值 0.6",
     UI_DEDUPE_THRESHOLD_HINT.includes("调低合并更多") &&
       UI_DEDUPE_THRESHOLD_HINT.includes("调高更保守") &&
-      UI_DEDUPE_THRESHOLD_HINT.includes("0.8"),
+      UI_DEDUPE_THRESHOLD_HINT.includes("0.6"),
     UI_DEDUPE_THRESHOLD_HINT,
   );
   eq(
-    "去重配置的投影：缺项画成开 + 0.8，脏值也收敛到这两个值",
+    "去重配置的投影：缺项画成开 + 0.6，脏值也收敛到这两个值",
     [paintDedupeConfig(undefined), paintDedupeConfig({ dedupeNear: "x", dedupeThreshold: 2 })],
     [
-      { dedupeNear: true, dedupeThreshold: 0.8 },
-      { dedupeNear: true, dedupeThreshold: 0.8 },
+      { dedupeNear: true, dedupeThreshold: 0.6 },
+      { dedupeNear: true, dedupeThreshold: 0.6 },
     ],
   );
   check(
@@ -14177,10 +14350,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 十块 rendered：召回数必须是十条，不是一条 ----
   // 这就是 probe.log 里「recalled:1、rerank:null、却注入了十条」那个现象。
+  // 每块的正文都不一样：近重复默认开着（阈值 0.6），十段只差一个序号的占位文字会被合掉，
+  // 那是夹具失真——这一节要测的是「拆条」，而 <memory> 头里的 uri / score 是共享的样板。
+  const TEN_BODIES = [
+    "原型评审定在本周四下午，评审前把交互稿的走查清单发到群里，阿岚负责收尾文案。",
+    "内测版要先接鉴权，第三方回调的字段名还在等对面确认，本地先拿假的回调服务跑通。",
+    "机房搬迁的演练脚本写了两份，先跑只切读流量的那一份，全量的等下周挑晚上再做。",
+    "交接文档按交付节点分三节，每节写清交付物、验收人和回滚办法，明天先看大纲。",
+    "日志默认保留三十天，审计那一路单独存一年，冷备的归档在对象存储上按月打包。",
+    "监控告警改了阈值与收件人，旧机器上的规则已经停掉，磁盘水位那条调到百分之九十。",
+    "域名证书已经续过，内网自签的那几张还在等运维统一换，换完之前会跳安全提示。",
+    "共享盘里最新一版原型的文件名带 v7，旧的那几版都标了归档，拿之前先看清版本号。",
+    "备份校验跑了两轮，增量同步目前没有延迟，切换当天会再校一次全量。",
+    "下周三晚上做切换演练，脚本先在仿真环境里过一遍，确认退出码再上真机。",
+  ];
   const tenBlocks = Array.from(
     { length: 10 },
     (_, index) =>
-      `<memory uri="viking://user/default/memories/m${index + 1}.md" type="events" score="0.${90 - index * 3}" detail="full">\n第${index + 1}条记忆\n</memory>`,
+      `<memory uri="viking://user/default/memories/m${index + 1}.md" type="events" score="0.${90 - index * 3}" detail="full">\n第${index + 1}条记忆：${TEN_BODIES[index]}\n</memory>`,
   );
   const tenFetch = mockFetch({
     body: { status: "ok", result: { rendered: tenBlocks.join("\n"), entries: [], stats: {} } },

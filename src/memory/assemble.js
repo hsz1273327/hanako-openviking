@@ -17,7 +17,7 @@
 //
 // 回指表 refs 与文本同源：第 N 段的 index 就是 N。它进探针和日志，不进注入文本。
 //
-// 候选级的判据都收在这里：精确去重（身份）、凭据判据、近重复（字符 3-gram 的 Jaccard）。
+// 候选级的判据都收在这里：精确去重（身份）、凭据判据、近重复（比对基准上字符 3-gram 的 Jaccard）。
 // 三者在链路上挨着跑（召回之后、精排之前），放在一起才不会出现两份口径。
 //
 // 这个文件不 import 任何东西：纯函数，冒烟与面板文案都能直接测。
@@ -88,17 +88,18 @@ export function dedupeCandidates(items) {
   return kept;
 }
 
-/* ---------------- 近重复：字符 3-gram 的 Jaccard ----------------
+/* ---------------- 近重复：比对基准上字符 3-gram 的 Jaccard ----------------
  *
  * 精确去重只认「身份相同」或「字面一字不差」。同一段内容被提取两遍、加了个抬头、
  * 标点 / 换行 / 大小写不同、或者截取长度不同，精确去重一条都抓不住，两条都留下，
  * 白占精排的保留名额。这一层补的就是这些。
  *
  * 算法（不调任何模型、零依赖）：
- *   1. 归一化：全角转半角、英文转小写、去掉所有空白与标点
- *   2. 按字符切 3-gram 得到集合（中文按字，英文按字符）
- *   3. 两两比较：|A ∩ B| / |A ∪ B|
- *   4. 相似度 ≥ 阈值即视为同一件事
+ *   1. 从每条候选里取出比对基准（dedupeBasisOf：优先 # Summary 段，见下面那段）
+ *   2. 归一化：全角转半角、英文转小写、去掉所有空白与标点
+ *   3. 按字符切 3-gram 得到集合（中文按字，英文按字符）
+ *   4. 两两比较：|A ∩ B| / |A ∪ B|
+ *   5. 相似度 ≥ 阈值即视为同一件事
  *
  * 抓得住：同一段内容重复提取、加了抬头 / 前缀、标点与空白不同、大小写与全半角不同、
  * 截取长度不同（3-gram 的交集仍然很大）。
@@ -108,6 +109,81 @@ export function dedupeCandidates(items) {
  * 候选最多十几条，两两比较完全不是负担，所以不建索引也不做剪枝。
  */
 
+/* ---------------- 比对基准：优先 # Summary 段 ----------------
+ *
+ * 为什么不能拿全文比：真实记忆条目是 800–1500 字（# Summary + # ChatLog）。
+ * 3-gram 的 Jaccard 在这种长度上要八成以上的三字组合重合才算近重复，
+ * 那基本只在逐字复制时发生——实测 50 条、1225 对，相似度 ≥ 0.5 的一对都没有。
+ * 阈值调到多低都救不回来，因为问题是「量错了东西」，不是「门槛太高」。
+ *
+ * 但条目的结构给了一个天然的比对基准：# Summary 只有一两百字，概括的就是这件事本身。
+ * 同一件事被提取两遍，两段概括往往高度重合；不同的事哪怕都跟这次提问相关，
+ * 概括也差得很远。换成短的比，分辨率就回来了。
+ *
+ * 取法（按顺序落）：
+ *   1. 有 `# Summary` 段 → 取那一段（到下一个 `# ` 标题之前）
+ *   2. 没有 Summary、但有别的 `# ` 段 → 取第一段
+ *   3. 一个 `# ` 标题都没有 → 取前 300 字
+ *   4. 取出来的内容去空白后短于 20 字 → 退回整篇正文
+ *      （太短的概括没有分辨率，用它比反而更容易误合并）
+ *
+ * 比对只用基准，合并仍然作用于整条候选：这里只决定「像不像」，不决定「丢什么」。
+ */
+
+/** 行首的段标题：一个井号 + 空白。`## ` 之类不算，子标题归在它所在的那一段里。 */
+const SECTION_HEADING_RE = /^#[ \t]+(.+?)\s*$/u;
+
+/** Summary 段的标题（`# Summary` / `# summary`）。 */
+const SUMMARY_TITLE_RE = /^summary\b/iu;
+
+/** 没有段标题时取多长的开头当基准。 */
+export const DEDUPE_BASIS_HEAD_CHARS = 300;
+
+/** 基准短于这个长度（去空白后按码点算）就没有分辨率，退回整篇正文。 */
+export const DEDUPE_BASIS_MIN_CHARS = 20;
+
+/** 按行切出 `# ` 开头的段；第一个标题之前的内容不属于任何段。 */
+function sectionsOf(text) {
+  const sections = [];
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    const heading = SECTION_HEADING_RE.exec(line);
+    if (heading) {
+      current = { title: heading[1], lines: [] };
+      sections.push(current);
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  return sections;
+}
+
+/** 去空白后的码点数：只用来判「这段概括够不够长」，不参与相似度计算。 */
+function bareLength(text) {
+  return Array.from(text.replace(/\s+/g, "")).length;
+}
+
+/**
+ * 一条候选的比对基准。规则见上面那段注释。
+ *
+ * 不是字符串（null / undefined）时给空串：没有正文就没有可比的东西，与 charGrams 对空文本的口径一致。
+ */
+export function dedupeBasisOf(text) {
+  const raw = typeof text === "string" ? text : "";
+  if (!raw.trim()) return "";
+  const sections = sectionsOf(raw);
+  let basis = "";
+  if (sections.length) {
+    const summary = sections.find((section) => SUMMARY_TITLE_RE.test(section.title));
+    basis = (summary || sections[0]).lines.join("\n").trim();
+  }
+  if (!basis) basis = Array.from(raw).slice(0, DEDUPE_BASIS_HEAD_CHARS).join("").trim();
+  // 太短的概括认不出「同一件事」：两条不同的短摘要之间、以及短摘要与它自己的正文之间，
+  // 3-gram 的重合都可能很高，用它比只会多合并。退回全文是更保守的那一侧。
+  if (bareLength(basis) < DEDUPE_BASIS_MIN_CHARS) return raw.trim();
+  return basis;
+}
+
 /** 单个 gram 的长度。3 是中文与英文都能吃到的那个折中：再短就误杀，再长就不认改写。 */
 export const NEAR_DUPE_GRAM_SIZE = 3;
 
@@ -115,7 +191,7 @@ export const NEAR_DUPE_GRAM_SIZE = 3;
  * 近重复的默认阈值。与 src/ov/settings.js 的 DEDUPE_THRESHOLD_DEFAULT 同值
  * （那一份是配置的默认值，这一份只给不传参的调用方兜底；冒烟里断言两者相等）。
  */
-export const NEAR_DUPE_THRESHOLD = 0.8;
+export const NEAR_DUPE_THRESHOLD = 0.6;
 
 /** 归一化后还留得下的字符：任何文字的字母与数字（标点、符号、空白全丢）。 */
 const KEEP_CHAR_RE = /[\p{L}\p{N}]/u;
@@ -193,7 +269,12 @@ export function jaccardOf(left, right) {
   return shared / (left.size + right.size - shared);
 }
 
-/** 两段文本的相似度（各切一次 gram 再算 Jaccard）。冒烟与文档都直接用它。 */
+/**
+ * 两段文本的相似度（各切一次 gram 再算 Jaccard）。冒烟与文档都直接用它。
+ *
+ * 注意口径：这里比的是传进来的那两段字面本身，不走 dedupeBasisOf。
+ * 近重复判重用的是「基准 vs 基准」（见 nearDedupeCandidates）。
+ */
 export function textSimilarity(left, right) {
   return jaccardOf(charGrams(left), charGrams(right));
 }
@@ -211,6 +292,10 @@ export function textSimilarity(left, right) {
  * 输出保持输入顺序（按留下来的那条原本的位置），后面的排序仍然由 sortByScore 决定。
  * threshold 不合法（非数字）时用 NEAR_DUPE_THRESHOLD。
  *
+ * 比的是 dedupeBasisOf 取出的基准（有 # Summary 就只用那段），不是整篇正文：
+ * 800–1500 字的全文之间 3-gram 几乎不重合，那样比跟精确去重没区别。
+ * 合并仍然整条合并，基准只用来判「像不像」。
+ *
  * 返回 { items, dropped }：与 dropCredentialCandidates 同形，调用方只加一笔账。
  */
 export function nearDedupeCandidates(items, options = {}) {
@@ -219,7 +304,7 @@ export function nearDedupeCandidates(items, options = {}) {
   const threshold = Number.isFinite(raw) ? raw : NEAR_DUPE_THRESHOLD;
   if (list.length < 2) return { items: list.slice(), dropped: 0 };
 
-  const grams = list.map((item) => charGrams(item?.text));
+  const grams = list.map((item) => charGrams(dedupeBasisOf(item?.text)));
   const order = list
     .map((_, index) => index)
     .sort((a, b) => {

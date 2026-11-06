@@ -88,7 +88,8 @@ export function normalizeAssembleMode(value) {
 
 // 近重复的默认值 / 边界 / 步长，与 src/ov/settings.js 的 DEDUPE_THRESHOLD_* 同值。
 // 步长只影响数字框的加减手感，不是归一化要圆整到的格点。
-export const DEDUPE_THRESHOLD_DEFAULT = 0.8;
+// 默认 0.6 而不是 0.8：比的是每条记忆的 # Summary 段（没有就取前 300 字），不是全文。
+export const DEDUPE_THRESHOLD_DEFAULT = 0.6;
 export const DEDUPE_THRESHOLD_MIN = 0.5;
 export const DEDUPE_THRESHOLD_MAX = 1;
 export const DEDUPE_THRESHOLD_STEP = 0.05;
@@ -107,7 +108,7 @@ export function normalizeDedupeNear(value) {
 
 /**
  * 与 src/ov/settings.js 的 normalizeDedupeThreshold 同口径：
- * 0.5–1.0 之间（含两端）给数字，空串 / 非数字 / 越界一律回 0.8。
+ * 0.5–1.0 之间（含两端）给数字，空串 / 非数字 / 越界一律回默认值（0.6）。
  * 越界值不夹到边界：夹成 0.5 会把「填错了」静默变成「最激进地合并」。
  */
 export function normalizeDedupeThreshold(value) {
@@ -124,15 +125,15 @@ export function normalizeDedupeThreshold(value) {
 
 /** 阈值数字框旁边那句小字。方向要写出来：调低合并得更多，不是「查得更准」。 */
 export const DEDUPE_THRESHOLD_HINT =
-  "0.8 为默认；调低合并更多（0.6 更激进），调高更保守";
+  "0.6 为默认（比的是 # Summary 段）；调低合并更多（0.5 最激进），调高更保守";
 
-/** 近重复那段说明：算法是什么、拓什么、拓不住什么。组件直接吐这几句。 */
+/** 近重复那段说明：比什么、算法是什么、抓得住什么。组件直接吐这几句。 */
 export const DEDUPE_NEAR_NOTE =
-  "纯算法，不调模型：先归一化（全角转半角、英文转小写、去掉空白与标点），再按字符切 3-gram，算两个集合的 Jaccard 相似度（交集 / 并集），相似度 ≥ 阈值就当同一段内容，只留分数高的那条。拓得住重复提取、加了抬头或前缀、标点 / 换行 / 大小写 / 全半角不同、截取长度不同。";
+  "比的是每条记忆的 # Summary 段（没有 Summary 就取前 300 字），不是全文：同一件事被提取两遍，两段一两百字的概括会高度重合；比全文却要八成以上的字面重合才算像，实际只在逐字复制时触发。纯算法，不调模型：先归一化（全角转半角、英文转小写、去掉空白与标点），再按字符切 3-gram，算两个集合的 Jaccard 相似度（交集 / 并集），相似度 ≥ 阈值就当同一件事，只留分数高的那条。抓得住重复提取、加了抬头或前缀、标点 / 换行 / 大小写 / 全半角不同、截取长度不同。";
 
-/** 拓不住什么也要写清：不然用户会以为它是语义去重。 */
+/** 抓不住什么也要写清：不然用户会以为它是语义去重。 */
 export const DEDUPE_NEAR_LIMIT_NOTE =
-  "拓不住换一种说法的同义改写——那需要 embedding（语义相似度），不在这一层的能力范围里。它是字面判重，不是语义判重。";
+  "它是字面判重，不是语义判重：换一种说法的同义改写抓不住，那需要 embedding。但这里不用 embedding——召回已经用语义相似度挑过候选了，这批候选彼此天然相似，再拿语义相似度判重，会把「都相关但讲不同事」的条目也合并掉。";
 
 /** 精确去重恒开，只作说明不给开关：它没有取舍。 */
 export const DEDUPE_EXACT_NOTE =
@@ -1043,7 +1044,7 @@ export function paintAssembleConfig(out) {
   return { assembleMode: normalizeAssembleMode(out?.assembleMode) };
 }
 
-/** 去重自己的字段：近重复开关 + 阈值。脏值 / 缺项一律画成开 / 0.8。 */
+/** 去重自己的字段：近重复开关 + 阈值。脏值 / 缺项一律画成开 / 0.6。 */
 export function paintDedupeConfig(out) {
   return {
     dedupeNear: normalizeDedupeNear(out?.dedupeNear),

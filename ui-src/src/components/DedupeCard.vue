@@ -2,7 +2,7 @@
 // 去重卡：召回之后、精排之前那一步里的两小步。
 //
 //   精确去重  恒开，不可关（uri 相同 / 去掉空白后字面相同）——这一页只作说明；
-//   近重复    可开关 + 一个阈值（字符 3-gram 的 Jaccard，纯算法、不调模型）。
+//   近重复    可开关 + 一个阈值（比对 # Summary 段的字符 3-gram Jaccard、纯算法、不调模型）。
 //
 // 为什么精确去重不给开关：它没有取舍。同一条记忆的两份副本，留两份只是白占
 // 精排的保留名额，关掉它得不到任何好处。可调的是近重复那一档：阈值调低合并更多，
@@ -38,7 +38,7 @@ function onSwitch(value) {
 
 /**
  * 阈值数字格：n-input-number 清空给 null。
- * 清空 = 回默认 0.8 并真的提交（「留空用默认」是这一格自己的语义，不是「还没填完」）。
+ * 清空 = 回默认 0.6 并真的提交（「留空用默认」是这一格自己的语义，不是「还没填完」）。
  */
 function onThreshold(value) {
   return setDedupeThreshold(value === null || value === undefined ? "" : value);
@@ -78,12 +78,12 @@ function onThreshold(value) {
         :min="DEDUPE_THRESHOLD_MIN"
         :max="DEDUPE_THRESHOLD_MAX"
         :step="DEDUPE_THRESHOLD_STEP"
-        placeholder="默认 0.8"
+        placeholder="默认 0.6"
         :input-props="{ id: 'dedupeThreshold' }"
         :value="state.form.dedupeThreshold ?? null"
         @update:value="onThreshold"
       />
-      <span class="field-hint">{{ DEDUPE_THRESHOLD_HINT }}。留空用默认 0.8；0.5–1.0 之外的值与非数字同样回 0.8。</span>
+      <span class="field-hint">{{ DEDUPE_THRESHOLD_HINT }}。留空用默认 0.6；0.5–1.0 之外的值与非数字同样回 0.6。</span>
     </div>
 
     <div class="field" :class="{ dim: !enabled }">

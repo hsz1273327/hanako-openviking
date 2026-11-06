@@ -2292,7 +2292,7 @@ export function createRecallHandler(sdk, options = {}) {
       deduped: null,
       // 精确去重（uri 相同 / 去掉空白后字面相同）丢掉的副本数。
       droppedExact: null,
-      // 近重复（字符 3-gram 的 Jaccard ≥ 阈值）合并掉的条数。与 droppedExact 分开记：
+      // 近重复（比对基准上字符 3-gram 的 Jaccard ≥ 阈值；基准优先取 # Summary 段）合并掉的条数。与 droppedExact 分开记：
       // 一个抓的是同一个身份，一个抓的是「同一段话的另一种存法」，混成一个数就查不出谁在起作用。
       droppedNear: null,
       droppedCredential: null,

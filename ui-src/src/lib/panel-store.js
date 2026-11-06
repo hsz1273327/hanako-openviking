@@ -218,7 +218,7 @@ export function createPanelStore(deps = {}) {
       gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
       queryMode: "last",
       rerank: "off",
-      // 近重复：默认开着（纯算法、不花时间），阈值默认 0.8。首次 refresh 后以服务端投影为准。
+      // 近重复：默认开着（纯算法、不花时间），阈值默认 0.6。首次 refresh 后以服务端投影为准。
       dedupeNear: true,
       dedupeThreshold: DEDUPE_THRESHOLD_DEFAULT,
       // 精排保留条数：初始值就是默认 5。0 是另一回事（= 不限），由归一化给出。
@@ -512,7 +512,7 @@ export function createPanelStore(deps = {}) {
       ),
       queryMode: state.form.queryMode,
       // 近重复：开关原样发（服务端只认布尔）；阈值归一化后序列化成字符串再发
-      // （0.5–1.0 之外的值在这里就回 0.8，不把脏值发上去）。
+      // （0.5–1.0 之外的值在这里就回默认 0.6，不把脏值发上去）。
       dedupeNear: normalizeDedupeNear(state.form.dedupeNear),
       dedupeThreshold: String(normalizeDedupeThreshold(state.form.dedupeThreshold)),
       // 两份判据分开存、分开提交：改一份不会动另一份，切档也不丢内容。
@@ -619,7 +619,7 @@ export function createPanelStore(deps = {}) {
       if (key === "rerankChannels") {
         return rerankChannelsText(a?.[key]) === rerankChannelsText(b?.[key]);
       }
-      // 门槛存的是数字串、界面上是数字：两边都归一化再比，否则 "0.8" !== 0.8
+      // 门槛存的是数字串、界面上是数字：两边都归一化再比，否则 "0.6" !== 0.6
       // 会让一单永远看起来“有变化”，保存死循环。
       if (key === "gateDecisionThreshold") {
         return (
@@ -732,9 +732,9 @@ export function createPanelStore(deps = {}) {
   /**
    * 近重复阈值：与门槛同一种数字格，但清空语义不同。
    *
-   * 清空（null / undefined / 空串）= 回默认 0.8，并且要真的提交：这一格的说明书
+   * 清空（null / undefined / 空串）= 回默认 0.6，并且要真的提交：这一格的说明书
    * 就是「留空用默认」，与保留条数的「留空 = 不限」同一种语义，不是「还没填完」。
-   * 越界 / 非数字也走同一条路：归一化成 0.8 再发，不把脏值发上去。
+   * 越界 / 非数字也走同一条路：归一化成 0.6 再发，不把脏值发上去。
    */
   function setDedupeThreshold(value) {
     state.form.dedupeThreshold = normalizeDedupeThreshold(value);

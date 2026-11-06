@@ -92,14 +92,20 @@ export const RERANK_KEEP_MAX = 20;
 export const RERANK_KEEP_STEP = 1;
 
 /**
- * 近重复的阈值：字符 3-gram 的 Jaccard 相似度 ≥ 这个值就算同一段内容。
+ * 近重复的阈值：比对基准上字符 3-gram 的 Jaccard 相似度 ≥ 这个值就算同一段内容。
  *
- * 默认 0.8。范围夹在 0.5–1.0：低于 0.5 时两句只是碰巧用词相近的话就会合到一起，
+ * 默认 0.6。范围夹在 0.5–1.0：低于 0.5 时两句只是碰巧用词相近的话就会合到一起，
  * 高于 1 没有意义（1 就是字面完全一样，那一档已经由精确去重做掉了）。
  * 越界不夹回边界，一律回默认值：夹成 0.5 会把「填错了」静默变成「最激进地合并」，
- * 反而比回默认更难查。算法本身在 src/memory/assemble.js（纯函数、零依赖）。
+ * 反而比回默认更难查。
+ *
+ * 为什么不是 0.8：比的是每条记忆的 # Summary 段（没 Summary 就取前 300 字），不是全文。
+ * 一两百字的概括之间，0.6 才分得开「同一件事提了两遍」与「两件事都跟这次提问相关」；
+ * 全文口径下 0.8 实际只在逐字复制时才触发。取基准的规则见 src/memory/assemble.js 的 dedupeBasisOf。
+ *
+ * 已存的显式值不被这个默认值覆写：归一化只处理「读到的值」，读到的 0.8 仍然是 0.8。
  */
-export const DEDUPE_THRESHOLD_DEFAULT = 0.8;
+export const DEDUPE_THRESHOLD_DEFAULT = 0.6;
 export const DEDUPE_THRESHOLD_MIN = 0.5;
 export const DEDUPE_THRESHOLD_MAX = 1;
 /** 步长只影响数字框的加减手感，不是归一化要圆整到的格点。 */
@@ -132,7 +138,7 @@ export const DEFAULTS = {
   gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
   gateDecisionThreshold: GATE_DECISION_THRESHOLD_DEFAULT,
   gateModel: "",
-  // 近重复检测：纯算法（字符 3-gram 的 Jaccard），不调模型。默认开着，
+  // 近重复检测：纯算法（每条记忆的 # Summary 段上算字符 3-gram 的 Jaccard），不调模型。默认开着，
   // 关掉就只剩精确去重（uri 相同 / 去掉空白后字面相同）。
   dedupeNear: true,
   dedupeThreshold: DEDUPE_THRESHOLD_DEFAULT,
@@ -370,9 +376,11 @@ export function normalizeDedupeNear(raw) {
 }
 
 /**
- * 近重复阈值的归一化：0.5–1.0 之间（含两端）给数字，其余一律回 0.8。
+ * 近重复阈值的归一化：0.5–1.0 之间（含两端）给数字，其余一律回默认值。
  *
  * 数字串接受（与门槛 / 超时同一口径），读出来是数字。
+ * 已存的显式值（比如早先手填的 0.8）原样返回，不被默认值覆写；
+ * 只有空串 / 非数字 / 越界才落到 DEDUPE_THRESHOLD_DEFAULT。
  * 越界不夹边界，理由见 DEDUPE_THRESHOLD_DEFAULT 那段注释。
  */
 export function normalizeDedupeThreshold(raw) {
