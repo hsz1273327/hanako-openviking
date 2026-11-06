@@ -148,6 +148,8 @@ function shapeOf(event, invocation) {
   // 而精排默认是关的，塞进去就会在多数轮里连那笔账一起消失。
   // droppedEmpty / droppedStale 是分层那一步丢掉的空壳与过时条目；
   // byType 记进入那一层的候选按类型计数：这一层跑过给对象（空批次是 {}），没跑给 null。
+  // factual 是被内容兜底救回来的条数（命中事实、且类型本来会衰减）：它是标签规范程度的读数，
+  // 降到 0 就说明没有事实被错标成过程记录。与 byType 并列放，两个数要能对上同一批候选。
   // droppedExact 与 droppedNear 分开记：一个抓同一身份，一个抓「同一段话的另一种存法」。
   // error 只记类别（timeout / network），不记地址也不记响应正文。
   if (event === "recall/result") {
@@ -163,6 +165,7 @@ function shapeOf(event, invocation) {
       droppedEmpty: countOf(invocation.droppedEmpty),
       droppedStale: countOf(invocation.droppedStale),
       byType: byTypeOf(invocation.byType),
+      factual: countOf(invocation.factual),
       rerank: rerankOf(invocation.rerank),
       assemble: assembleOf(invocation.assemble),
       injected: injectedOf(invocation.injected),

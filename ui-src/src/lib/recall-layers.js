@@ -192,7 +192,7 @@ export function recallLayerNote(
     .map(([type]) => type)
     .join(" / ");
   const halfLife = profile.halfLifeDays;
-  return `召回结果按记忆类型加权：${weights}。${stable} 不随时间衰减；${decayed} 按半衰期 ${halfLife} 天衰减（${halfLife} 天前的一半，${halfLife * 2} 天前的四分之一）。分层后的分数低于 ${profile.staleFloor} 的整条丢掉；正文不足 ${profile.minBodyChars} 字的整条丢掉（只有 uri 的占位条也算空壳）。这是判断，不给开关。`;
+  return `召回结果按记忆类型加权：${weights}。${stable} 不随时间衰减；${decayed} 按半衰期 ${halfLife} 天衰减（${halfLife} 天前的一半，${halfLife * 2} 天前的四分之一）。正文里写着地址、绝对路径、版本号、型号或容量规格的，不管归在哪一类都当事实看，不衰减——那些东西不会因为记录旧了就失效。分层后的分数低于 ${profile.staleFloor} 的整条丢掉；正文不足 ${profile.minBodyChars} 字的整条丢掉（只有 uri 的占位条也算空壳）。这是判断，不给开关。`;
 }
 
 export const RECALL_LAYER_NOTE = recallLayerNote();

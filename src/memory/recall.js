@@ -2311,6 +2311,9 @@ export function createRecallHandler(sdk, options = {}) {
       droppedStale: null,
       // 进入分层那一步的候选按类型计数（含随后被丢掉的）；这一层跑过就是对象，没跑是 null。
       byType: null,
+      // 命中内容兜底、且类型本来会衰减的条数（被这条兜底救回来的那些）。
+      // 它同时是标签规范程度的读数：降到 0 就说明没有事实被错标成过程记录。
+      factual: null,
       rerank: null,
       assemble: null,
       injected: null,
@@ -2514,6 +2517,7 @@ export function createRecallHandler(sdk, options = {}) {
     summary.droppedEmpty = layered.droppedEmpty;
     summary.droppedStale = layered.droppedStale;
     summary.byType = layered.byType;
+    summary.factual = layered.factual;
 
     if (!items.length) {
       warnShapeOnce(sdk, result);

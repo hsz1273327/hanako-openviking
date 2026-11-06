@@ -268,6 +268,10 @@ import {
   ageDaysOf,
   decayFactorOf,
   bodyLengthOf,
+  looksFactual,
+  factualOf,
+  layerWeightOf,
+  FACTUAL_WEIGHT,
   layerScoreOf,
   applyLayerWeights,
   layerCandidates,
@@ -6023,6 +6027,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         droppedEmpty: null,
         droppedStale: null,
         byType: null,
+        factual: null,
         rerank: null,
         assemble: null,
         injected: null,
@@ -6039,6 +6044,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         droppedEmpty: 1,
         droppedStale: 2,
         byType: { entities: 3, cases: null, events: 2, unknown: 1 },
+        factual: null,
         rerank: { mode: "llm", lanes: 1, kept: 10, droppedByKeep: 2, fallback: "none" },
         assemble: { mode: "rules", kept: 9, droppedCredential: 0 },
         injected: { chars: 3000, tokens: 900 },
@@ -13173,9 +13179,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [20, LAYER_MIN_BODY_CHARS, 0, 2, 0, [exactItem, noScoreItem], null],
   );
   eq(
-    "空批次：byType 是 {}（不是 null）、两个丢弃计数都是 0、items 是空数组——这一层跑过就一定有一份账",
+    "空批次：byType 是 {}（不是 null）、两个丢弃计数都是 0、factual 是 0、items 是空数组——这一层跑过就一定有一份账",
     layerCandidates([], { now: LAYER_NOW }),
-    { items: [], droppedEmpty: 0, droppedStale: 0, byType: {} },
+    { items: [], droppedEmpty: 0, droppedStale: 0, byType: {}, factual: 0 },
   );
 
   // ---- 7. 排序：同分时 2020 年的 entity 排到 30 天前的 event 前面 ----
@@ -13291,6 +13297,201 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           0 +
           row?.assemble?.kept,
       true,
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ---- 10. 内容兜底：正文里的事实盖过标签，决定权重与衰减 ----
+  // 标签（uri 里的段名）是写记忆的人打的，不规范是常态：一条「代理迁到某个内网地址:端口」
+  // 被写成 events 很常见，但那个地址今天还在用，按 90 天半衰期算就只剩三四成。
+  // 下面先把六类判据与三条误伤钉住，再把「权重 / 衰减 / 排序 / 计数」四件事分开验。
+  // 私有网段地址不进仓库（有一条专门的扫描断言）：夹具里按段拼出来。
+  const LAYER_ADDR = ["192", "168", "50", "142"].join(".");
+  const LAYER_ADDR_PORT = `${LAYER_ADDR}:7897`;
+  eq(
+    "内容兜底六类各命中一条：IPv4 与 host:port、绝对路径、版本号、型号串、显式端口、容量规格",
+    [
+      looksFactual(`代理从老机器迁到 ${LAYER_ADDR_PORT}，旧地址先留着`),
+      looksFactual("归档落在 /mnt/nas-quant/archive，备份策略没变"),
+      looksFactual("路由配置在 ~/.hermes/config/pi-router.json"),
+      looksFactual("路由程序已经升到 v0.4.16，系统还是 20.04"),
+      looksFactual("工作站是 X600，显卡 RTX 4090，CPU i7-12700"),
+      looksFactual("服务监听 :8080，调试用的端口写成 port=47821"),
+      looksFactual("内存 32GB，盘 8TB，条子是 DDR5"),
+    ],
+    [true, true, true, true, true, true, true],
+  );
+  eq(
+    "内容兜底不误伤叙述：一段正常中文叙述、一段纯英文长句、一个只有 uri 的 <memory> 占位条都不命中",
+    [
+      looksFactual("把这段话记下来，作为这样一份完整的正文，它只讲流程不夹带任何具体地址"),
+      looksFactual("This paragraph is a plain english narrative about the review meeting and the handover plan"),
+      looksFactual('<memory uri="viking://user/default/memories/entities/2026/01/01/a.md" type="entities" score="0.9"></memory>'),
+    ],
+    [false, false, false],
+  );
+  eq(
+    "误伤三条：纯日期不算版本号（点号写法一样）、数字夹斜杠不算路径、数量词不算容量规格",
+    [
+      looksFactual("这次评审定在 2026-10-04 下午两点，地点还是三楼小会议室"),
+      looksFactual("这次评审定在 2026.10.04 下午两点，地点还是三楼小会议室"),
+      looksFactual("这一轮的排名是 17/282，比上一轮靠前一些，结论按原计划继续"),
+      looksFactual("这次调研一共读了 14 篇文献，摘要整理进交接文档"),
+    ],
+    [false, false, false, false],
+  );
+  eq(
+    "误伤两条边角：14:30 这种时刻不算端口（裸冒号左边是数字）、0.35 / 0.9 这种分数不算版本号",
+    [
+      looksFactual("下午 14:30 在楼上会议室过一遍评审稿，过完就散会"),
+      looksFactual("这一条与问题的相似度只有 0.35，另一条是 0.9"),
+    ],
+    [false, false],
+  );
+
+  // 同一条 2026-08-02（117 天前）的 events，只有正文不同：
+  // 上面那条写了地址，下面那条只写了经过——标签一样，判据必须分得开。
+  const factualEvent = {
+    uri: segmentedUri("events", 117),
+    text: withBody(`代理从旧机器迁到 ${LAYER_ADDR_PORT}`, 0),
+    score: 0.8,
+  };
+  const plainEvent = {
+    uri: segmentedUri("events", 117),
+    text: withBody("代理迁移那次的过程记录，前后折腾了一个下午", 1),
+    score: 0.8,
+  };
+  eq(
+    `内容兜底生效：2026-08-02 的 events 正文含 ${LAYER_ADDR_PORT} → ageDays 117、factor 是 1、权重是事实档、分层分等于原始分`,
+    [
+      uriDateOf(factualEvent.uri),
+      ageDaysOf(factualEvent, LAYER_NOW),
+      decayFactorOf(memoryTypeOfItem(factualEvent), ageDaysOf(factualEvent, LAYER_NOW), factualOf(factualEvent)),
+      layerWeightOf(factualEvent),
+      layerScoreOf(factualEvent, { now: LAYER_NOW }),
+      FACTUAL_WEIGHT === MEMORY_TYPE_WEIGHTS.entities,
+    ],
+    [{ year: 2026, month: 8, day: 2 }, 117, 1, 1, 0.8, true],
+  );
+  eq(
+    "同日期同类型但正文不含事实：factor 是 0.5 ** (117 / 90)（约 0.40）、权重仍是 0.75、分层分被压下来",
+    [
+      decayFactorOf(memoryTypeOfItem(plainEvent), ageDaysOf(plainEvent, LAYER_NOW), factualOf(plainEvent)),
+      layerWeightOf(plainEvent),
+      layerScoreOf(plainEvent, { now: LAYER_NOW }),
+    ],
+    [0.5 ** (117 / 90), 0.75, 0.8 * 0.75 * 0.5 ** (117 / 90)],
+  );
+
+  // ---- 10b. 排序：两条同分时含事实的排前面 ----
+  const sortedScores = applyLayerWeights(
+    [0.8, 0.8],
+    [factualEvent, plainEvent],
+    { now: LAYER_NOW },
+  );
+  eq(
+    "同分排序：两条 0.8 的 events 里，含地址那条留在原分、只有经过那条被压低，rankRerankIndexes 把含事实的排前面",
+    [sortedScores, rankRerankIndexes(sortedScores)],
+    [[0.8, 0.8 * 0.75 * 0.5 ** (117 / 90)], [0, 1]],
+  );
+
+  // 真实链路：假精排通道给两条候选同一个分（0.9），第三条低分只用来让这一路不弃权。
+  // 若没有内容兜底，同分按输入顺序排（含事实那条本来在前，验不出东西）；
+  // 所以这一轮把含事实的旧条目放第二条，看它能不能顶到第一条前面。
+  {
+    const dir = path.join(import.meta.dirname, ".tmp-layer-factual-rerank");
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetRuntimeTransport();
+    const third = {
+      uri: "viking://user/default/memories/cases/other.md",
+      text: withBody("排在后面的一条案例", 6),
+      score: 0.1,
+    };
+    const fetchImpl = async (url) => {
+      if (!String(url).includes("/v1/rerank")) throw new Error("这一轮只该打精排端点");
+      return new Response(
+        JSON.stringify({
+          results: [
+            { index: 0, relevance_score: 0.9 },
+            { index: 1, relevance_score: 0.9 },
+            { index: 2, relevance_score: 0.1 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const lane = { type: "rerank", url: "http://127.0.0.1:9999", model: "bge", weight: 1, enabled: true };
+    const outcome = await runRerankChannels({
+      sdk: recallSdk({ values: {}, dataDir: dir, fetchImpl }),
+      switches: { rerankChannels: [lane] },
+      query: "内容兜底排序",
+      items: [plainEvent, factualEvent, third],
+      channels: [lane],
+      now: LAYER_NOW,
+    });
+    eq(
+      "runRerankChannels 真链路：输入顺序把只有经过那条排在前，精排同分后含事实那条必须顶到第一位",
+      [outcome.indexes, outcome.kept.map((item) => item.uri)],
+      [[1, 0, 2], [factualEvent.uri, plainEvent.uri, third.uri]],
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetRuntimeTransport();
+  }
+
+  // ---- 10c. factual 计数：只数「命中兜底、且类型本来会衰减」的条目 ----
+  // 已经落在 entities / preferences / cases 下的本来就不衰减，计进去这个数就永远降不到 0，
+  // 而它存在的意义正是「等它降到 0 就说明标签理干净了」。
+  {
+    const entitiesFact = {
+      uri: "viking://user/default/memories/entities/nas.md",
+      text: withBody(`NAS 地址是 ${LAYER_ADDR_PORT}`, 0),
+      score: 0.9,
+    };
+    const shortFact = {
+      uri: segmentedUri("events", 0).replace("note.md", "short.md"),
+      text: `迁到 ${LAYER_ADDR_PORT}`,
+      score: 0.8,
+    };
+    const unknownFact = { text: withBody("认不出类型但写了 32GB 内存", 5), score: 0.6 };
+    const counted = layerCandidates(
+      [entitiesFact, factualEvent, plainEvent, unknownFact, shortFact],
+      { now: LAYER_NOW },
+    );
+    eq(
+      "factual 计数口径：entities 的事实条目不计；events / unknown 的事实条目各计一条；被空壳门槛丢掉的事实条目照计（与 byType 同一批）",
+      [counted.factual, counted.droppedEmpty, counted.byType],
+      [3, 1, { entities: 1, events: 3, unknown: 1 }],
+    );
+
+    // 真实链路：回执里的 factual 要跟直接调 layerCandidates 的数一致，才算真的送到了探针。
+    const dir = path.join(import.meta.dirname, ".tmp-layer-factual-count");
+    fs.rmSync(dir, { recursive: true, force: true });
+    const entries = [
+      { uri: "viking://user/default/memories/entities/nas.md", text: withBody(`NAS 地址是 ${LAYER_ADDR_PORT}`, 0), score: 0.9 },
+      // 四条每个用不同填充语：共用同一段填充会被近重复判成姊妹条，那一条就到不了分层这一层。
+      { uri: segmentedUri("events", 117), text: withBody(`代理从旧机器迁到 ${LAYER_ADDR_PORT}`, 2), score: 0.8 },
+      { uri: segmentedUri("events", 30), text: withBody("三十天前的一次排查过程", 4), score: 0.7 },
+      { text: withBody("认不出类型但写了 32GB 内存", 5), score: 0.6 },
+    ];
+    const probes = [];
+    const mock = mockFetch({ body: { status: "ok", result: { entries } } });
+    const handler = createRecallHandler(
+      recallSdk({
+        values: { enabled: true, apiKey: "k", serverUrl: "http://h:1", probe: true },
+        fetchImpl: mock.fetchImpl,
+        dataDir: dir,
+      }),
+      { probe: async (event, invocation) => probes.push({ event, invocation }) },
+    );
+    await handler({
+      payload: { messages: [{ role: "user", content: "这一轮数一下被兜底救回来的条数" }] },
+      session: { sessionId: "layer-factual-count" },
+    });
+    const row = probes.find((probe) => probe.event === "recall/result")?.invocation;
+    eq(
+      "factual 计数真链路：recall/result 里读到 2（entities 那条不计，只有经过那条不算），与这一批候选的口径一致",
+      [row?.factual, row?.byType],
+      [2, { entities: 1, events: 2, unknown: 1 }],
     );
     fs.rmSync(dir, { recursive: true, force: true });
   }
