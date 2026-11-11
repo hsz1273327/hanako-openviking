@@ -310,8 +310,8 @@
           },
           "captureCommitMode": {
             "type": "string",
-            "title": "写回提交策略",
-            "description": "fixed 攒够固定轮次后提交（默认 12 轮）；llm 用判断模型比较相邻两段是不是同一件事，不同就提交；discriminator 用 /v1/systemone 兼容的判别服务做同样的二值判断。语言模型判断要有判断模型，判别模型判断要有判别服务地址与决策服务模型；缺了回落到固定轮次，但保存的档位不变。",
+            "title": "写回提交策略（旧版）",
+            "description": "旧版三档，仅用于迁移：读写侧会把它换成 captureEarlyCommit / captureEarlyJudge，之后不再据此判定。",
             "default": "fixed",
             "enum": [
               "fixed",
@@ -326,22 +326,72 @@
               ]
             }
           },
+          "captureCommitSchema": {
+            "type": "string",
+            "title": "写回提交策略版本",
+            "description": "提交策略的语义版本。空串 = 老配置，读取时按旧版三档迁移；保存成功后写 2。存数字串。",
+            "default": ""
+          },
+          "captureEarlyCommit": {
+            "type": "boolean",
+            "title": "提前提交",
+            "description": "打开后每次提交前先归类，换话题就提前提交，不必等到强制轮数。默认关闭。",
+            "default": false
+          },
+          "captureEarlyJudge": {
+            "type": "string",
+            "title": "提前提交的判断方式",
+            "description": "llm 用宿主语言模型回答话题编号或 new；discriminator 用 /v1/systemone 兼容的判别服务做多选判断。默认语言模型。",
+            "default": "llm",
+            "enum": [
+              "llm",
+              "discriminator"
+            ],
+            "ui": {
+              "enumLabels": [
+                "语言模型",
+                "判别模型"
+              ]
+            }
+          },
+          "captureTopicScope": {
+            "type": "string",
+            "title": "话题作用域",
+            "description": "session 候选池只含本会话提到过的话题；global 在整张话题表里取。默认会话内。",
+            "default": "session",
+            "enum": [
+              "session",
+              "global"
+            ],
+            "ui": {
+              "enumLabels": [
+                "会话内",
+                "全局"
+              ]
+            }
+          },
+          "captureTopicCandidates": {
+            "type": "string",
+            "title": "话题候选上限",
+            "description": "每次归类最多给判断器看几个候选话题，默认 8，范围 1 到 20。存数字串。",
+            "default": "8"
+          },
           "captureCommitTurns": {
             "type": "string",
-            "title": "提交轮次（固定 / 兜底）",
-            "description": "固定轮次策略下攒够多少完整轮就提交；语言模型判断 / 判别模型判断两档下，模型一直判没有换话题时攒够这么多轮强制提交。默认 12，范围 1 到 100。一轮 = 一条用户消息加至少一条助手消息。存数字串。",
+            "title": "强制提交轮数",
+            "description": "所有情况共用：攒够这么多完整轮就提交，不看提前提交开关，也不再问判断器。默认 12，范围 1 到 100。一轮 = 一条用户消息加至少一条助手消息。存数字串。",
             "default": "12"
           },
           "captureContextTurns": {
             "type": "string",
             "title": "上下文轮数",
-            "description": "语言模型判断 / 判别模型判断时，判据回看之前多少完整轮，默认 3，范围 1 到 20。固定轮次策略不使用这一项。存数字串。",
+            "description": "提前提交打开时，归类回看之前多少完整轮，默认 3，范围 1 到 20。存数字串。",
             "default": "3"
           },
           "captureMinTurns": {
             "type": "string",
             "title": "最少触发轮数",
-            "description": "语言模型判断 / 判别模型判断时，待提交不足这么多完整轮就不调模型、不提交，默认 2，范围 1 到 50。固定轮次策略不使用这一项。存数字串。",
+            "description": "提前提交打开时，待提交不足这么多完整轮就不归类、不提前提交，默认 2，范围 1 到 50。存数字串。",
             "default": "2"
           },
           "captureServerFallback": {
@@ -359,19 +409,19 @@
           "captureModel": {
             "type": "string",
             "title": "写回判断模型",
-            "description": "语言模型判断策略使用的模型。留空表示用宿主的辅助模型（utility）；非空必须形如 provider/model，provider 与 model 各自最长 128 字符。",
+            "description": "提前提交选用语言模型时使用的模型。留空 = 用宿主的辅助模型（utility）；非空形如 provider/model，provider 与 model 各自最长 128 字符。",
             "default": ""
           },
           "captureServiceUrl": {
             "type": "string",
             "title": "写回判别服务地址",
-            "description": "判别模型判断策略使用的服务地址，需兼容 /v1/systemone。只接受 http:// 或 https://，留空表示未配置。模型与密钥沿用「决策服务」那组配置；缺地址或模型时回落到固定轮次。",
+            "description": "提前提交选用判别模型时使用的服务地址，需兼容 /v1/systemone。只接受 http:// 或 https://，留空表示未配置。模型与密钥沿用「决策服务」那组配置；缺地址或模型时不提前提交，仍按强制轮数交。",
             "default": ""
           },
           "capturePrompt": {
             "type": "string",
             "title": "写回判断题面",
-            "description": "语言模型判断与判别模型判断共用的题面，最长 2000 字符。留空表示用内置那句默认问法。判别模型的 yes/no 两条判定描述是内置的，这一格只决定怎么问。",
+            "description": "提前提交时共用的归类题面：给出已有话题，问当前这段属于哪个，都不属于就回 new。最长 2000 字符。留空表示用内置那句默认问法。判别模型的候选选项由话题表自动生成，这一格只决定怎么问。",
             "default": ""
           },
           "readOnly": {

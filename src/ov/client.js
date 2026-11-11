@@ -228,7 +228,17 @@ export function createClient({
         method: "POST",
         body: JSON.stringify({ messages }),
       }),
-    commit: (sessionId) =>
-      call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`, { method: "POST" }),
+    // 提交必须带 enable_working_memory：不带时服务端返回 accepted，但一条记忆都不抽。
+    // body 一定要是字符串：受管运行时那条路只把字符串 body 交给传输层。
+    commit: (sessionId, opts = {}) =>
+      call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`, {
+        method: "POST",
+        body: JSON.stringify({
+          enable_working_memory: true,
+          ...(Array.isArray(opts?.tags) && opts.tags.length
+            ? { extraction_metadata: { event: { tags: opts.tags } } }
+            : {}),
+        }),
+      }),
   };
 }

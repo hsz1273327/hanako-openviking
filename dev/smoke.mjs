@@ -126,6 +126,13 @@ import {
   RECALL_TIMEOUT_MIN,
   RECALL_TIMEOUT_MAX,
   CAPTURE_COMMIT_MODES,
+  CAPTURE_EARLY_JUDGES,
+  CAPTURE_TOPIC_SCOPES,
+  CAPTURE_TOPIC_CANDIDATES_DEFAULT,
+  CAPTURE_TOPIC_CANDIDATES_MIN,
+  CAPTURE_TOPIC_CANDIDATES_MAX,
+  CAPTURE_TOPIC_CANDIDATES_STEP,
+  CAPTURE_COMMIT_SCHEMA,
   CAPTURE_COMMIT_TURNS_DEFAULT,
   CAPTURE_COMMIT_TURNS_MIN,
   CAPTURE_COMMIT_TURNS_MAX,
@@ -143,6 +150,15 @@ import {
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_PROMPT_MAX,
   normalizeCaptureCommitMode,
+  normalizeCaptureEarlyCommit,
+  normalizeCaptureEarlyJudge,
+  normalizeCaptureTopicScope,
+  normalizeCaptureTopicCandidates,
+  serializeCaptureTopicCandidates,
+  captureCommitSchemaIsLegacy,
+  normalizeCaptureCommitSchema,
+  serializeCaptureCommitSchema,
+  applyCaptureCommitSchema,
   normalizeCapturePrompt,
   normalizeCaptureCommitTurns,
   serializeCaptureCommitTurns,
@@ -153,7 +169,6 @@ import {
   normalizeCaptureIdleSeconds,
   serializeCaptureIdleSeconds,
   captureModeMissing,
-  captureCommitModeOf,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { maskOf, maskString } from "../src/ov/mask.js";
@@ -334,14 +349,28 @@ import {
 } from "../src/memory/cursor.js";
 import {
   CAPTURE_TOPIC_QUESTION,
+  CAPTURE_TOPIC_FORMAT,
   CAPTURE_SAMPLE_CHARS,
   CAPTURE_ASK_TIMEOUT_MS,
   CAPTURE_ASK_MAX_TOKENS,
   renderTopicPrompt,
   parseTopicAnswer,
+  deriveTopicTitle,
+  captureTags,
   captureDecision,
   createCaptureHandler,
 } from "../src/memory/capture.js";
+// 话题表：读 / 写 / 候选池 / 记段，全部纯本地。
+import {
+  emptyTopics,
+  readTopics,
+  writeTopics,
+  withTopics,
+  newTopicId,
+  candidatePool,
+  recordSegment,
+  topicsForSession,
+} from "../src/memory/topics.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
 // 边栏会话卡的数据投影：覆盖提交语义、统计 / 提示 / peer 文案都在这里，纯函数。
@@ -376,11 +405,10 @@ import {
   CAPTURE_CONTEXT_RANGE,
   CAPTURE_MIN_RANGE,
   CAPTURE_PROMPT_MAX as UI_CAPTURE_PROMPT_MAX,
+  CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   captureFallbackNote,
-  captureModeLabels,
-  captureModeOptions,
   capturePromptDraft,
   capturePromptStatus,
   captureStatusRows,
@@ -3197,10 +3225,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 }
 // ================= 记忆共享页：状态行与面板源码 =================
 {
-  const emptyRow = { written: CAPTURE_EMPTY, lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: true };
-  const sample = { written: 3, lastCommitAt: 1704067200000, pendingTurns: 1 };
+  const emptyRow = {
+    written: CAPTURE_EMPTY,
+    lastCommit: CAPTURE_EMPTY,
+    pending: CAPTURE_EMPTY,
+    topics: CAPTURE_EMPTY,
+    disabled: true,
+  };
+  const sample = { written: 3, lastCommitAt: 1704067200000, pendingTurns: 1, topics: 2 };
   eq(
-    "captureStatusView：无会话 / 写回关 / 整份数据缺项 → 三行暂无且 disabled",
+    "captureStatusView：无会话 / 写回关 / 整份数据缺项 → 四行暂无且 disabled",
     [
       captureStatusView(null),
       captureStatusView(sample, { active: false }),
@@ -3209,7 +3243,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [emptyRow, emptyRow, emptyRow],
   );
   eq(
-    "captureStatusView：正常值给「N 条 / 时间串 / N 轮」，单条字段缺失只让那一行占位",
+    "captureStatusView：正常值给「N 条 / 时间串 / N 轮 / N 个」，单条字段缺失只让那一行占位",
     [
       captureStatusView(sample),
       captureStatusView({ written: 3 }),
@@ -3220,14 +3254,27 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         written: "3 条",
         lastCommit: new Date(1704067200000).toLocaleString("zh-CN"),
         pending: "1 轮",
+        topics: "2 个",
         disabled: false,
       },
-      { written: "3 条", lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: false },
-      { written: CAPTURE_EMPTY, lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: false },
+      {
+        written: "3 条",
+        lastCommit: CAPTURE_EMPTY,
+        pending: CAPTURE_EMPTY,
+        topics: CAPTURE_EMPTY,
+        disabled: false,
+      },
+      {
+        written: CAPTURE_EMPTY,
+        lastCommit: CAPTURE_EMPTY,
+        pending: CAPTURE_EMPTY,
+        topics: CAPTURE_EMPTY,
+        disabled: false,
+      },
     ],
   );
   eq(
-    "captureStatusRows：三行 label 逐字是 本会话已写 / 上次提交 / 待提交",
+    "captureStatusRows：四行 label 逐字是 本会话已写 / 上次提交 / 待提交 / 本会话话题数",
     captureStatusRows(sample, { active: true, autoCapture: true }),
     [
       { key: "written", label: "本会话已写", value: "3 条" },
@@ -3237,41 +3284,32 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         value: new Date(1704067200000).toLocaleString("zh-CN"),
       },
       { key: "pending", label: "待提交", value: "1 轮" },
-    ],
-  );
-  eq(
-    "captureModeLabels / captureModeOptions 与 manifest enumLabels 逐字一致",
-    [captureModeLabels, captureModeOptions()],
-    [
-      { fixed: "固定轮次", llm: "语言模型判断", discriminator: "判别模型判断" },
-      [
-        { value: "fixed", label: "固定轮次" },
-        { value: "llm", label: "语言模型判断" },
-        { value: "discriminator", label: "判别模型判断" },
-      ],
+      { key: "topics", label: "本会话话题数", value: "2 个" },
     ],
   );
   const fallbackMissingModel = captureFallbackNote({
-    mode: "llm",
-    effectiveMode: "fixed",
-    missing: ["captureModel"],
+    early: false,
+    earlyStored: true,
+    missing: ["systemoneServiceModel"],
   });
   check(
-    "captureFallbackNote：回落时说清「回落」与缺的那个判断模型",
-    fallbackMissingModel.includes("回落") && fallbackMissingModel.includes("判断模型"),
+    "captureFallbackNote：提前提交存着开着但缺决策服务模型时，说清「当前不提前提交」与缺项",
+    fallbackMissingModel.includes("当前不提前提交") &&
+      fallbackMissingModel.includes("决策服务模型"),
     fallbackMissingModel,
   );
   eq(
-    "captureFallbackNote：两档一致返回空串 / 多个缺项按人话用、号连接",
+    "captureFallbackNote：生效 / 开关本身关着返回空串 / 多个缺项按人话用、号连接",
     [
-      captureFallbackNote({ mode: "llm", effectiveMode: "llm", missing: [] }),
+      captureFallbackNote({ early: true, earlyStored: true, missing: [] }),
+      captureFallbackNote({ early: false, earlyStored: false, missing: ["captureServiceUrl"] }),
       captureFallbackNote({
-        mode: "discriminator",
-        effectiveMode: "fixed",
+        early: false,
+        earlyStored: true,
         missing: ["captureServiceUrl", "systemoneServiceModel"],
       }),
     ],
-    ["", "当前回落到固定轮次：还缺 判别服务地址、决策服务模型"],
+    ["", "", "当前不提前提交：还缺 判别服务地址、决策服务模型"],
   );
 
   const capture = uiCode("components/CapturePanel.vue");
@@ -3281,17 +3319,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     capture.slice(0, 600),
   );
   check(
-    "CapturePanel 六个机器级字段与 captureModeOptions 都在（不再只有开关）",
+    "CapturePanel 不再有三档下拉：captureModeOptions / captureCommitMode 都消失",
+    !capture.includes("captureModeOptions") && !capture.includes("captureCommitMode"),
+    capture.match(/captureModeOptions|captureCommitMode/)?.[0],
+  );
+  check(
+    "CapturePanel 新字段与提前提交开关都在",
     [
-      "captureCommitMode",
+      "captureEarlyCommit",
+      "captureEarlyJudge",
+      "captureTopicScope",
       "captureCommitTurns",
+      "captureContextTurns",
+      "captureMinTurns",
       "captureServerFallback",
       "captureServerIdleSeconds",
       "captureModel",
       "captureServiceUrl",
-      "captureModeOptions",
-    ].every((word) => capture.includes(word)),
-    capture.slice(0, 1200),
+    ].every((word) => capture.includes(word)) && capture.includes('aria-label="提前提交"'),
+    capture.slice(0, 1400),
   );
   check(
     "CapturePanel 不出现任何会话级状态字样（本会话已写 / 上次提交 / 待提交）",
@@ -3299,60 +3345,86 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     capture,
   );
   check(
-    "CapturePanel 没有出现「重排」字样",
-    !capture.includes("重排"),
-    capture.match(/重排/)?.[0],
+    "CapturePanel 没有出现「重排」字样，强制提交轮数标签固定",
+    !capture.includes("重排") &&
+      capture.includes("强制提交轮数") &&
+      !capture.includes("兜底轮次"),
+    capture.match(/重排|兜底轮次/)?.[0],
   );
 
-  const capturePromptOpenLine =
-    capture.split("\n").find((line) => line.includes("promptOpen = computed")) || "";
+  const earlyOpenLine =
+    capture.split("\n").find((line) => line.includes("earlyOpen = computed")) || "";
   check(
-    "CapturePanel 判断题面：textarea + 恢复默认按钮 + 只在 llm / discriminator 两档显示",
-    capture.includes('type="textarea"') &&
-      capture.includes("capturePrompt") &&
-      capture.includes("captureResetPrompt") &&
-      capture.includes('v-if="promptOpen"') &&
-      capturePromptOpenLine.includes("llm") &&
-      capturePromptOpenLine.includes("discriminator"),
-    capturePromptOpenLine || capture.slice(capture.indexOf("判断题面"), capture.indexOf("判断题面") + 600),
+    "CapturePanel 提前提交开关：earlyOpen 直接来自 captureEarlyCommit",
+    earlyOpenLine.includes("captureEarlyCommit"),
+    earlyOpenLine,
   );
-
   {
     const captureLines = capture.split("\n");
     const fieldBlock = (id) => {
       const index = captureLines.findIndex((line) => line.includes(`id: '${id}'`));
-      return index < 0 ? "" : captureLines.slice(Math.max(0, index - 16), index + 1).join("\n");
+      return index < 0 ? "" : captureLines.slice(Math.max(0, index - 18), index + 1).join("\n");
     };
-    const contextBlock = fieldBlock("captureContextTurns");
-    const minBlock = fieldBlock("captureMinTurns");
+    const ids = [
+      "captureEarlyJudge",
+      "captureTopicScope",
+      "captureContextTurns",
+      "captureMinTurns",
+      "capturePrompt",
+    ];
+    const blocks = ids.map(fieldBlock);
     check(
-      "CapturePanel 判据上下文 / 最少触发轮数两格都在，且条件与判断题面同（llm / discriminator）",
-      Boolean(contextBlock) &&
-        Boolean(minBlock) &&
-        contextBlock.includes('v-if="promptOpen"') &&
-        minBlock.includes('v-if="promptOpen"'),
-      `${contextBlock.slice(0, 200)} || ${minBlock.slice(0, 200)}`,
+      "CapturePanel 五个子项都在且 v-if 都认 earlyOpen",
+      blocks.every((block) => Boolean(block) && block.includes('v-if="earlyOpen"')),
+      blocks.map((block) => block.slice(0, 120)).join(" || "),
     );
     check(
-      "UI 的判据上下文 / 最少触发轮数范围与后端常量同值",
-      JSON.stringify(CAPTURE_CONTEXT_RANGE) ===
-        JSON.stringify([CAPTURE_CONTEXT_TURNS_MIN, CAPTURE_CONTEXT_TURNS_MAX]) &&
-        JSON.stringify(CAPTURE_MIN_RANGE) ===
-          JSON.stringify([CAPTURE_MIN_TURNS_MIN, CAPTURE_MIN_TURNS_MAX]),
-      `${JSON.stringify(CAPTURE_CONTEXT_RANGE)} ${JSON.stringify(CAPTURE_MIN_RANGE)}`,
+      "CapturePanel 判断题面有 textarea 与恢复默认按钮",
+      capture.includes('type="textarea"') &&
+        capture.includes("captureResetPrompt") &&
+        capture.includes("capturePrompt"),
+      capture.slice(capture.indexOf("判断题面"), capture.indexOf("判断题面") + 600),
     );
     const commitTurnsBlock = fieldBlock("captureCommitTurns");
     check(
-      "CapturePanel 兜底轮数那一格三档都在：不带 fixed 专属 v-if，标签走 commitTurnsLabel，固定轮次/兜底轮次两个词都在",
-      Boolean(commitTurnsBlock) &&
-        !commitTurnsBlock.includes("v-if=\"state.form.captureCommitMode === 'fixed'\"") &&
-        commitTurnsBlock.includes("commitTurnsLabel") &&
-        capture.includes("固定轮次") &&
-        capture.includes("兜底轮次"),
+      "CapturePanel 强制提交轮数那一格不带提前提交的 v-if（所有情况共用）",
+      Boolean(commitTurnsBlock) && !commitTurnsBlock.includes('v-if="earlyOpen"'),
       commitTurnsBlock.slice(0, 400),
+    );
+    check(
+      "UI 的判据上下文 / 最少轮数 / 候选池范围与后端常量同值",
+      JSON.stringify(CAPTURE_CONTEXT_RANGE) ===
+        JSON.stringify([CAPTURE_CONTEXT_TURNS_MIN, CAPTURE_CONTEXT_TURNS_MAX]) &&
+        JSON.stringify(CAPTURE_MIN_RANGE) ===
+          JSON.stringify([CAPTURE_MIN_TURNS_MIN, CAPTURE_MIN_TURNS_MAX]) &&
+        JSON.stringify(CAPTURE_TOPIC_CANDIDATES_RANGE) ===
+          JSON.stringify([CAPTURE_TOPIC_CANDIDATES_MIN, CAPTURE_TOPIC_CANDIDATES_MAX]),
+      `${JSON.stringify(CAPTURE_CONTEXT_RANGE)} ${JSON.stringify(CAPTURE_MIN_RANGE)} ${JSON.stringify(CAPTURE_TOPIC_CANDIDATES_RANGE)}`,
     );
   }
 
+  const captureProps = JSON.parse(
+    fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+  ).contributes.settings.schema.properties;
+  eq(
+    "manifest 的写回新键齐备：提前提交 / 判断方式 / 作用域 / 候选上限 / 版本",
+    [
+      captureProps.captureEarlyCommit?.default,
+      captureProps.captureEarlyJudge?.enum,
+      captureProps.captureTopicScope?.enum,
+      captureProps.captureTopicCandidates?.default,
+      captureProps.captureCommitSchema?.default,
+      captureProps.captureCommitTurns?.title,
+    ],
+    [
+      false,
+      ["llm", "discriminator"],
+      ["session", "global"],
+      "8",
+      "",
+      "强制提交轮数",
+    ],
+  );
   const cardApp = uiCode("CardApp.vue");
   const captureViewCode = uiCode("lib/capture-view.js");
   check(
@@ -5320,9 +5392,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 写回设置：applyCaptureConfig 落值 / 成功走回包 / 失败回滚 ----
   {
     backend["/capture-config"] = {
-      mode: "llm",
-      effectiveMode: "fixed",
-      missing: ["captureModel"],
+      early: true,
+      earlyStored: true,
+      judge: "llm",
+      missing: [],
+      topicScope: "session",
+      topicCandidates: "8",
       turns: "20",
       contextTurns: "3",
       minTurns: "2",
@@ -5335,10 +5410,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const cap = useConfig();
     await cap.refresh();
     eq(
-      "applyCaptureConfig：投影落进 captureConfig，数字串转数字进 form",
+      "applyCaptureConfig：投影落进 captureConfig，数字串转数字进 form（提前提交 / 作用域 / 候选上限也跟着换键）",
       [
         cap.state.captureConfig,
-        cap.state.form.captureCommitMode,
+        cap.state.form.captureEarlyCommit,
+        cap.state.form.captureEarlyJudge,
+        cap.state.form.captureTopicScope,
+        cap.state.form.captureTopicCandidates,
         cap.state.form.captureCommitTurns,
         cap.state.form.captureContextTurns,
         cap.state.form.captureMinTurns,
@@ -5346,8 +5424,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         cap.state.form.captureServerIdleSeconds,
       ],
       [
-        { mode: "llm", effectiveMode: "fixed", missing: ["captureModel"] },
+        { early: true, earlyStored: true, judge: "llm", missing: [] },
+        true,
         "llm",
+        "session",
+        8,
         20,
         3,
         2,
@@ -5358,9 +5439,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
     // 成功：先改后端回包，再拨控件——store 必须停在回包上，而不是它发出去的那份。
     backend["/capture-config"] = {
-      mode: "fixed",
-      effectiveMode: "fixed",
+      early: true,
+      earlyStored: true,
+      judge: "discriminator",
       missing: [],
+      topicScope: "global",
+      topicCandidates: "9",
       turns: "33",
       contextTurns: "4",
       minTurns: "5",
@@ -5370,16 +5454,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       serviceUrl: "http://judge:1",
     };
     const beforePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config").length;
-    await cap.setCaptureForm("captureCommitMode", "fixed");
+    await cap.setCaptureForm("captureEarlyJudge", "discriminator");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 九个键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 十二个新键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
         cap.state.form.captureCommitTurns,
         cap.state.form.captureContextTurns,
         cap.state.form.captureMinTurns,
+        cap.state.form.captureTopicScope,
+        cap.state.form.captureTopicCandidates,
         cap.state.form.captureServerIdleSeconds,
         cap.state.form.captureModel,
         cap.state.form.captureServiceUrl,
@@ -5388,19 +5474,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [
         1,
         [
-          "captureCommitMode",
           "captureCommitTurns",
           "captureContextTurns",
+          "captureEarlyCommit",
+          "captureEarlyJudge",
           "captureMinTurns",
           "captureModel",
           "capturePrompt",
           "captureServerFallback",
           "captureServerIdleSeconds",
           "captureServiceUrl",
+          "captureTopicCandidates",
+          "captureTopicScope",
         ],
         33,
         4,
         5,
+        "global",
+        9,
         777,
         "p/m",
         "http://judge:1",
@@ -5416,11 +5507,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "saveCapture 失败：回滚到上一次确认值，note 里带服务端错误",
       [
         cap.state.form.captureCommitTurns,
-        cap.state.form.captureCommitMode,
+        cap.state.form.captureEarlyCommit,
+        cap.state.form.captureEarlyJudge,
         cap.state.note.bad,
         cap.state.note.text.includes("写回设置写入失败"),
       ],
-      [confirmedTurns, "fixed", true, true],
+      [confirmedTurns, true, "discriminator", true, true],
     );
 
     // ---- 判断题面：touch 不发请求；set 发一单带 capturePrompt；reset 发默认全文；失败回滚 ----
@@ -7272,6 +7364,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     judge,
     logger,
     fileMissing = false,
+    topics,
+    topicsRaw,
   }) {
     const dir = path.join(root, token);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -7280,6 +7374,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     if (fileMissing) fs.rmSync(file, { force: true });
     const stateDir = path.join(dir, "state");
     prepareState(stateDir, id, { cursor, overrides });
+    fs.mkdirSync(stateDir, { recursive: true });
+    if (topics) writeTopics(stateDir, topics);
+    if (typeof topicsRaw === "string") {
+      fs.writeFileSync(path.join(stateDir, "topics.json"), topicsRaw, "utf8");
+    }
     const mock = captureFetch({ id, server, judge });
     const sdk = recallSdk({
       values: {
@@ -7728,81 +7827,367 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- 6. fixed：够轮数才提交 ----
+  // ---- 6. client.commit：抽取开关与 tags 三件套 ----
   {
-    const baseCursor = {
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    const lines = [
-      record({ id: "f1", role: "user", content: "第一问" }),
-      record({ id: "f2", role: "assistant", content: "第一答" }),
-    ];
-    const enough = await runCapture({
-      token: "fixed-enough",
-      lines,
-      cursor: baseCursor,
-      values: { captureCommitMode: "fixed", captureCommitTurns: "1" },
-      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+    const { calls, fetchImpl } = mockFetch({
+      body: { status: "ok", result: { memories_extracted: 1 } },
     });
-    const enoughCommit = enough.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
+    const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
+    await client.commit(ID);
+    await client.commit(ID, { tags: ["topic-id=t_x", "topic-seq=1", "topic-label=发布"] });
+    await client.commit(ID, { tags: [] });
+    const bodies = calls.map((call) => JSON.parse(call.init.body));
     eq(
-      "fixed：pendingTurns 够 1 轮就发 POST …/commit",
-      [enough.report.committed, Boolean(enoughCommit)],
-      [true, true],
-    );
-    eq(
-      "fixed 提交后 lastCommitCount / lastCommitAt / lastCommitMessageCount 都动了",
+      "client.commit：每次 POST …/commit 都带 enable_working_memory:true；有 tags 才有 extraction_metadata，空 tags 不出现这个键",
       [
-        enough.cursor.lastCommitCount,
-        enough.cursor.lastCommitAt,
-        enough.cursor.lastCommitMessageCount,
+        calls.map((call) => [call.init.method, pathOf(call.url)]),
+        bodies.map((body) => body.enable_working_memory),
+        bodies[1].extraction_metadata,
+        Object.hasOwn(bodies[0], "extraction_metadata"),
+        Object.hasOwn(bodies[2], "extraction_metadata"),
       ],
-      [1, NOW, 2],
-    );
-
-    const below = await runCapture({
-      token: "fixed-below-limit",
-      lines,
-      cursor: baseCursor,
-      values: { captureCommitMode: "fixed", captureCommitTurns: "2" },
-      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
-    });
-    const belowCommit = below.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    eq(
-      "fixed：不够 2 轮不发 commit，游标留在 0",
-      [below.report.committed, Boolean(belowCommit), below.cursor.lastCommitCount, below.cursor.pendingTurns],
-      [false, false, 0, 1],
-    );
-
-    // 跨边界的半轮：上一条 user 已经写过，这一轮 delta 只有 assistant。
-    // advanceCursor 只看 delta 会算出 0 轮；落盘必须按 segment 口径补成 1 轮。
-    const bridged = await runCapture({
-      token: "fixed-pending-segment",
-      lines,
-      cursor: {
-        lastEntryId: "f1",
-        lastMessageCount: 1,
-        lastCommitCount: 0,
-        lastCommitMessageCount: 0,
-        pendingTurns: 0,
-        serverPolicy: { enabled: false, idleSeconds: null },
-      },
-      values: { captureCommitMode: "fixed", captureCommitTurns: "50" },
-      server: { commit_count: 0, message_count: 1, pending_tokens: 0 },
-    });
-    eq(
-      "落盘 pendingTurns 用 segment 口径：跨边界那条 assistant 也算一轮（不是 delta 口径）",
-      [bridged.report.pendingTurns, bridged.cursor.pendingTurns],
-      [1, 1],
+      [
+        [
+          ["POST", `/api/v1/sessions/${ID}/commit`],
+          ["POST", `/api/v1/sessions/${ID}/commit`],
+          ["POST", `/api/v1/sessions/${ID}/commit`],
+        ],
+        [true, true, true],
+        { event: { tags: ["topic-id=t_x", "topic-seq=1", "topic-label=发布"] } },
+        false,
+        false,
+      ],
     );
   }
 
-  // ---- 7. llm：no 提交 / yes 不提交 / ask 抛错不提交 ----
+  // ---- 6.05 话题表 / 标签 / 题面解析的纯函数 ----
   {
+    const otherId = "t_22222222-2222-4222-8222-222222222222";
+    const tags = captureTags(
+      { id: otherId, label: "3D 打印 = 参数 调试" },
+      2,
+    );
+    eq(
+      "captureTags：三件套 key=value，label 的空白换 -、= 也换掉",
+      tags,
+      [
+        `topic-id=${otherId}`,
+        "topic-seq=2",
+        "topic-label=3D-打印-参数-调试",
+      ],
+    );
+    eq(
+      "captureTags：label 为空兜底 topic",
+      captureTags({ id: otherId, label: "  " }, 1)[2],
+      "topic-label=topic",
+    );
+    const cands3 = [
+      { id: otherId, label: "发布窗口", summary: "周四上线" },
+      { id: newTopicId(), label: "上线检查", summary: "清单" },
+      { id: newTopicId(), label: "灯带电源", summary: "走线" },
+    ];
+    eq(
+      "parseTopicAnswer：「归属：」行与全文都认 new / 新 / 新话题 / 都不是与 1..N 的整数，返回 { choice, label }",
+      [
+        parseTopicAnswer("new", cands3),
+        parseTopicAnswer("新", cands3),
+        parseTopicAnswer("新话题", cands3),
+        parseTopicAnswer("都不是", cands3),
+        parseTopicAnswer("2", cands3),
+        parseTopicAnswer("答案是第 4 个，其实是 2", cands3),
+        parseTopicAnswer("9", cands3),
+        parseTopicAnswer("", cands3),
+      ],
+      [
+        { choice: "new", label: "" },
+        { choice: "new", label: "" },
+        { choice: "new", label: "" },
+        { choice: "new", label: "" },
+        { choice: 2, label: "" },
+        { choice: 2, label: "" },
+        null,
+        null,
+      ],
+    );
+    eq(
+      "parseTopicAnswer：归属行认全角/半角冒号、整行裸数字与 new / NEW，label 从「主题：」抽",
+      [
+        parseTopicAnswer("归属：1", cands3),
+        parseTopicAnswer("归属: 1", cands3),
+        parseTopicAnswer("1", cands3),
+        parseTopicAnswer("NEW", cands3),
+        parseTopicAnswer("主题：灯带电源走线\n归属：new", cands3),
+      ],
+      [
+        { choice: 1, label: "" },
+        { choice: 1, label: "" },
+        { choice: 1, label: "" },
+        { choice: "new", label: "" },
+        { choice: "new", label: "灯带电源走线" },
+      ],
+    );
+    eq(
+      "parseTopicAnswer：markdown 装饰照认（**归属：1**、> - 主题），label 去掉装饰并压空白",
+      [
+        parseTopicAnswer("**归属：1**", cands3),
+        parseTopicAnswer("> - **主题：**  灯带   电源\n- 归属: 2", cands3),
+      ],
+      [
+        { choice: 1, label: "" },
+        { choice: 2, label: "灯带 电源" },
+      ],
+    );
+    eq(
+      "parseTopicAnswer：回答里出现候选 label 原文就按那个候选认，长 label 优先",
+      [
+        parseTopicAnswer("我就是上线检查那段", cands3),
+        parseTopicAnswer(
+          "说的就是上线检查",
+          [
+            { id: otherId, label: "上线", summary: "短" },
+            { id: newTopicId(), label: "上线检查", summary: "长" },
+          ],
+        ),
+      ],
+      [
+        { choice: 2, label: "" },
+        { choice: 2, label: "" },
+      ],
+    );
+    eq(
+      "parseTopicAnswer：认不出给 null（越界 / 说不好 / 空候选时的数字），空候选仍认 new",
+      [
+        parseTopicAnswer("归属：9", cands3),
+        parseTopicAnswer("说不好", cands3),
+        parseTopicAnswer("1", []),
+        parseTopicAnswer("归属：new", []),
+      ],
+      [null, null, null, { choice: "new", label: "" }],
+    );
+    eq(
+      "deriveTopicTitle：label 优先用 theme，没有 theme 退回第一条 user 压空白截 24 字，summary 取第一条消息截 80 字",
+      [
+        deriveTopicTitle([
+          { role: "assistant", content: "先说话的是助手" },
+          { role: "user", content: "  第一行  第二行\n第三行  " },
+        ]),
+        deriveTopicTitle(
+          [{ role: "user", content: "层高还是 0.2" }],
+          "灯带电源走线",
+        ),
+      ],
+      [
+        { label: "第一行 第二行 第三行", summary: "先说话的是助手" },
+        { label: "灯带电源走线", summary: "层高还是 0.2" },
+      ],
+    );
+
+    const rendered = renderTopicPrompt(
+      [{ role: "user", content: "旧内容" }],
+      [{ role: "user", content: "新内容" }],
+      [
+        { id: otherId, label: "发布窗口", summary: "周四上线" },
+        { id: newTopicId(), label: "上线检查", summary: "清单" },
+      ],
+      "选一个",
+    );
+    check(
+      "renderTopicPrompt：题面 + 编号候选 + 之前 / 对话两段上下文 + 固定追加的格式块",
+      rendered.startsWith("选一个") &&
+        rendered.includes("[1] 发布窗口 —— 周四上线") &&
+        rendered.includes("[2] 上线检查 —— 清单") &&
+        rendered.includes("之前（供参考）：") &&
+        rendered.includes("[用户] 旧内容") &&
+        rendered.includes("对话：") &&
+        rendered.includes("[用户] 新内容") &&
+        rendered.includes(CAPTURE_TOPIC_FORMAT) &&
+        CAPTURE_TOPIC_FORMAT.includes("主题：") &&
+        CAPTURE_TOPIC_FORMAT.includes("归属："),
+      rendered,
+    );
+
+    const empty = emptyTopics();
+    eq(
+      "readTopics：文件不存在 → 空表，不抛",
+      readTopics(path.join(root, "no-such-dir")),
+      empty,
+    );
+    const brokenDir = path.join(root, "broken-topics");
+    fs.mkdirSync(brokenDir, { recursive: true });
+    fs.writeFileSync(path.join(brokenDir, "topics.json"), "{坏 JSON", "utf8");
+    eq(
+      "readTopics：坏 JSON → 空表，不抛",
+      readTopics(brokenDir),
+      empty,
+    );
+    fs.writeFileSync(path.join(brokenDir, "topics.json"), "", "utf8");
+    eq("readTopics：空文件 → 空表，不抛", readTopics(brokenDir), empty);
+    fs.writeFileSync(
+      path.join(brokenDir, "topics.json"),
+      JSON.stringify({
+        version: 1,
+        topics: [
+          { id: "not-a-topic", segments: 1 },
+          { id: otherId, segments: 0 },
+          { id: otherId, segments: "2", sessionIds: ["s1", 3], status: "dormant" },
+        ],
+      }),
+      "utf8",
+    );
+    eq(
+      "readTopics：坏 id / 缺段数的项丢掉，合法项归一化（sessionIds 只留字符串、状态只认 active/dormant）",
+      readTopics(brokenDir).topics,
+      [
+        {
+          id: otherId,
+          label: "",
+          summary: "",
+          sessionIds: ["s1"],
+          firstSeenAt: "",
+          lastSeenAt: "",
+          segments: 2,
+          status: "dormant",
+        },
+      ],
+    );
+
+    const table = emptyTopics();
+    const first = recordSegment(table, {
+      verdict: { kind: "new", label: "发布窗口", summary: "周四上线" },
+      sessionId: "s1",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    const second = recordSegment(table, {
+      verdict: { kind: "existing", id: first.topic.id },
+      sessionId: "s2",
+      at: "2026-01-02T00:00:00.000Z",
+    });
+    eq(
+      "recordSegment：新建是 t_+UUID、seq 1；认到同一 id 时 segments+1、合会话、更新 lastSeenAt",
+      [
+        /^t_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(first.topic.id),
+        first.seq,
+        first.isNew,
+        second.seq,
+        second.isNew,
+        second.topic.segments,
+        second.topic.sessionIds,
+        second.topic.lastSeenAt,
+      ],
+      [true, 1, true, 2, false, 2, ["s1", "s2"], "2026-01-02T00:00:00.000Z"],
+    );
+
+    const serialDir = path.join(root, "topics-serialize");
+    fs.rmSync(serialDir, { recursive: true, force: true });
+    await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        withTopics(serialDir, (table) =>
+          recordSegment(table, {
+            verdict: { kind: "new", label: `并发 ${index}`, summary: "" },
+            sessionId: "s1",
+            at: `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+          }),
+        ),
+      ),
+    );
+    eq(
+      "withTopics 按 dataDir 串行化：12 个并发的新话题一个都不丢",
+      readTopics(serialDir).topics.length,
+      12,
+    );
+    const notADir = path.join(root, "topics-not-a-dir");
+    fs.writeFileSync(notADir, "x", "utf8");
+    eq(
+      "writeTopics 写不进去时返回 false，不抛",
+      writeTopics(notADir, { version: 1, topics: [] }),
+      false,
+    );
+
+    const poolTable = {
+      version: 1,
+      topics: [
+        { ...first.topic, id: "t_11111111-1111-4111-8111-111111111111", sessionIds: ["s1"], lastSeenAt: "2026-01-01T00:00:00.000Z" },
+        { ...first.topic, id: "t_33333333-3333-4333-8333-333333333333", sessionIds: ["s2"], lastSeenAt: "2026-01-03T00:00:00.000Z" },
+        { ...first.topic, id: "t_44444444-4444-4444-8444-444444444444", sessionIds: ["s1"], lastSeenAt: "2026-01-04T00:00:00.000Z", status: "dormant" },
+        { ...first.topic, id: "t_55555555-5555-4555-8555-555555555555", sessionIds: ["s1"], lastSeenAt: "2026-01-05T00:00:00.000Z" },
+      ],
+    };
+    eq(
+      "candidatePool：session 作用域只收本会话、dormant 不进池、按 lastSeenAt 倒序",
+      [
+        candidatePool(poolTable, { sessionId: "s1", scope: "session", limit: 8 }).map((topic) => topic.id),
+        candidatePool(poolTable, { sessionId: "s1", scope: "global", limit: 8 }).map((topic) => topic.id),
+        candidatePool(poolTable, { sessionId: "s1", scope: "global", limit: 2 }).map((topic) => topic.id),
+      ],
+      [
+        [
+          "t_55555555-5555-4555-8555-555555555555",
+          "t_11111111-1111-4111-8111-111111111111",
+        ],
+        [
+          "t_55555555-5555-4555-8555-555555555555",
+          "t_33333333-3333-4333-8333-333333333333",
+          "t_11111111-1111-4111-8111-111111111111",
+        ],
+        [
+          "t_55555555-5555-4555-8555-555555555555",
+          "t_33333333-3333-4333-8333-333333333333",
+        ],
+      ],
+    );
+    eq(
+      "topicsForSession：含 dormant，只数本会话",
+      topicsForSession(poolTable, "s1").map((topic) => topic.id),
+      [
+        "t_11111111-1111-4111-8111-111111111111",
+        "t_44444444-4444-4444-8444-444444444444",
+        "t_55555555-5555-4555-8555-555555555555",
+      ],
+    );
+
+    eq(
+      "captureDecision 顺序：empty → 强制轮数（不归类）→ 关提前提交 → 最少轮数 → 基线 → 归类",
+      [
+        await captureDecision({ pendingTurns: 0, forcedTurns: 2, early: true, classify: async () => ({ kind: "new" }) }),
+        await captureDecision({ pendingTurns: 2, forcedTurns: 2, early: true, classify: async () => ({ kind: "new" }) }),
+        await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: false, classify: async () => ({ kind: "new" }) }),
+        await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: true, minTurns: 2, classify: async () => ({ kind: "new" }) }),
+        await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: true, minTurns: 1, previousEmpty: true, classify: async () => ({ kind: "new" }) }),
+      ],
+      [
+        { commit: false, reason: "empty" },
+        { commit: true, reason: "turns" },
+        { commit: false, reason: "below-limit" },
+        { commit: false, reason: "too-few-turns" },
+        { commit: true, reason: "baseline" },
+      ],
+    );
+  }
+
+  // ---- 7. 提前提交：归类成功就按话题切段，失败本轮不动 ----
+  {
+    const topicId = "t_66666666-6666-4666-8666-666666666666";
+    const existing = {
+      version: 1,
+      topics: [
+        {
+          id: topicId,
+          label: "发布窗口",
+          summary: "周四上线",
+          sessionIds: [ID],
+          firstSeenAt: "2026-01-01T00:00:00.000Z",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+          segments: 1,
+          status: "active",
+        },
+      ],
+    };
+    const lines = [
+      record({ id: "p1", role: "user", content: "上一轮：发布窗口" }),
+      record({ id: "p2", role: "assistant", content: "上一轮：定在周四" }),
+      record({ id: "l1", role: "user", content: "继续看发布窗口" }),
+      record({ id: "l2", role: "assistant", content: "好，先看环境" }),
+    ];
     const judgeCursor = {
       lastEntryId: "p2",
       lastMessageCount: 2,
@@ -7810,854 +8195,527 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       lastCommitMessageCount: 2,
       serverPolicy: { enabled: false, idleSeconds: null },
     };
-    const lines = [
-      record({ id: "p1", role: "user", content: "上一轮：发布窗口" }),
-      record({ id: "p2", role: "assistant", content: "上一轮：定在周四" }),
-      record({ id: "l1", role: "user", content: "今天聊部署" }),
-      record({ id: "l2", role: "assistant", content: "好，先看环境" }),
-    ];
     const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
-    const llmValues = {
-      captureCommitMode: "llm",
+    const llmBase = {
+      captureCommitSchema: "2",
+      captureEarlyCommit: true,
+      captureEarlyJudge: "llm",
       captureModel: "acme/model",
       captureMinTurns: "1",
+      captureCommitTurns: "100",
     };
 
-    const noModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    const sameModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
     });
-    const no = await runCapture({
-      token: "llm-no",
+    const same = await runCapture({
+      token: "topic-same",
       lines,
       cursor: judgeCursor,
-      values: llmValues,
-      models: noModel.models,
+      values: llmBase,
+      models: sameModel.models,
       server: pending,
+      topics: existing,
     });
-    const noCommit = no.calls.find(
+    const sameCommit = same.calls.find(
       (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
     );
     eq(
-      "llm：judge 回 no 就提交",
-      [no.report.committed, Boolean(noCommit), no.cursor.lastCommitCount],
-      [true, true, 1],
+      "提前提交 + llm 认出编号 1：提交、归到同一话题、seq 加到 2",
+      [
+        same.report.committed,
+        Boolean(sameCommit),
+        same.report.topic?.id,
+        same.report.topic?.seq,
+        same.report.topic?.isNew,
+        same.report.mode,
+      ],
+      [true, true, topicId, 2, false, "llm"],
     );
     eq(
-      "llm 提交后 lastCommitCount / lastCommitAt / lastCommitMessageCount 都动了",
-      [no.cursor.lastCommitCount, no.cursor.lastCommitAt, no.cursor.lastCommitMessageCount],
-      [1, NOW, 4],
+      "提前提交的 commit 带三件套 tags（id / seq / label）",
+      bodyOf(sameCommit).extraction_metadata.event.tags,
+      [`topic-id=${topicId}`, "topic-seq=2", "topic-label=发布窗口"],
     );
-    const noPrompt = String(noModel.calls.stream[0]?.messages?.[0]?.content || "");
     check(
-      "llm 的题面带「之前 / 现在」两个抬头、按角色标记逐条渲染，maxTokens 用写回那一档",
-      noPrompt.includes("之前：") &&
-        noPrompt.includes("现在：") &&
-        noPrompt.includes("[用户] 上一轮：发布窗口") &&
-        noPrompt.includes("[助手] 上一轮：定在周四") &&
-        noPrompt.includes("[用户] 今天聊部署") &&
-        noModel.calls.stream[0]?.maxTokens === CAPTURE_ASK_MAX_TOKENS,
-      JSON.stringify(noModel.calls.stream[0] || {}),
+      "llm 归类题面里有编号候选与之前 / 对话",
+      String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes("[1] 发布窗口") &&
+        String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes("之前（供参考）："),
+      JSON.stringify(sameModel.calls.stream[0] || {}),
+    );
+    check(
+      "llm 路径的题面含固定追加的答案格式块（主题 / 归属 / 只输出这两行）",
+      String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
+        CAPTURE_TOPIC_FORMAT,
+      ) &&
+        String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
+          "只输出这两行",
+        ),
+      String(sameModel.calls.stream[0]?.messages?.[0]?.content || ""),
     );
 
-    const yesModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    const newModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "new" }]),
     });
-    const yes = await runCapture({
-      token: "llm-yes",
+    const fresh = await runCapture({
+      token: "topic-new",
       lines,
       cursor: judgeCursor,
-      values: llmValues,
-      models: yesModel.models,
+      values: llmBase,
+      models: newModel.models,
       server: pending,
+      topics: existing,
     });
-    const yesCommit = yes.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
     eq(
-      "llm：judge 回 yes 不提交，待提交轮数留着",
-      [yes.report.committed, Boolean(yesCommit), yes.cursor.lastCommitCount, yes.cursor.pendingTurns],
-      [false, false, 0, 1],
+      "提前提交 + llm 回 new：提交并新建话题",
+      [
+        fresh.report.committed,
+        fresh.report.topic?.isNew,
+        fresh.report.topic?.seq,
+        fresh.report.topic?.id !== topicId,
+      ],
+      [true, true, 1, true],
     );
 
-    const warnings = [];
-    const throwModel = modelSdk({
+    const themedModel = modelSdk({
+      stream: () =>
+        ndjsonResponse([
+          { type: "text-delta", delta: "主题：灯带电源走线\n归属：new" },
+        ]),
+    });
+    const themed = await runCapture({
+      token: "topic-new-theme",
+      lines,
+      cursor: judgeCursor,
+      values: llmBase,
+      models: themedModel.models,
+      server: pending,
+      topics: existing,
+    });
+    eq(
+      "提前提交 + llm 回「主题 + new」：新话题的 label 用主题那句，不用本段第一句",
+      [themed.report.committed, themed.report.topic?.label, themed.report.topic?.isNew],
+      [true, "灯带电源走线", true],
+    );
+
+    // choice 题的答案形状由 questions.q 决定：题面末尾不能带「只输出这两行」的格式块。
+    const disc = await runCapture({
+      token: "topic-discriminator-prompt",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        ...llmBase,
+        captureEarlyJudge: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+      },
+      server: pending,
+      topics: existing,
+      judge: () => ({ answers: { q: { choice: "t1", confidence: 0.9 } } }),
+    });
+    const systemoneCall = disc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    const systemoneBody = bodyOf(systemoneCall);
+    eq(
+      "discriminator 路径：state.content 有题面与「对话：」但不带答案格式块，instructions 仍是题面那一句",
+      [
+        disc.report.committed,
+        disc.report.topic?.id,
+        typeof systemoneCall,
+        systemoneBody.state?.type,
+        systemoneBody.state?.content?.includes("对话："),
+        systemoneBody.state?.content?.includes("只输出这两行"),
+        systemoneBody.questions?.q?.type,
+        systemoneBody.questions?.q?.instructions,
+      ],
+      [
+        true,
+        topicId,
+        "object",
+        "text",
+        true,
+        false,
+        "choice",
+        CAPTURE_TOPIC_QUESTION,
+      ],
+    );
+
+    const failModel = modelSdk({
       stream: async () => {
         throw new Error("judge boom");
       },
     });
+    const warnings = [];
     const failed = await runCapture({
-      token: "llm-throw",
+      token: "topic-classify-fail-early",
       lines,
       cursor: judgeCursor,
-      values: llmValues,
-      models: throwModel.models,
+      values: llmBase,
+      models: failModel.models,
       server: pending,
+      topics: existing,
       logger: { warn: (message) => warnings.push(String(message)) },
     });
     const failedCommit = failed.calls.find(
       (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
     );
     eq(
-      "llm：judge 抛错不提交，游标停在原处",
-      [failed.report.committed, Boolean(failedCommit), failed.cursor.lastCommitCount],
-      [false, false, 0],
-    );
-    check(
-      "llm：judge 抛错只记一条 warn（不把异常丢回宿主）",
-      warnings.some((message) => message.includes("topic judge failed")),
-      warnings.join(" | "),
+      "提前提交时判断抛错：本轮不提交、游标不动，并记 warn",
+      [
+        failed.report.committed,
+        Boolean(failedCommit),
+        failed.cursor.lastCommitCount,
+        warnings.some((message) => message.includes("topic judge failed")),
+      ],
+      [false, false, 0, true],
     );
   }
 
-  // ---- 8. discriminator：choice=no 提交 / yes 不提交 / 形状不认识不提交 ----
-  {
-    const judgeCursor = {
-      lastEntryId: "p2",
-      lastMessageCount: 2,
-      lastCommitCount: 0,
-      lastCommitMessageCount: 2,
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    const lines = [
-      record({ id: "p1", role: "user", content: "上一轮：项目评审" }),
-      record({ id: "p2", role: "assistant", content: "上一轮：定在周三" }),
-      record({ id: "d1", role: "user", content: "评审改到周五" }),
-      record({ id: "d2", role: "assistant", content: "我记下了" }),
-    ];
-    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
-    const discValues = {
-      captureCommitMode: "discriminator",
-      captureServiceUrl: "http://judge:1",
-      systemoneServiceModel: "judge-model",
-      systemoneServiceKey: "",
-      captureMinTurns: "1",
-    };
-
-    const no = await runCapture({
-      token: "disc-no",
-      lines,
-      cursor: judgeCursor,
-      values: discValues,
-      server: pending,
-      judge: () => ({ answers: { q: { choice: "no", confidence: 0.92 } } }),
-    });
-    const noCommit = no.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    const judgeCall = no.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
-    eq(
-      "discriminator：answers.q.choice=no 就提交",
-      [no.report.committed, Boolean(noCommit), no.cursor.lastCommitCount],
-      [true, true, 1],
-    );
-    check(
-      "discriminator 请求体带 model / state.content / choice 题面与 yes/no criteria",
-      Boolean(judgeCall) &&
-        bodyOf(judgeCall).model === "judge-model" &&
-        String(bodyOf(judgeCall).state?.content || "").includes("之前：") &&
-        String(bodyOf(judgeCall).state?.content || "").includes("[用户] 上一轮：项目评审") &&
-        bodyOf(judgeCall).questions?.q?.type === "choice" &&
-        bodyOf(judgeCall).questions?.q?.instructions === CAPTURE_TOPIC_QUESTION &&
-        Boolean(bodyOf(judgeCall).questions?.q?.criteria?.yes) &&
-        Boolean(bodyOf(judgeCall).questions?.q?.criteria?.no),
-      judgeCall ? JSON.stringify(bodyOf(judgeCall)) : "没有发出 systemone 请求",
-    );
-
-    const yes = await runCapture({
-      token: "disc-yes",
-      lines,
-      cursor: judgeCursor,
-      values: discValues,
-      server: pending,
-      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
-    });
-    const yesCommit = yes.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    eq(
-      "discriminator：answers.q.choice=yes 不提交",
-      [yes.report.committed, Boolean(yesCommit), yes.cursor.lastCommitCount],
-      [false, false, 0],
-    );
-
-    const bad = await runCapture({
-      token: "disc-bad-shape",
-      lines,
-      cursor: judgeCursor,
-      values: discValues,
-      server: pending,
-      judge: () => ({ answers: { q: { choice: "maybe", confidence: 0.8 } } }),
-    });
-    const badCommit = bad.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    eq(
-      "discriminator：返回结构不认识当判断失败，不提交",
-      [bad.report.committed, Boolean(badCommit), bad.cursor.lastCommitCount],
-      [false, false, 0],
-    );
-  }
-
-  // ---- 8.1 判断题面可配：两档都读 capturePrompt，空 = 内置默认 ----
+  // ---- 7.1 强制提交 / 基线：提交那一刻补归类，失败按新话题落 ----
   {
     const lines = [
-      record({ id: "p1", role: "user", content: "上一轮：发布窗口" }),
-      record({ id: "p2", role: "assistant", content: "上一轮：定在周四" }),
-      record({ id: "q1", role: "user", content: "继续看发布窗口" }),
-      record({ id: "q2", role: "assistant", content: "好" }),
+      record({ id: "f1", role: "user", content: "第一问 发布窗口" }),
+      record({ id: "f2", role: "assistant", content: "第一答" }),
     ];
-    const judgeCursor = {
-      lastEntryId: "p2",
-      lastMessageCount: 2,
-      lastCommitCount: 0,
-      lastCommitMessageCount: 2,
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
-    const custom = "自定义题面XYZ";
-
-    // 空配置：两档都落到 CAPTURE_TOPIC_QUESTION。
-    const emptyModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    await runCapture({
-      token: "prompt-empty-llm",
+    const forced = await runCapture({
+      token: "forced-topic",
       lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "llm",
-        captureModel: "acme/model",
-        capturePrompt: "",
-        captureMinTurns: "1",
-      },
-      models: emptyModel.models,
-      server: pending,
-    });
-    const emptyLlmContent = String(emptyModel.calls.stream[0]?.messages?.[0]?.content || "");
-    const emptyDisc = await runCapture({
-      token: "prompt-empty-disc",
-      lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "http://judge:1",
-        systemoneServiceModel: "judge-model",
-        capturePrompt: "",
-        captureMinTurns: "1",
-      },
-      server: pending,
-      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
-    });
-    const emptyDiscCall = emptyDisc.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
-    eq(
-      "capturePrompt 为空：llm 的 content 以 CAPTURE_TOPIC_QUESTION 开头，discriminator 的 instructions 就是它",
-      [
-        emptyLlmContent.startsWith(CAPTURE_TOPIC_QUESTION),
-        emptyDiscCall ? bodyOf(emptyDiscCall).questions?.q?.instructions : undefined,
-      ],
-      [true, CAPTURE_TOPIC_QUESTION],
-    );
-
-    // 非空：两档都用用户那句，内置那句不再出现；criteria 仍是写死的那两条。
-    const customModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    await runCapture({
-      token: "prompt-custom-llm",
-      lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "llm",
-        captureModel: "acme/model",
-        capturePrompt: custom,
-        captureMinTurns: "1",
-      },
-      models: customModel.models,
-      server: pending,
-    });
-    const customLlmContent = String(customModel.calls.stream[0]?.messages?.[0]?.content || "");
-    const customDisc = await runCapture({
-      token: "prompt-custom-disc",
-      lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "http://judge:1",
-        systemoneServiceModel: "judge-model",
-        capturePrompt: custom,
-        captureMinTurns: "1",
-      },
-      server: pending,
-      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
-    });
-    const customDiscCall = customDisc.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
-    const customBody = customDiscCall ? bodyOf(customDiscCall) : {};
-    eq(
-      "capturePrompt 非空：llm 以用户那句开头 / discriminator 的 instructions 就是它，criteria 仍写死",
-      [
-        customLlmContent.startsWith(custom),
-        customLlmContent.includes(CAPTURE_TOPIC_QUESTION),
-        customBody.questions?.q?.instructions,
-        customBody.questions?.q?.criteria?.yes,
-        customBody.questions?.q?.criteria?.no,
-      ],
-      [true, false, custom, "两段在讲同一件事", "两段换了一件事"],
-    );
-  }
-
-  // ---- 8.2 两档的最少触发轮数与判据回看轮数 ----
-  {
-    const judgeCursor = {
-      lastEntryId: "p2",
-      lastMessageCount: 2,
-      lastCommitCount: 0,
-      lastCommitMessageCount: 2,
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    const lines = [
-      record({ id: "p1", role: "user", content: "上一轮用户" }),
-      record({ id: "p2", role: "assistant", content: "上一轮助手" }),
-      record({ id: "c1", role: "user", content: "这一段用户" }),
-      record({ id: "c2", role: "assistant", content: "这一段助手" }),
-    ];
-    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
-    const llmBase = { captureCommitMode: "llm", captureModel: "acme/model" };
-
-    const tooFewModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
-    });
-    const tooFewLlm = await runCapture({
-      token: "min-turns-llm",
-      lines,
-      cursor: judgeCursor,
-      values: { ...llmBase, captureMinTurns: "2" },
-      models: tooFewModel.models,
-      server: pending,
-    });
-    const tooFewLlmCommit = tooFewLlm.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    eq(
-      "llm：待提交 1 轮、captureMinTurns=2 → 不提交、不调模型",
-      [
-        tooFewLlm.report.committed,
-        Boolean(tooFewLlmCommit),
-        tooFewModel.calls.stream.length,
-      ],
-      [false, false, 0],
-    );
-
-    let discAsks = 0;
-    const tooFewDisc = await runCapture({
-      token: "min-turns-disc",
-      lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "http://judge:1",
-        systemoneServiceModel: "judge-model",
-        captureMinTurns: "2",
-      },
-      server: pending,
-      judge: () => {
-        discAsks += 1;
-        return { answers: { q: { choice: "no", confidence: 0.9 } } };
-      },
-    });
-    const tooFewDiscCommit = tooFewDisc.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    const tooFewDiscJudge = tooFewDisc.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
-    eq(
-      "discriminator：待提交 1 轮、captureMinTurns=2 → 不提交、不发 /v1/systemone",
-      [
-        tooFewDisc.report.committed,
-        Boolean(tooFewDiscCommit),
-        Boolean(tooFewDiscJudge),
-        discAsks,
-      ],
-      [false, false, false, 0],
-    );
-
-    const enoughModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    const enough = await runCapture({
-      token: "min-turns-enough",
-      lines,
-      cursor: judgeCursor,
-      values: { ...llmBase, captureMinTurns: "1" },
-      models: enoughModel.models,
-      server: pending,
-    });
-    eq(
-      "llm：同样夹具把 captureMinTurns 设成 1 → 正常调一次模型",
-      [enoughModel.calls.stream.length, enough.report.committed],
-      [1, false],
-    );
-
-    const fixed = await runCapture({
-      token: "min-turns-fixed-ignored",
-      lines: [
-        record({ id: "f1", role: "user", content: "固定档用户" }),
-        record({ id: "f2", role: "assistant", content: "固定档助手" }),
-      ],
-      cursor: { serverPolicy: { enabled: false, idleSeconds: null } },
-      values: {
-        captureCommitMode: "fixed",
-        captureCommitTurns: "1",
-        captureMinTurns: "50",
-      },
+      values: { captureCommitSchema: "2", captureCommitTurns: "1" },
       server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
     });
-    const fixedCommit = fixed.calls.find(
+    const forcedCommit = forced.calls.find(
       (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
     );
     eq(
-      "fixed 不受 captureMinTurns 影响：1 轮、阈值 1、min 50 → 仍然提交",
-      [fixed.report.committed, Boolean(fixedCommit)],
-      [true, true],
-    );
-
-    const contextLines = [];
-    for (let index = 1; index <= 5; index += 1) {
-      contextLines.push(
-        record({ id: `o${index * 2 - 1}`, role: "user", content: `旧轮${index}用户` }),
-        record({ id: `o${index * 2}`, role: "assistant", content: `旧轮${index}助手` }),
-      );
-    }
-    contextLines.push(
-      record({ id: "n1", role: "user", content: "现在话题用户" }),
-      record({ id: "n2", role: "assistant", content: "现在话题助手" }),
-    );
-    const contextCursor = {
-      lastEntryId: "o10",
-      lastMessageCount: 10,
-      lastCommitCount: 0,
-      lastCommitMessageCount: 10,
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    const contextModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    await runCapture({
-      token: "context-turns-2",
-      lines: contextLines,
-      cursor: contextCursor,
-      values: { ...llmBase, captureContextTurns: "2", captureMinTurns: "1" },
-      models: contextModel.models,
-      server: { commit_count: 0, message_count: 10, pending_tokens: 10 },
-    });
-    const contextContent = String(
-      contextModel.calls.stream[0]?.messages?.[0]?.content || "",
-    );
-    check(
-      "captureContextTurns=2：判据只带最近 2 轮旧对话，最早那轮不出现，现在那段仍在",
-      contextContent.includes("[用户] 旧轮4用户") &&
-        contextContent.includes("[助手] 旧轮4助手") &&
-        contextContent.includes("[用户] 旧轮5用户") &&
-        contextContent.includes("[助手] 旧轮5助手") &&
-        !contextContent.includes("旧轮1用户") &&
-        !contextContent.includes("旧轮1助手") &&
-        !contextContent.includes("旧轮3用户") &&
-        contextContent.includes("[用户] 现在话题用户"),
-      contextContent,
-    );
-  }
-
-  // ---- 8.2.1 兜底轮数：到阈值不再问模型，直接提交 ----
-  {
-    const judgeCursor = {
-      lastEntryId: "p2",
-      lastMessageCount: 2,
-      lastCommitCount: 0,
-      lastCommitMessageCount: 2,
-      serverPolicy: { enabled: false, idleSeconds: null },
-    };
-    // 两轮待提交（c1–c4），阈值 2、最少 1：正好卡在兜底线上。
-    const lines = [
-      record({ id: "p1", role: "user", content: "上一轮用户" }),
-      record({ id: "p2", role: "assistant", content: "上一轮助手" }),
-      record({ id: "c1", role: "user", content: "这一段用户一" }),
-      record({ id: "c2", role: "assistant", content: "这一段助手一" }),
-      record({ id: "c3", role: "user", content: "这一段用户二" }),
-      record({ id: "c4", role: "assistant", content: "这一段助手二" }),
-    ];
-    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
-
-    const maxModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "same" }]),
-    });
-    const maxLlm = await runCapture({
-      token: "max-turns-llm",
-      lines,
-      cursor: judgeCursor,
-      values: {
-        captureCommitMode: "llm",
-        captureModel: "acme/model",
-        captureMinTurns: "1",
-        captureCommitTurns: "2",
-      },
-      models: maxModel.models,
-      server: pending,
-    });
-    const maxLlmCommit = maxLlm.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    eq(
-      "端到端 llm：待提交 2 轮、兜底阈值 2 → 直接提交，模型一次都不调",
+      "强制轮数路径：不调判断器，提交那一刻按新话题落表，commit 带 enable_working_memory 与三件套",
       [
-        maxLlm.report.committed,
-        Boolean(maxLlmCommit),
-        maxModel.calls.stream.length,
+        forced.report.committed,
+        forced.report.topic?.isNew,
+        forced.report.topic?.seq,
+        /^t_[0-9a-f-]{36}$/i.test(forced.report.topic?.id || ""),
+        bodyOf(forcedCommit).enable_working_memory,
+        bodyOf(forcedCommit).extraction_metadata.event.tags,
       ],
-      [true, true, 0],
+      [
+        true,
+        true,
+        1,
+        true,
+        true,
+        [
+          `topic-id=${forced.report.topic?.id}`,
+          "topic-seq=1",
+          "topic-label=第一问-发布窗口",
+        ],
+      ],
+    );
+    eq(
+      "报告里的 mode：提前提交没生效时是 fixed",
+      forced.report.mode,
+      "fixed",
     );
 
-    let maxDiscAsks = 0;
-    const maxDisc = await runCapture({
-      token: "max-turns-disc",
+    // 判断器返回认不出：提交时刻按新话题处理，不阻塞写入。
+    const warnings = [];
+    const badJudge = await runCapture({
+      token: "forced-classify-bad",
       lines,
-      cursor: judgeCursor,
       values: {
-        captureCommitMode: "discriminator",
+        captureCommitSchema: "2",
+        captureEarlyCommit: false,
+        captureEarlyJudge: "discriminator",
         captureServiceUrl: "http://judge:1",
-        systemoneServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
-        captureMinTurns: "1",
-        captureCommitTurns: "2",
+        captureCommitTurns: "1",
       },
-      server: pending,
-      judge: () => {
-        maxDiscAsks += 1;
-        return { answers: { q: { choice: "yes", confidence: 0.9 } } };
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+      topics: {
+        version: 1,
+        topics: [
+          {
+            id: "t_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            label: "已有话题",
+            summary: "为了让判断器真的被问一次",
+            sessionIds: [ID],
+            firstSeenAt: "2026-01-01T00:00:00.000Z",
+            lastSeenAt: "2026-01-01T00:00:00.000Z",
+            segments: 1,
+            status: "active",
+          },
+        ],
       },
+      judge: () => ({ answers: { q: { choice: "???", confidence: 0.9 } } }),
+      logger: { warn: (message) => warnings.push(String(message)) },
     });
-    const maxDiscCommit = maxDisc.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-    );
-    const maxDiscSystemone = maxDisc.calls.filter((call) =>
-      pathOf(call.url).endsWith("/v1/systemone"),
-    );
     eq(
-      "端到端 discriminator：待提交 2 轮、兜底阈值 2 → 直接提交，不发 /v1/systemone",
+      "提交时刻判断失败：仍提交、topic.isNew 为 true、日志有 warn",
       [
-        maxDisc.report.committed,
-        Boolean(maxDiscCommit),
-        maxDiscSystemone.length,
-        maxDiscAsks,
+        badJudge.report.committed,
+        badJudge.report.topic?.isNew,
+        warnings.some((message) => message.includes("topic judge failed at commit")),
       ],
-      [true, true, 0, 0],
+      [true, true, true],
     );
   }
 
-  // ---- 8.3 端到端：全新建会话先立基线，之后「之前」有内容；半轮时悬空 user 作引子 ----
+  // ---- 7.2 作用域 / dormant：session 不看别人的，global 能跨会话 ----
   {
-    const baselineLines = [
-      record({ id: "b1", role: "user", content: "第一次问" }),
-      record({ id: "b2", role: "assistant", content: "第一次答" }),
+    const otherSession = "01a1585b-86d2-7c64-b8ac-edbe7099d0b1";
+    const otherId = "t_77777777-7777-4777-8777-777777777777";
+    const otherTopic = {
+      version: 1,
+      topics: [
+        {
+          id: otherId,
+          label: "别人的话题",
+          summary: "另一个会话的事",
+          sessionIds: [otherSession],
+          firstSeenAt: "2026-01-01T00:00:00.000Z",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+          segments: 3,
+          status: "active",
+        },
+      ],
+    };
+    const lines = [
+      record({ id: "s1", role: "user", content: "同一段文本" }),
+      record({ id: "s2", role: "assistant", content: "同一段回答" }),
     ];
-    const freshPending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
-    const llmValues = {
-      captureCommitMode: "llm",
+    let sessionJudgeCalls = 0;
+    const scoped = await runCapture({
+      token: "scope-session",
+      lines,
+      values: {
+        captureCommitSchema: "2",
+        captureCommitTurns: "1",
+        captureTopicScope: "session",
+      },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+      topics: otherTopic,
+      judge: () => {
+        sessionJudgeCalls += 1;
+        return { answers: { q: { choice: "t1", confidence: 0.9 } } };
+      },
+    });
+    eq(
+      "session 作用域：另一个会话的话题不进候选池，直接按新话题落，判断器一次都不调",
+      [
+        sessionJudgeCalls,
+        scoped.report.topic?.id !== otherId,
+        scoped.report.topic?.isNew,
+      ],
+      [0, true, true],
+    );
+
+    let globalJudgeCalls = 0;
+    const global = await runCapture({
+      token: "scope-global",
+      lines,
+      values: {
+        captureCommitSchema: "2",
+        captureCommitTurns: "1",
+        captureTopicScope: "global",
+        captureEarlyJudge: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+      },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+      topics: otherTopic,
+      judge: () => {
+        globalJudgeCalls += 1;
+        return { answers: { q: { choice: "t1", confidence: 0.9 } } };
+      },
+    });
+    eq(
+      "global 作用域：能匹配到别的会话的话题，沿用它的 id 与 segments+1",
+      [
+        globalJudgeCalls,
+        global.report.topic?.id,
+        global.report.topic?.isNew,
+        global.report.topic?.seq,
+      ],
+      [1, otherId, false, 4],
+    );
+
+    const dormantTable = {
+      version: 1,
+      topics: [{ ...otherTopic.topics[0], sessionIds: [ID], status: "dormant" }],
+    };
+    eq(
+      "dormant 话题不进候选池（session / global 都不进）",
+      [
+        candidatePool(dormantTable, { sessionId: ID, scope: "session", limit: 8 }).length,
+        candidatePool(dormantTable, { sessionId: ID, scope: "global", limit: 8 }).length,
+      ],
+      [0, 0],
+    );
+  }
+
+  // ---- 7.3 同一段第二次提交归回同一 id；topics.json 坏了照常跑完 ----
+  {
+    const lines = [
+      record({ id: "r1", role: "user", content: "同一个话题第一段" }),
+      record({ id: "r2", role: "assistant", content: "第一段回答" }),
+    ];
+    const early = {
+      captureCommitSchema: "2",
+      captureEarlyCommit: true,
+      captureEarlyJudge: "llm",
       captureModel: "acme/model",
       captureMinTurns: "1",
+      captureCommitTurns: "100",
     };
-    const commitCallOf = (run) =>
-      run.calls.find(
-        (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
-      );
-
-    // 零值游标 = 全新建会话；「之前」为空，第一轮就立基线，模型一次都不调。
-    const baselineModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    const firstModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "new" }]),
     });
-    const baseline = await runCapture({
-      token: "baseline-llm",
-      lines: baselineLines,
-      values: llmValues,
-      models: baselineModel.models,
-      server: freshPending,
+    const first = await runCapture({
+      token: "same-topic-1",
+      lines,
+      values: early,
+      models: firstModel.models,
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
     });
-    eq(
-      "端到端 baseline：零值游标 + llm 档，第一轮不调模型直接提交，游标推到提交点",
-      [
-        baseline.report.committed,
-        Boolean(commitCallOf(baseline)),
-        baseline.cursor.lastCommitCount,
-        baseline.cursor.lastCommitMessageCount,
-        baselineModel.calls.stream.length,
-      ],
-      [true, true, 1, 2, 0],
-    );
-
-    const discBaseline = await runCapture({
-      token: "baseline-disc",
-      lines: baselineLines,
-      values: {
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "http://judge:1",
-        systemoneServiceModel: "judge-model",
-        captureMinTurns: "1",
-      },
-      server: freshPending,
-      judge: () => ({ answers: { q: { choice: "no", confidence: 0.9 } } }),
+    const firstTopics = readTopics(first.stateDir);
+    const secondModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
     });
-    const discJudgeCall = discBaseline.calls.find(
-      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
-    eq(
-      "端到端 baseline：discriminator 档也不发 /v1/systemone、照样提交",
-      [
-        discBaseline.report.committed,
-        Boolean(discJudgeCall),
-        discBaseline.cursor.lastCommitCount,
-      ],
-      [true, false, 1],
-    );
-
-    // 空「之前」但不够最少轮数：仍然不提交，也不问模型（baseline 不抢闸）。
-    const tooFewModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
-    });
-    const tooFew = await runCapture({
-      token: "baseline-too-few",
-      lines: baselineLines,
-      values: { ...llmValues, captureMinTurns: "2" },
-      models: tooFewModel.models,
-      server: freshPending,
-    });
-    eq(
-      "端到端：零值游标但待提交 1 轮、captureMinTurns=2 → 不提交、不调模型",
-      [
-        tooFew.report.committed,
-        Boolean(commitCallOf(tooFew)),
-        tooFewModel.calls.stream.length,
-        tooFew.cursor.lastCommitCount,
-      ],
-      [false, false, 0, 0],
-    );
-
-    // 基线之后「之前」有内容：拿上一次落盘的游标再跑一次，题面里该有上一段。
-    const followModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    const follow = await runCapture({
-      token: "baseline-follow",
+    const second = await runCapture({
+      token: "same-topic-2",
       lines: [
-        ...baselineLines,
-        record({ id: "b3", role: "user", content: "第二次问" }),
-        record({ id: "b4", role: "assistant", content: "第二次答" }),
+        ...lines,
+        record({ id: "r3", role: "user", content: "同一个话题第二段" }),
+        record({ id: "r4", role: "assistant", content: "第二段回答" }),
       ],
-      cursor: baseline.cursor,
-      values: llmValues,
-      models: followModel.models,
+      cursor: first.cursor,
+      values: early,
+      models: secondModel.models,
       server: { commit_count: 1, message_count: 2, pending_tokens: 10 },
+      topics: firstTopics,
     });
-    const followPrompt = String(followModel.calls.stream[0]?.messages?.[0]?.content || "");
-    check(
-      "端到端 baseline 之后：模型题面的「之前」是上次提交那段，「现在」也有",
-      followModel.calls.stream.length === 1 &&
-        follow.cursor.lastCommitCount === 1 &&
-        followPrompt.includes("之前：") &&
-        followPrompt.includes("现在：") &&
-        followPrompt.includes("[用户] 第一次问") &&
-        followPrompt.includes("[助手] 第一次答") &&
-        followPrompt.includes("[用户] 第二次问"),
-      followPrompt,
+    eq(
+      "新建话题第二次提交（判断器回同一个候选）归回同一 id，segments 加到 2",
+      [
+        second.report.topic?.id,
+        second.report.topic?.isNew,
+        second.report.topic?.seq,
+        readTopics(second.stateDir).topics[0]?.segments,
+      ],
+      [first.report.topic?.id, false, 2, 2],
     );
 
-    // 半轮：提交点落在 q1 之后、assistant 还没来。悬空 q1 作引子进「之前」，
-    // 「现在」从 q1 之后的第一条 assistant 起。
-    const halfModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
-    });
-    const half = await runCapture({
-      token: "half-turn",
+    const broken = await runCapture({
+      token: "broken-topics-run",
       lines: [
-        record({ id: "p1", role: "user", content: "p1问" }),
-        record({ id: "p2", role: "assistant", content: "p2答" }),
-        record({ id: "p3", role: "user", content: "p3问" }),
-        record({ id: "p4", role: "assistant", content: "p4答" }),
-        record({ id: "q1", role: "user", content: "q1正文" }),
-        record({ id: "r1", role: "assistant", content: "r1答" }),
-        record({ id: "q2", role: "user", content: "q2问" }),
-        record({ id: "r2", role: "assistant", content: "r2答" }),
+        record({ id: "b1", role: "user", content: "损坏的表也能写" }),
+        record({ id: "b2", role: "assistant", content: "好" }),
       ],
-      cursor: {
-        lastEntryId: "q1",
-        lastMessageCount: 5,
-        lastCommitCount: 0,
-        lastCommitMessageCount: 5,
-        pendingTurns: 0,
-        serverPolicy: { enabled: false, idleSeconds: null },
-      },
-      values: llmValues,
-      models: halfModel.models,
-      server: { commit_count: 0, message_count: 5, pending_tokens: 10 },
+      values: { captureCommitSchema: "2", captureCommitTurns: "1" },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+      topicsRaw: "{坏 JSON",
     });
-    const halfPrompt = String(halfModel.calls.stream[0]?.messages?.[0]?.content || "");
-    const [halfPrevious, halfCurrent] = halfPrompt.split("\n\n现在：\n");
-    check(
-      "半轮引子：悬空 user 在「之前」的最后一行，「现在」以它之后的 assistant 开头",
-      halfModel.calls.stream.length === 1 &&
-        String(halfPrevious || "")
-          .trimEnd()
-          .split("\n")
-          .at(-1) === "[用户] q1正文" &&
-        String(halfCurrent || "").startsWith("[助手] r1答") &&
-        String(halfPrevious || "").includes("[用户] p1问") &&
-        half.report.committed === false,
-      halfPrompt,
+    eq(
+      "topics.json 坏 JSON：本轮照常提交，跑完后写成一张合法表",
+      [
+        broken.report.skipped,
+        broken.report.committed,
+        readTopics(broken.stateDir).topics.length,
+        broken.report.topic?.isNew,
+      ],
+      [null, true, 1, true],
     );
   }
 
-  // ---- 9. 缺配置回落 fixed（存值不改） ----
+  // ---- 9. 旧配置迁移：fixed / llm / discriminator，写入后不再迁移 ----
   {
     eq(
-      "captureCommitMode 只认三档，脏值一律 fixed",
-      ["fixed", "llm", "discriminator", "bogus", "", null].map(normalizeCaptureCommitMode),
-      ["fixed", "llm", "discriminator", "fixed", "fixed", "fixed"],
-    );
-    eq(
-      "captureCommitTurns：空 / 非数字回 12，四舍五入后夹到 1–100，写库存数字串",
+      "applyCaptureCommitSchema：fixed → 关 + llm；llm → 开 + llm；discriminator → 开 + discriminator",
       [
-        [undefined, "", "abc", null, 0, 1, 100.5, 101, "7"].map(normalizeCaptureCommitTurns),
-        [undefined, 0, 100.5, "7"].map(serializeCaptureCommitTurns),
+        applyCaptureCommitSchema({ mode: "fixed" }),
+        applyCaptureCommitSchema({ mode: "llm" }),
+        applyCaptureCommitSchema({ mode: "discriminator" }),
       ],
       [
-        [12, 12, 12, 12, 1, 1, 100, 100, 7],
-        ["12", "1", "100", "7"],
+        { early: false, judge: "llm" },
+        { early: true, judge: "llm" },
+        { early: true, judge: "discriminator" },
       ],
     );
     eq(
-      "captureContextTurns：空 / 非数字回 3，四舍五入后夹到 1–20，写库存数字串",
+      "captureCommitSchemaIsLegacy / normalize / serialize：空串与 <2 是老语义，>=2 保持",
       [
-        [undefined, "", "abc", null, 0, -5, 2.6, 20.4, 999, "7"].map(normalizeCaptureContextTurns),
-        [undefined, 0, 999, "7"].map(serializeCaptureContextTurns),
+        ["", "1", 0, null, "abc"].map(captureCommitSchemaIsLegacy),
+        ["2", 2, "3"].map(captureCommitSchemaIsLegacy),
+        ["", "2"].map(normalizeCaptureCommitSchema),
+        ["", "2"].map(serializeCaptureCommitSchema),
       ],
       [
-        [3, 3, 3, 3, 1, 1, 3, 20, 20, 7],
-        ["3", "1", "20", "7"],
-      ],
-    );
-    eq(
-      "captureMinTurns：空 / 非数字回 2，四舍五入后夹到 1–50，写库存数字串",
-      [
-        [undefined, "", "abc", null, 0, -5, 2.6, 49.6, 999, "7"].map(normalizeCaptureMinTurns),
-        [undefined, 0, 999, "7"].map(serializeCaptureMinTurns),
-      ],
-      [
-        [2, 2, 2, 2, 1, 1, 3, 50, 50, 7],
-        ["2", "1", "50", "7"],
+        [true, true, true, true, true],
+        [false, false, false],
+        [2, 2],
+        ["2", "2"],
       ],
     );
-    eq(
-      "captureServerIdleSeconds：空 / 非数字回 600，四舍五入后夹到 60–86400，写库存数字串",
-      [
-        [undefined, "", "abc", null, 0, 60, 86401, "900"].map(normalizeCaptureIdleSeconds),
-        [undefined, 0, 86401, "900"].map(serializeCaptureIdleSeconds),
-      ],
-      [
-        [600, 600, 600, 600, 60, 60, 86400, 900],
-        ["600", "60", "86400", "900"],
-      ],
-    );
-
-    const llmMissing = await readSwitches(
-      sdkWith({ captureCommitMode: "llm", captureModel: "   " }),
-    );
-    eq(
-      "缺配置回落：llm 缺 captureModel → 存值仍是 llm，实际跑 fixed",
-      [
-        llmMissing.captureCommitMode,
-        llmMissing.captureEffectiveMode,
-        captureModeMissing(llmMissing, "llm"),
-      ],
-      ["llm", "fixed", ["captureModel"]],
-    );
-    const discMissingUrl = await readSwitches(
+    const legacyFixed = await readSwitches(sdkWith({ captureCommitMode: "fixed" }));
+    const legacyLlm = await readSwitches(sdkWith({ captureCommitMode: "llm" }));
+    const legacyDisc = await readSwitches(sdkWith({ captureCommitMode: "discriminator" }));
+    const migrated = await readSwitches(
       sdkWith({
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "",
-        systemoneServiceModel: "judge-model",
+        captureCommitSchema: "2",
+        captureCommitMode: "llm",
+        captureEarlyCommit: false,
+        captureEarlyJudge: "discriminator",
       }),
     );
     eq(
-      "缺配置回落：discriminator 缺 captureServiceUrl → 实际跑 fixed 并报缺项",
+      "readSwitches 迁移三种老档位；captureCommitSchema=2 之后不再按旧档位迁移",
       [
-        discMissingUrl.captureEffectiveMode,
-        captureModeMissing(discMissingUrl, "discriminator"),
+        [legacyFixed.captureEarlyCommit, legacyFixed.captureEarlyJudge],
+        [legacyLlm.captureEarlyCommit, legacyLlm.captureEarlyJudge],
+        [legacyDisc.captureEarlyCommit, legacyDisc.captureEarlyJudge],
+        [migrated.captureEarlyCommit, migrated.captureEarlyJudge],
       ],
-      ["fixed", ["captureServiceUrl"]],
+      [
+        [false, "llm"],
+        [true, "llm"],
+        [true, "discriminator"],
+        [false, "discriminator"],
+      ],
     );
-    const discMissingModel = await readSwitches(
+    const llmEmpty = await readSwitches(
+      sdkWith({ captureCommitSchema: "2", captureEarlyCommit: true }),
+    );
+    const llmFilled = await readSwitches(
       sdkWith({
-        captureCommitMode: "discriminator",
-        captureServiceUrl: "http://judge:1",
-        systemoneServiceModel: "",
+        captureCommitSchema: "2",
+        captureEarlyCommit: true,
+        captureModel: "acme/model",
+      }),
+    );
+    const discMissing = await readSwitches(
+      sdkWith({
+        captureCommitSchema: "2",
+        captureEarlyCommit: true,
+        captureEarlyJudge: "discriminator",
       }),
     );
     eq(
-      "缺配置回落：discriminator 缺 systemoneServiceModel → 实际跑 fixed 并报缺项",
+      "readSwitches：judge=llm 且 captureModel 为空时 captureEffectiveEarly 仍为 true / missing 为空",
       [
-        discMissingModel.captureEffectiveMode,
-        captureModeMissing(discMissingModel, "discriminator"),
+        llmEmpty.captureEffectiveEarly,
+        captureModeMissing(llmEmpty, "llm"),
+        llmFilled.captureEffectiveEarly,
+        captureModeMissing(llmFilled, "llm"),
       ],
-      ["fixed", ["systemoneServiceModel"]],
+      [true, [], true, []],
     );
     eq(
-      "fixed 永远不缺配置，captureCommitModeOf 原样返回",
-      [captureModeMissing({}, "fixed"), captureCommitModeOf({ captureCommitMode: "fixed" })],
-      [[], "fixed"],
-    );
-    eq(
-      "写回默认值：fixed / 12 / 兜底关 / 600 / 模型与服务地址为空",
+      "readSwitches：judge=discriminator 缺配置时 captureEffectiveEarly 仍为 false",
       [
-        DEFAULTS.captureCommitMode,
-        DEFAULTS.captureCommitTurns,
-        DEFAULTS.captureServerFallback,
-        DEFAULTS.captureServerIdleSeconds,
-        DEFAULTS.captureModel,
-        DEFAULTS.captureServiceUrl,
+        discMissing.captureEffectiveEarly,
+        captureModeMissing(discMissing, "discriminator"),
       ],
-      ["fixed", CAPTURE_COMMIT_TURNS_DEFAULT, false, CAPTURE_IDLE_SECONDS_DEFAULT, "", ""],
-    );
-    eq(
-      "写回边界常量：轮次 1–100 步长 1，空闲秒数 60–86400，三档枚举固定",
-      [
-        CAPTURE_COMMIT_TURNS_MIN,
-        CAPTURE_COMMIT_TURNS_MAX,
-        CAPTURE_COMMIT_TURNS_STEP,
-        CAPTURE_IDLE_SECONDS_MIN,
-        CAPTURE_IDLE_SECONDS_MAX,
-        CAPTURE_COMMIT_MODES,
-      ],
-      [1, 100, 1, 60, 86400, ["fixed", "llm", "discriminator"]],
-    );
-    eq(
-      "判据上下文 / 最少触发轮数的默认值与边界：3 与 2，范围 1–20 / 1–50，步长 1",
-      [
-        DEFAULTS.captureContextTurns,
-        DEFAULTS.captureMinTurns,
-        CAPTURE_CONTEXT_TURNS_DEFAULT,
-        CAPTURE_CONTEXT_TURNS_MIN,
-        CAPTURE_CONTEXT_TURNS_MAX,
-        CAPTURE_CONTEXT_TURNS_STEP,
-        CAPTURE_MIN_TURNS_DEFAULT,
-        CAPTURE_MIN_TURNS_MIN,
-        CAPTURE_MIN_TURNS_MAX,
-        CAPTURE_MIN_TURNS_STEP,
-      ],
-      [3, 2, 3, 1, 20, 1, 2, 1, 50, 1],
+      [false, ["captureServiceUrl", "systemoneServiceModel"]],
     );
   }
 
@@ -8783,11 +8841,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       },
     );
     eq(
-      "parseTopicAnswer：先认否定再认肯定，认不出给 null",
-      ["no", "Yes.", "否", "不是同一件", "yes", "同一件事", "随便"].map(
-        parseTopicAnswer,
+      "parseTopicAnswer 在会话卡小节再验一次：new / 编号 / 认不出",
+      ["new", "2", "随便"].map((text) =>
+        parseTopicAnswer(text, [{ label: "一" }, { label: "二" }, { label: "三" }]),
       ),
-      ["different", "same", "different", "different", "same", "same", null],
+      [
+        { choice: "new", label: "" },
+        { choice: 2, label: "" },
+        null,
+      ],
     );
     const rendered = renderTopicPrompt(
       [
@@ -8798,19 +8860,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         { role: "user", content: "新内容" },
         { role: "assistant", content: "新回答" },
       ],
+      [],
     );
     eq(
-      "renderTopicPrompt：固定抬头「之前 / 现在」，逐条带 [用户] / [助手]，顺序与输入一致；空的一侧只出抬头",
+      "renderTopicPrompt：题面 + 已有话题（空时写（无））+ 之前 / 对话，逐条带 [用户] / [助手]，末尾是格式块",
       [
-        rendered,
-        renderTopicPrompt([], []),
-        renderTopicPrompt([{ role: "tool", content: "跳过我" }], []),
+        rendered.startsWith(`${CAPTURE_TOPIC_QUESTION}\n\n已有话题：\n（无）`),
+        rendered.includes("之前（供参考）：\n[用户] 旧内容\n[助手] 旧回答"),
+        rendered.includes("对话：\n[用户] 新内容\n[助手] 新回答"),
+        renderTopicPrompt([], []).endsWith(
+          `之前（供参考）：\n\n对话：\n\n${CAPTURE_TOPIC_FORMAT}`,
+        ),
+        !renderTopicPrompt([{ role: "tool", content: "跳过我" }], []).includes("跳过我"),
       ],
-      [
-        "之前：\n[用户] 旧内容\n[助手] 旧回答\n\n现在：\n[用户] 新内容\n[助手] 新回答",
-        "之前：\n\n现在：",
-        "之前：\n\n现在：",
-      ],
+      [true, true, true, true, true],
     );
 
     const longText = "甲".repeat(3000);
@@ -8821,16 +8884,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         { role: "user", content: "后面第三条" },
       ],
       [],
+      [],
     );
-    const firstLine = clippedRendered.split("\n")[1] || "";
+    const clippedLine =
+      clippedRendered.split("\n").find((line) => line.includes("[用户] 甲")) || "";
     check(
       "renderTopicPrompt 单条截到 1200 字：第一条被截，后两条仍然在结果里",
-      Array.from(firstLine.replace("[用户] ", "")).length === CAPTURE_SAMPLE_CHARS &&
+      Array.from(clippedLine.replace("[用户] ", "")).length === CAPTURE_SAMPLE_CHARS &&
         clippedRendered.includes("后面第二条") &&
         clippedRendered.includes("后面第三条") &&
         clippedRendered.includes("甲".repeat(CAPTURE_SAMPLE_CHARS)) &&
         !clippedRendered.includes("甲".repeat(CAPTURE_SAMPLE_CHARS + 1)),
-      `first=${Array.from(firstLine).length} body=${clippedRendered.length}`,
+      `line=${Array.from(clippedLine).length} body=${clippedRendered.length}`,
     );
 
     const turnMessages = [
@@ -8869,208 +8934,125 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ["u1", "a1", "u2", "a2"],
       ],
     );
+    let forcedAsked = 0;
+    const forcedDecision = await captureDecision({
+      early: true,
+      pendingTurns: 3,
+      forcedTurns: 3,
+      minTurns: 2,
+      classify: async () => {
+        forcedAsked += 1;
+        return { kind: "new" };
+      },
+    });
+    let tooFewAsked = 0;
+    const tooFewDecision = await captureDecision({
+      early: true,
+      pendingTurns: 1,
+      forcedTurns: 10,
+      minTurns: 2,
+      classify: async () => {
+        tooFewAsked += 1;
+        return { kind: "new" };
+      },
+    });
+    let baselineAsked = 0;
+    const baselineDecision = await captureDecision({
+      early: true,
+      pendingTurns: 2,
+      forcedTurns: 10,
+      minTurns: 2,
+      previousEmpty: true,
+      classify: async () => {
+        baselineAsked += 1;
+        return { kind: "new" };
+      },
+    });
+    let failedAsked = 0;
+    const failedDecision = await captureDecision({
+      early: true,
+      pendingTurns: 2,
+      forcedTurns: 10,
+      minTurns: 2,
+      classify: async () => {
+        failedAsked += 1;
+        return null;
+      },
+    });
+    const threwDecision = await captureDecision({
+      early: true,
+      pendingTurns: 2,
+      forcedTurns: 10,
+      minTurns: 2,
+      classify: async () => {
+        throw new Error("boom");
+      },
+    });
     eq(
-      "captureDecision：空欠账不提交 / fixed 够轮数提交 / 不认识的档不提交",
+      "captureDecision：空 → forced（不归类）→ 关提前提交 → 太少 → 基线（不归类）→ 归类失败两种",
       [
-        await captureDecision({ mode: "fixed", pendingTurns: 0, turnsLimit: 1 }),
-        await captureDecision({ mode: "fixed", pendingTurns: 2, turnsLimit: 2 }),
-        await captureDecision({ mode: "bogus", pendingTurns: 2, turnsLimit: 2 }),
+        await captureDecision({ early: true, pendingTurns: 0, forcedTurns: 2 }),
+        forcedDecision,
+        forcedAsked,
+        await captureDecision({ early: false, pendingTurns: 1, forcedTurns: 2 }),
+        tooFewDecision,
+        tooFewAsked,
+        baselineDecision,
+        baselineAsked,
+        failedDecision,
+        failedAsked,
+        threwDecision,
       ],
       [
         { commit: false, reason: "empty" },
         { commit: true, reason: "turns" },
-        { commit: false, reason: "unknown-mode" },
-      ],
-    );
-
-    let llmAsked = 0;
-    let discAsked = 0;
-    const tooFewLlmDecision = await captureDecision({
-      mode: "llm",
-      pendingTurns: 1,
-      turnsLimit: 1,
-      minTurns: 2,
-      ask: async () => {
-        llmAsked += 1;
-        return "different";
-      },
-    });
-    const tooFewDiscDecision = await captureDecision({
-      mode: "discriminator",
-      pendingTurns: 1,
-      turnsLimit: 1,
-      minTurns: 2,
-      ask: async () => {
-        discAsked += 1;
-        return "different";
-      },
-    });
-    eq(
-      "captureDecision 两档不足最少触发轮数 → too-few-turns 且 ask 一次都不调",
-      [
-        tooFewLlmDecision,
-        llmAsked,
-        tooFewDiscDecision,
-        discAsked,
-      ],
-      [
-        { commit: false, reason: "too-few-turns" },
         0,
+        { commit: false, reason: "below-limit" },
         { commit: false, reason: "too-few-turns" },
-        0,
-      ],
-    );
-
-    // 「之前」为空：过了最少轮数就直接立基线，不调模型；不够轮数仍然不提交。
-    let baselineLlmAsked = 0;
-    let baselineDiscAsked = 0;
-    const baselineLlmDecision = await captureDecision({
-      mode: "llm",
-      pendingTurns: 2,
-      minTurns: 2,
-      previousEmpty: true,
-      ask: async () => {
-        baselineLlmAsked += 1;
-        return "same";
-      },
-    });
-    const baselineDiscDecision = await captureDecision({
-      mode: "discriminator",
-      pendingTurns: 2,
-      minTurns: 2,
-      previousEmpty: true,
-      ask: async () => {
-        baselineDiscAsked += 1;
-        return "same";
-      },
-    });
-    eq(
-      "captureDecision：「之前」为空且够最少轮数 → baseline 提交，两档都一次不问模型",
-      [
-        baselineLlmDecision,
-        baselineLlmAsked,
-        baselineDiscDecision,
-        baselineDiscAsked,
-      ],
-      [
-        { commit: true, reason: "baseline" },
         0,
         { commit: true, reason: "baseline" },
         0,
+        { commit: false, reason: "classify-failed" },
+        1,
+        { commit: false, reason: "classify-failed" },
       ],
     );
-    let emptyFewAsked = 0;
-    const emptyFewDecision = await captureDecision({
-      mode: "llm",
-      pendingTurns: 1,
-      minTurns: 2,
-      previousEmpty: true,
-      ask: async () => {
-        emptyFewAsked += 1;
-        return "different";
-      },
-    });
-    eq(
-      "captureDecision：「之前」为空但不够最少轮数 → too-few-turns，baseline 在它之后",
-      [emptyFewDecision, emptyFewAsked],
-      [{ commit: false, reason: "too-few-turns" }, 0],
-    );
 
-    // 兜底轮数：攒够就提交，不问模型；不够照旧问。
-    let maxLlmAsked = 0;
-    let maxDiscAsked = 0;
-    const maxLlmDecision = await captureDecision({
-      mode: "llm",
-      pendingTurns: 3,
-      turnsLimit: 3,
-      minTurns: 2,
-      ask: async () => {
-        maxLlmAsked += 1;
-        return "same";
-      },
-    });
-    const maxDiscDecision = await captureDecision({
-      mode: "discriminator",
-      pendingTurns: 3,
-      turnsLimit: 3,
-      minTurns: 2,
-      ask: async () => {
-        maxDiscAsked += 1;
-        return "same";
-      },
-    });
+    const sameVerdict = { kind: "existing", id: "t_current" };
+    const otherVerdict = { kind: "existing", id: "t_other" };
+    const newVerdict = { kind: "new", label: "新事", summary: "" };
     eq(
-      "captureDecision 两档攒够兜底轮数 → max-turns，ask 一次都不调",
-      [maxLlmDecision, maxLlmAsked, maxDiscDecision, maxDiscAsked],
+      "captureDecision：认到当前话题 → same-topic；认到别的话题 / 新话题 → topic 且 verdict 透出",
       [
-        { commit: true, reason: "max-turns" },
-        0,
-        { commit: true, reason: "max-turns" },
-        0,
+        await captureDecision({
+          early: true,
+          pendingTurns: 2,
+          forcedTurns: 10,
+          minTurns: 2,
+          currentTopicId: "t_current",
+          classify: async () => sameVerdict,
+        }),
+        await captureDecision({
+          early: true,
+          pendingTurns: 2,
+          forcedTurns: 10,
+          minTurns: 2,
+          currentTopicId: "t_current",
+          classify: async () => otherVerdict,
+        }),
+        await captureDecision({
+          early: true,
+          pendingTurns: 2,
+          forcedTurns: 10,
+          minTurns: 2,
+          classify: async () => newVerdict,
+        }),
       ],
-    );
-
-    let belowLlmAsked = 0;
-    const belowSameDecision = await captureDecision({
-      mode: "llm",
-      pendingTurns: 2,
-      turnsLimit: 3,
-      minTurns: 2,
-      ask: async () => {
-        belowLlmAsked += 1;
-        return "same";
-      },
-    });
-    let belowDiscAsked = 0;
-    const belowDifferentDecision = await captureDecision({
-      mode: "discriminator",
-      pendingTurns: 2,
-      turnsLimit: 3,
-      minTurns: 2,
-      ask: async () => {
-        belowDiscAsked += 1;
-        return "different";
-      },
-    });
-    eq(
-      "captureDecision 没到兜底轮数照旧问模型：same → same-topic / different → topic",
-      [belowSameDecision, belowLlmAsked, belowDifferentDecision, belowDiscAsked],
       [
         { commit: false, reason: "same-topic" },
-        1,
-        { commit: true, reason: "topic" },
-        1,
+        { commit: true, reason: "topic", verdict: otherVerdict },
+        { commit: true, reason: "topic", verdict: newVerdict },
       ],
-    );
-
-    eq(
-      "captureDecision fixed 档不受兜底闸影响：够阈值 → turns / 不够 → below-limit",
-      [
-        await captureDecision({ mode: "fixed", pendingTurns: 3, turnsLimit: 3 }),
-        await captureDecision({ mode: "fixed", pendingTurns: 3, turnsLimit: 4 }),
-      ],
-      [
-        { commit: true, reason: "turns" },
-        { commit: false, reason: "below-limit" },
-      ],
-    );
-
-    let orderAsked = 0;
-    const baselineBeforeMax = await captureDecision({
-      mode: "llm",
-      pendingTurns: 3,
-      turnsLimit: 3,
-      minTurns: 2,
-      previousEmpty: true,
-      ask: async () => {
-        orderAsked += 1;
-        return "different";
-      },
-    });
-    eq(
-      "captureDecision 兜底在基线之后：previousEmpty 且已到阈值 → baseline，ask 不调",
-      [baselineBeforeMax, orderAsked],
-      [{ commit: true, reason: "baseline" }, 0],
     );
 
     // 游标里不再保留提交样本：键集合与源码都不该出现那个字段。
@@ -9091,9 +9073,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [false, false, false, false],
     );
     eq(
-      "写回常量：题面 / 样本字数 / 判断超时 / maxTokens",
-      [CAPTURE_SAMPLE_CHARS, CAPTURE_ASK_TIMEOUT_MS, CAPTURE_ASK_MAX_TOKENS],
-      [1200, 1500, 8],
+      "写回常量：题面 / 样本字数 / 判断超时 / maxTokens（两行回答要 64，12 会把主题截没）",
+      [
+        CAPTURE_TOPIC_QUESTION,
+        CAPTURE_SAMPLE_CHARS,
+        CAPTURE_ASK_TIMEOUT_MS,
+        CAPTURE_ASK_MAX_TOKENS,
+      ],
+      [
+        "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。",
+        1200,
+        1500,
+        64,
+      ],
     );
   }
 
@@ -10871,24 +10863,29 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 1. 空配置的投影逐字对 ----
   eq(
-    "空配置 GET /capture-config：默认档 / 数字串 / 范围与枚举都来自同一份常量",
+    "空配置 GET /capture-config：提前提交 / 判断方式 / 作用域 / 候选上限 / 范围都来自同一份常量",
     (await getConfig()).body,
     {
-      mode: "fixed",
-      effectiveMode: "fixed",
+      early: false,
+      earlyStored: false,
+      judge: "llm",
       missing: [],
       turns: "12",
       contextTurns: "3",
       minTurns: "2",
+      topicScope: "session",
+      topicCandidates: "8",
       serverFallback: false,
       idleSeconds: "600",
       model: "",
       serviceUrl: "",
       prompt: "",
-      modes: ["fixed", "llm", "discriminator"],
+      judges: ["llm", "discriminator"],
+      scopes: ["session", "global"],
       turnsRange: [1, 100],
       contextTurnsRange: [1, 20],
       minTurnsRange: [1, 50],
+      topicCandidatesRange: [1, 20],
       idleRange: [60, 86400],
     },
   );
@@ -10897,7 +10894,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   {
     const before = writes.length;
     const invalid = await postConfig({
-      captureCommitMode: "fixed",
+      captureEarlyCommit: true,
       captureCommitTurns: 0,
       captureServerFallback: true,
     });
@@ -10907,15 +10904,39 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [400, false, before],
     );
 
-    const invalidModel = await postConfig({ captureModel: "not-a-model-ref" });
+    const invalidJudge = await postConfig({ captureEarlyJudge: "bogus" });
     eq(
-      "POST /capture-config 整单校验：captureModel 非 provider/model → 400 且仍不写",
-      [invalidModel.status, invalidModel.body.ok, writes.length],
+      "POST /capture-config 整单校验：captureEarlyJudge 非枚举 → 400 且仍不写",
+      [invalidJudge.status, invalidJudge.body.ok, writes.length],
       [400, false, before],
     );
 
+    const invalidScope = await postConfig({ captureTopicScope: "bogus" });
+    eq(
+      "POST /capture-config 整单校验：captureTopicScope 非枚举 → 400 且仍不写",
+      [invalidScope.status, invalidScope.body.ok, writes.length],
+      [400, false, before],
+    );
+
+    const invalidCandidates = await postConfig({ captureTopicCandidates: 21 });
+    eq(
+      "POST /capture-config 整单校验：captureTopicCandidates 越界 → 400 且仍不写",
+      [invalidCandidates.status, invalidCandidates.body.ok, writes.length],
+      [400, false, before],
+    );
+
+    const oldMode = await postConfig({ captureCommitMode: "llm" });
+    eq(
+      "旧键 captureCommitMode 当未知键忽略：200、不写、也不再 400",
+      [oldMode.status, oldMode.body.ok, oldMode.body.applied, writes.length],
+      [200, true, [], before],
+    );
+
     const valid = await postConfig({
-      captureCommitMode: "fixed",
+      captureEarlyCommit: true,
+      captureEarlyJudge: "llm",
+      captureTopicScope: "global",
+      captureTopicCandidates: 9,
       captureCommitTurns: "20",
       captureServerFallback: true,
       captureServerIdleSeconds: 900,
@@ -10925,38 +10946,48 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     const readBack = (await getConfig()).body;
     eq(
-      "合法一单六项整单落库、认不出的键不写，读回来是同一组值（地址去尾斜杠 / 模型 trim）",
+      "合法一单九项整单落库（外加 captureCommitSchema=2），认不出的键不写，读回来是同一组值",
       [
         valid.status,
         valid.body.ok,
         valid.body.applied,
         writes.length,
-        readBack.mode,
+        readBack.early,
         readBack.turns,
+        readBack.topicScope,
+        readBack.topicCandidates,
         readBack.serverFallback,
         readBack.idleSeconds,
         readBack.model,
         readBack.serviceUrl,
+        values.captureCommitSchema,
         "somethingUnknown" in values,
       ],
       [
         200,
         true,
         [
-          "captureCommitMode",
+          "captureEarlyCommit",
+          "captureEarlyJudge",
+          "captureTopicScope",
+          "captureTopicCandidates",
           "captureCommitTurns",
           "captureServerFallback",
           "captureServerIdleSeconds",
           "captureModel",
           "captureServiceUrl",
+          "captureCommitSchema",
         ],
-        6,
-        "fixed",
+        before + 10,
+        true,
         "20",
+        "global",
+        "9",
         true,
         "900",
         "acme/model",
         "http://judge:1",
+        "2",
         false,
       ],
     );
@@ -10984,15 +11015,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     const readBack = (await getConfig()).body;
     eq(
-      "合法写入 captureContextTurns / captureMinTurns 后读回来一致（数字串）",
+      "合法写入 captureContextTurns / captureMinTurns 后读回来一致（数字串，保存成功也补版本号）",
       [
         valid.status,
         valid.body.ok,
         valid.body.applied,
         readBack.contextTurns,
         readBack.minTurns,
+        values.captureCommitSchema,
       ],
-      [200, true, ["captureContextTurns", "captureMinTurns"], "5", "3"],
+      [200, true, ["captureContextTurns", "captureMinTurns", "captureCommitSchema"], "5", "3", "2"],
     );
   }
 
@@ -11000,7 +11032,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   {
     const before = writes.length;
     const tooLong = await postConfig({
-      captureCommitMode: "fixed",
+      captureEarlyCommit: true,
       capturePrompt: "字".repeat(CAPTURE_PROMPT_MAX + 1),
     });
     eq(
@@ -11016,34 +11048,46 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [400, false, "capturePrompt 必须是字符串", before],
     );
 
-    const writtenText = "只看这两段像不像同一件事？";
+    const writtenText = "这段属于哪个话题？只回编号或 new。";
     const written = await postConfig({ capturePrompt: writtenText });
     eq(
       "POST /capture-config 写入 capturePrompt 后 GET 投影的 prompt 跟着变（原样存，不 trim、不规范化）",
-      [written.status, written.body.prompt, writes.at(-1), (await getConfig()).body.prompt],
-      [200, writtenText, ["capturePrompt", writtenText], writtenText],
+      [
+        written.status,
+        written.body.prompt,
+        writes.at(-2),
+        writes.at(-1),
+        (await getConfig()).body.prompt,
+      ],
+      [
+        200,
+        writtenText,
+        ["capturePrompt", writtenText],
+        ["captureCommitSchema", "2"],
+        writtenText,
+      ],
     );
 
-    // 收尾：清回空串，后面的断言按默认投影走。
+    // 收尾：清回空串，后面的断言按默认题面走。
     await postConfig({ capturePrompt: "" });
   }
 
-  // ---- 3. llm 缺模型回落 fixed，补模型后生效 ----
+  // ---- 3. 提前提交生效 / 回落：llm 空模型不算缺，discriminator 才看服务配置 ----
   {
-    await postConfig({ captureCommitMode: "llm", captureModel: "" });
-    const missing = (await getConfig()).body;
+    await postConfig({ captureEarlyCommit: true, captureEarlyJudge: "llm", captureModel: "" });
+    const llmEmpty = (await getConfig()).body;
     eq(
-      "llm 但 captureModel 为空 → 存值仍是 llm，effectiveMode 回落 fixed，missing 点名 captureModel",
-      [missing.mode, missing.effectiveMode, missing.missing],
-      ["llm", "fixed", ["captureModel"]],
+      "提前提交 + 语言模型 + captureModel 留空 → earlyStored / early 都是 true，missing 为空",
+      [llmEmpty.earlyStored, llmEmpty.early, llmEmpty.missing],
+      [true, true, []],
     );
 
-    await postConfig({ captureModel: "provider/model" });
-    const filled = (await getConfig()).body;
+    await postConfig({ captureEarlyJudge: "discriminator", captureServiceUrl: "" });
+    const disc = (await getConfig()).body;
     eq(
-      "补上 provider/model 之后 effectiveMode 变 llm、missing 变空",
-      [filled.effectiveMode, filled.missing],
-      ["llm", []],
+      "换成判别模型但服务地址 / 决策服务模型都没配 → early 回落 false，缺项点名两个键",
+      [disc.early, disc.missing],
+      [false, ["captureServiceUrl", "systemoneServiceModel"]],
     );
   }
 
@@ -11054,28 +11098,30 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const writesBefore = writes.length;
     const empty = await getStatus(key);
     eq(
-      "真 uuid 但还没有状态文件 → active:true，三数是 0 / null / 0",
+      "真 uuid 但还没有状态文件 → active:true，四数是 0 / null / 0 / 0（含话题数）",
       [
         empty.body.sessionId,
         empty.body.active,
         empty.body.written,
         empty.body.lastCommitAt,
         empty.body.pendingTurns,
+        empty.body.topics,
       ],
-      [key, true, 0, null, 0],
+      [key, true, 0, null, 0, 0],
     );
 
     const missing = await getStatus(undefined);
     eq(
-      "sessionId 缺失 → sessionId:null / active:false / 三数零值",
+      "sessionId 缺失 → sessionId:null / active:false / 四数零值",
       [
         missing.body.sessionId,
         missing.body.active,
         missing.body.written,
         missing.body.lastCommitAt,
         missing.body.pendingTurns,
+        missing.body.topics,
       ],
-      [null, false, 0, null, 0],
+      [null, false, 0, null, 0, 0],
     );
 
     const bogus = [
@@ -11110,17 +11156,53 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         },
       },
     });
+    writeTopics(dir, {
+      version: 1,
+      topics: [
+        {
+          id: "t_88888888-8888-4888-8888-888888888888",
+          label: "本会话话题",
+          summary: "",
+          sessionIds: [key],
+          firstSeenAt: "2026-11-11T00:00:00.000Z",
+          lastSeenAt: "2026-11-11T01:00:00.000Z",
+          segments: 2,
+          status: "active",
+        },
+        {
+          id: "t_99999999-9999-4999-8999-999999999999",
+          label: "沉睡话题",
+          summary: "",
+          sessionIds: [key],
+          firstSeenAt: "2026-11-10T00:00:00.000Z",
+          lastSeenAt: "2026-11-10T01:00:00.000Z",
+          segments: 1,
+          status: "dormant",
+        },
+        {
+          id: "t_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          label: "别人的话题",
+          summary: "",
+          sessionIds: ["01a1585b-86d2-7c64-b8ac-edbe7099d0ff"],
+          firstSeenAt: "2026-11-10T00:00:00.000Z",
+          lastSeenAt: "2026-11-10T01:00:00.000Z",
+          segments: 1,
+          status: "active",
+        },
+      ],
+    });
     const status = await getStatus(key);
     const switches = await readSwitches(ctx);
     const counts = captureCounts(readSession(dir, key).capture.cursor);
     eq(
-      "capture-status 的 written / pendingTurns / lastCommitAt 与 captureCounts 同源，mode 是 captureEffectiveMode",
+      "capture-status 的 written / pendingTurns / lastCommitAt 与 captureCounts 同源，topics 数本会话（含 dormant），mode 跟提前提交生效值",
       [
         status.body.sessionId,
         status.body.active,
         status.body.written,
         status.body.pendingTurns,
         status.body.lastCommitAt,
+        status.body.topics,
         status.body.mode,
       ],
       [
@@ -11129,7 +11211,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         counts.written,
         counts.pendingTurns,
         counts.lastCommitAt,
-        switches.captureEffectiveMode,
+        2,
+        switches.captureEffectiveEarly ? switches.captureEarlyJudge : "fixed",
       ],
     );
   }

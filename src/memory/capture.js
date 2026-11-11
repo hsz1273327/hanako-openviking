@@ -33,12 +33,24 @@ import {
   tailTurns,
 } from "./cursor.js";
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
+import { candidatePool, readTopics, recordSegment, withTopics } from "./topics.js";
 
-/** 内置默认题面；配置 capturePrompt 非空时以配置为准（见 buildAsker）。 */
-export const CAPTURE_TOPIC_QUESTION = "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。";
+/** 内置默认题面（面板里可编辑的那一格）；答案格式由代码固定追加，见 CAPTURE_TOPIC_FORMAT。 */
+export const CAPTURE_TOPIC_QUESTION =
+  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。";
+
+/** 答案格式：固定追加，不进用户可编辑的那一格。解析靠它，题面只决定怎么问。 */
+export const CAPTURE_TOPIC_FORMAT = [
+  "按这个格式回答：",
+  "主题：<一句话概括这段在讲什么>",
+  "归属：<编号> 或 new",
+  "只输出这两行。",
+].join("\n");
+
 export const CAPTURE_SAMPLE_CHARS = 1200;
 export const CAPTURE_ASK_TIMEOUT_MS = 1500;
-export const CAPTURE_ASK_MAX_TOKENS = 8;
+// 回答从一行变成两行（主题 + 归属），12 会把「主题」那句截没，新话题的 label 就永远是空的。
+export const CAPTURE_ASK_MAX_TOKENS = 64;
 
 function clipChars(text, max) {
   const chars = Array.from(typeof text === "string" ? text : "");
@@ -59,92 +71,218 @@ function renderMessages(messages) {
 }
 
 /**
- * 按轮渲染判据：之前 / 现在各是一组带角色标记的消息行。
+ * 候选题面：先问属于哪个，再列已有话题，最后给「之前 / 现在」两段上下文。
  *
  * 每条消息各自截到 CAPTURE_SAMPLE_CHARS，不做整段截断：前一条被截了，
- * 后面的消息仍然要在题面里。判据不再整体截断，长度靠 captureMinTurns
- * 与提交频率控制。
+ * 后面的消息仍然要在题面里。
  */
-export function renderTopicPrompt(previousMessages, currentMessages) {
-  return [
-    "之前：",
+export function renderTopicPrompt(
+  previousMessages,
+  currentMessages,
+  candidates = [],
+  question = CAPTURE_TOPIC_QUESTION,
+  format = CAPTURE_TOPIC_FORMAT,
+) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const lines = [
+    String(question || CAPTURE_TOPIC_QUESTION),
+    "",
+    "已有话题：",
+    ...(list.length
+      ? list.map((topic, index) => `[${index + 1}] ${topic.label} —— ${topic.summary}`)
+      : ["（无）"]),
+    "",
+    "之前（供参考）：",
     ...renderMessages(previousMessages),
     "",
-    "现在：",
+    "对话：",
     ...renderMessages(currentMessages),
-  ].join("\n");
+  ];
+  // 答案格式是给生成式模型的；choice 题的答案形状由 questions 决定，传空串就不追加。
+  if (format) lines.push("", String(format));
+  return lines.join("\n");
 }
 
-/**
- * 主题判断的读数：先认否定，再认肯定，认不出给 null。
- *
- * null 表示「判断失败」，不是「不同」也不是「相同」——失败一律不提交，等下一轮。
- */
-export function parseTopicAnswer(text) {
-  if (typeof text !== "string") return null;
-  const normalized = text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
-  if (!normalized) return null;
-  if (["no", "否", "不是", "不同", "不一样"].some((word) => normalized.includes(word))) {
-    return "different";
-  }
-  if (["yes", "是", "同", "一样", "同一"].some((word) => normalized.includes(word))) {
-    return "same";
+/** 去掉 markdown 装饰（加粗 / 斜体 / 代码 / 引用），保留正文。 */
+function stripDecoration(text) {
+  return String(text ?? "").replace(/[*_`>]/g, "");
+}
+
+/** 一行里冒号后面的那段值；认全角与半角冒号，允许行首空格与 markdown 装饰。 */
+function fieldValue(line, name) {
+  const cleaned = stripDecoration(line).replace(/^[\s#\-]+/, "");
+  const match = cleaned.match(new RegExp(`^${name}\\s*[：:]\\s*(.*)$`));
+  return match ? match[1].trim() : "";
+}
+
+function saysNew(text) {
+  const value = stripDecoration(text).trim();
+  if (!value) return false;
+  return (
+    value.toLowerCase().includes("new") ||
+    value.includes("新话题") ||
+    value.includes("都不是") ||
+    /^新(\s|$)/.test(value)
+  );
+}
+
+/** 在这段文字里找第一个落在 1..max 的整数。 */
+function pickNumber(text, max) {
+  for (const match of stripDecoration(text).matchAll(/\d+/g)) {
+    const value = Number(match[0]);
+    if (Number.isInteger(value) && value >= 1 && value <= max) return value;
   }
   return null;
 }
 
 /**
- * 这一轮该不该提交。纯判断，不碰网络；ask 由调用方按档位造。
+ * 归类读数：返回 { choice, label }，认不出返回 null（不猜）。
  *
- * 失败（ask 抛错 / 答案不认识）不算提交：宁可等下一轮，也不在语义边界之外切开。
+ * choice 是 "new" 或 1..candidates.length；label 是「主题：」那行，没有就是空串。
+ * 顺序：先看「归属：」行，再退到全文（兼容只回编号的老回答与带解释的回答）。
+ */
+export function parseTopicAnswer(text, candidates) {
+  if (typeof text !== "string") return null;
+  const normalized = text.trim();
+  if (!normalized) return null;
+  const list = Array.isArray(candidates) ? candidates : [];
+  const max = list.length;
+  const lines = normalized.split(/\r?\n/);
+
+  let label = "";
+  let choice = null;
+
+  for (const line of lines) {
+    const theme = fieldValue(line, "主题");
+    if (theme) {
+      label = stripDecoration(theme).replace(/\s+/g, " ").trim();
+      break;
+    }
+  }
+
+  // 1. 「归属：」行优先：只在这一行里认。
+  for (const line of lines) {
+    const value = fieldValue(line, "归属");
+    if (!value) continue;
+    if (saysNew(value)) {
+      choice = "new";
+    } else {
+      choice = pickNumber(value, max);
+    }
+    break;
+  }
+
+  // 2. 全文兜底：new 同义词 → 整行裸数字 → 第一个 1..N 的整数 → 候选 label 原文。
+  if (choice === null) {
+    if (saysNew(normalized)) {
+      choice = "new";
+    } else {
+      for (const line of lines) {
+        const bare = stripDecoration(line).replace(/^[\s#\-]+/, "").trim();
+        if (!/^\d+$/.test(bare)) continue;
+        const value = Number(bare);
+        if (Number.isInteger(value) && value >= 1 && value <= max) {
+          choice = value;
+          break;
+        }
+      }
+      if (choice === null) choice = pickNumber(normalized, max);
+      if (choice === null) {
+        const labels = list
+          .map((topic, index) => ({ label: String(topic?.label ?? "").trim(), index }))
+          .filter((item) => item.label)
+          .sort((a, b) => b.label.length - a.label.length);
+        for (const item of labels) {
+          if (normalized.includes(item.label)) {
+            choice = item.index + 1;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (choice === null) return null;
+  return { choice, label };
+}
+
+/** 把一段消息压成一行，按字符截断。 */
+function oneLine(text, max) {
+  const collapsed = String(text ?? "").replace(/\s+/g, " ").trim();
+  return clipChars(collapsed, max);
+}
+
+/**
+ * 新话题的 label / summary 就地派生，不再多花一次模型调用。
+ * label 优先用判断器给的「主题」，没有就退回本段第一条 user 消息（没有 user 用第一条）。
+ * summary 始终取本段第一条消息。
+ */
+export function deriveTopicTitle(segment, theme = "") {
+  const list = Array.isArray(segment) ? segment : [];
+  const first = list[0];
+  const firstUser = list.find((message) => message?.role === "user") || first;
+  const label = oneLine(String(theme ?? "").trim() ? theme : firstUser?.content, 24);
+  const summary = oneLine(first?.content, 80);
+  return { label: label || "新话题", summary };
+}
+
+/** 提交时的三件套 tag。key=value 严格格式：空白与 = 都换成 -。 */
+export function captureTags(topic, seq) {
+  const slug = (s) =>
+    String(s ?? "")
+      .replace(/[\s=]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  return [
+    `topic-id=${topic?.id ?? ""}`,
+    `topic-seq=${seq}`,
+    `topic-label=${slug(topic?.label) || "topic"}`,
+  ];
+}
+
+/**
+ * 这一轮该不该提交。纯判断，不碰网络；classify 由调用方注入。
+ *
+ * 顺序就是优先级：强制轮数先于「提前提交」；判断失败一律不提交，等下一轮。
  */
 export async function captureDecision({
-  mode,
+  early,
   pendingTurns,
-  turnsLimit,
+  forcedTurns,
   minTurns,
   previousEmpty,
-  ask,
+  currentTopicId,
+  classify,
 } = {}) {
   const turns = Number(pendingTurns);
   if (!Number.isFinite(turns) || turns <= 0) return { commit: false, reason: "empty" };
 
-  if (mode === "fixed") {
-    const limit = Number.isFinite(Number(turnsLimit))
-      ? Number(turnsLimit)
-      : CAPTURE_COMMIT_TURNS_DEFAULT;
-    return turns >= limit
-      ? { commit: true, reason: "turns" }
-      : { commit: false, reason: "below-limit" };
-  }
+  const forced = Number.isFinite(Number(forcedTurns))
+    ? Number(forcedTurns)
+    : CAPTURE_COMMIT_TURNS_DEFAULT;
+  // 强制线不吃最少轮数，也不问模型：攒够了就交。
+  if (turns >= forced) return { commit: true, reason: "turns" };
+  if (early !== true) return { commit: false, reason: "below-limit" };
 
-  if (mode === "llm" || mode === "discriminator") {
-    // 两档判断先过最少轮数这道闸：不够就不问模型，也不提交。
-    // fixed 档完全不吃这一项，只看 turnsLimit。
-    const min = Number.isFinite(Number(minTurns))
-      ? Number(minTurns)
-      : CAPTURE_MIN_TURNS_DEFAULT;
-    if (turns < min) return { commit: false, reason: "too-few-turns" };
-    // 「之前」还是空的（全新建会话 / 刚从零开始）：没有可比的一段，直接立基线。
-    // baseline 是一次纯 POST /commit，不需要模型，所以放在 no-asker 之前。
-    // previousEmpty 缺省当 false，保持默认行为。
-    if (previousEmpty === true) return { commit: true, reason: "baseline" };
-    // 兜底：攒够轮数就无条件提交。模型一直说「没换话题」时不能无限拖下去，
-    // 也不该为了这一轮再花一次判断。放在 baseline 之后：先立基线，再兜底。
-    // turnsLimit 非有限数时与 fixed 档同一写法。
-    const commitLimit = Number.isFinite(Number(turnsLimit))
-      ? Number(turnsLimit)
-      : CAPTURE_COMMIT_TURNS_DEFAULT;
-    if (turns >= commitLimit) return { commit: true, reason: "max-turns" };
-    if (typeof ask !== "function") return { commit: false, reason: "no-asker" };
-    // ask 抛错直接往上抛：由 handler 记日志并当作「本轮不提交」。
-    const answer = await ask();
-    if (answer === "different") return { commit: true, reason: "topic" };
-    if (answer === "same") return { commit: false, reason: "same-topic" };
-    return { commit: false, reason: "ask-failed" };
-  }
+  const min = Number.isFinite(Number(minTurns))
+    ? Number(minTurns)
+    : CAPTURE_MIN_TURNS_DEFAULT;
+  if (turns < min) return { commit: false, reason: "too-few-turns" };
+  // 「之前」还是空的（全新建会话 / 刚从零开始）：没有可比的一段，直接立基线。
+  if (previousEmpty === true) return { commit: true, reason: "baseline" };
+  if (typeof classify !== "function") return { commit: false, reason: "classify-failed" };
 
-  return { commit: false, reason: "unknown-mode" };
+  let verdict;
+  try {
+    verdict = await classify();
+  } catch {
+    return { commit: false, reason: "classify-failed" };
+  }
+  if (!verdict || typeof verdict !== "object") {
+    return { commit: false, reason: "classify-failed" };
+  }
+  if (verdict.kind === "new") return { commit: true, reason: "topic", verdict };
+  if (verdict.id === currentTopicId) return { commit: false, reason: "same-topic" };
+  return { commit: true, reason: "topic", verdict };
 }
 
 function reportOf(partial = {}) {
@@ -156,6 +294,7 @@ function reportOf(partial = {}) {
     patched: false,
     committed: false,
     mode: "fixed",
+    topic: null,
     pendingTurns: 0,
     written: 0,
     error: null,
@@ -195,54 +334,60 @@ function desiredPolicyOf(switches) {
 }
 
 /**
- * 按档位造 ask：
- *   fixed        不需要
- *   llm          宿主模型，题面 + 两段
- *   discriminator  判别模型 /v1/systemone，choice + criteria
+ * 造归类器：判断方式只决定「怎么问」，返回的 verdict 形状是同一份。
  *
- * 「之前」解析出 0 条消息时 ask 直接给 null（防身）：生产路径上这一步已经由
- * captureDecision 的 baseline 分支接走，不会再走到这里。
- * ask 只有 verdict.mayCommit 为真时才会被调。
+ * candidates 为空时不调模型，直接按新话题：没有候选就没有选项，空题面只会白花一次调用。
+ * 判断失败（抛错 / 答案认不出 / 置信度缺失）返回 null，由调用方决定后果。
  */
-function buildAsker({ mode, sdk, switches, previous, segment }) {
+function buildClassifier({ judge, sdk, switches, previous, segment, candidates }) {
   const current = Array.isArray(segment) ? segment : [];
-  // 两档共用同一句题面：配置非空就用用户写的那句，否则用内置默认。
-  // trim 只用来判空，不把用户那句本身 trim 掉。
+  const pool = Array.isArray(candidates) ? candidates : [];
+  const fallback = () => ({ kind: "new", ...deriveTopicTitle(current) });
+  // 配置非空就用用户写的那句，否则用内置默认。trim 只用来判空，不把用户那句本身 trim 掉。
   const question = String(switches.capturePrompt ?? "").trim()
     ? switches.capturePrompt
     : CAPTURE_TOPIC_QUESTION;
+  const rendered = renderTopicPrompt(previous, current, pool, question);
 
-  if (mode === "llm") {
+  if (!pool.length) return async () => fallback();
+
+  if (judge === "llm") {
     return async () => {
-      if (!previous.length) return null;
       const answer = await askModelChannel(sdk, {
         modelRef: switches.captureModel,
-        prompt: `${question}\n\n${renderTopicPrompt(previous, current)}`,
+        prompt: rendered,
         timeoutMs: CAPTURE_ASK_TIMEOUT_MS,
         maxTokens: CAPTURE_ASK_MAX_TOKENS,
       });
-      return parseTopicAnswer(answer);
+      const parsed = parseTopicAnswer(answer, pool);
+      if (!parsed) return null;
+      if (parsed.choice === "new") {
+        return { kind: "new", ...deriveTopicTitle(current, parsed.label) };
+      }
+      return { kind: "existing", id: pool[parsed.choice - 1].id };
     };
   }
 
-  if (mode === "discriminator") {
+  if (judge === "discriminator") {
     return async () => {
-      if (!previous.length) return null;
       const endpoint = `${String(switches.captureServiceUrl || "").replace(/\/+$/, "")}/v1/systemone`;
+      const criteria = {};
+      pool.forEach((topic, index) => {
+        criteria[`t${index + 1}`] = `属于话题「${topic.label}」`;
+      });
+      criteria.new = "不属于上面任何一个话题";
       const data = await postJson(
         sdk,
         endpoint,
         {
           model: switches.systemoneServiceModel,
-          state: { type: "text", content: renderTopicPrompt(previous, current) },
+          // choice 题的答案形状由 questions.q 决定，题面末尾不能带「只输出这两行」那类格式说明。
+          state: { type: "text", content: renderTopicPrompt(previous, current, pool, question, "") },
           questions: {
             q: {
               type: "choice",
               instructions: question,
-              criteria: {
-                yes: "两段在讲同一件事",
-                no: "两段换了一件事",
-              },
+              criteria,
             },
           },
         },
@@ -251,13 +396,18 @@ function buildAsker({ mode, sdk, switches, previous, segment }) {
       );
       const answer = data?.answers?.q;
       if (!answer || typeof answer !== "object") return null;
-      if (answer.choice !== "yes" && answer.choice !== "no") return null;
       if (!Number.isFinite(Number(answer.confidence))) return null;
-      return answer.choice === "no" ? "different" : "same";
+      const choice = String(answer.choice ?? "").trim();
+      if (choice === "new") return fallback();
+      const match = /^t(\d+)$/i.exec(choice);
+      if (!match) return null;
+      const index = Number(match[1]);
+      if (!Number.isInteger(index) || index < 1 || index > pool.length) return null;
+      return { kind: "existing", id: pool[index - 1].id };
     };
   }
 
-  return undefined;
+  return async () => null;
 }
 
 /**
@@ -278,7 +428,9 @@ export function createCaptureHandler(sdk, deps = {}) {
     let mode = "fixed";
     try {
       const switches = await readSwitches(sdk);
-      mode = switches.captureEffectiveMode;
+      // 报告里的 mode = 这一轮的切段方式：提前提交生效时是判断方式，否则 fixed。
+      const judge = switches.captureEarlyJudge;
+      mode = switches.captureEffectiveEarly ? judge : "fixed";
 
       // 1. 总闸与写回开关：任一关掉都零网络。
       if (!switches.enabled || !switches.autoCapture) {
@@ -439,57 +591,121 @@ export function createCaptureHandler(sdk, deps = {}) {
           cursor = normalizeCursor({ ...cursor, ...verdict.patch });
         }
 
-        // 12. commit 判断。判据范围 = 上次提交之后的所有消息。
+        // 12. 归类与 commit 判断。判据范围 = 上次提交之后的所有消息。
         const segment = messages.slice(cursor.lastCommitMessageCount, cursor.lastMessageCount);
         const pendingTurns = countTurns(segment);
         // 「之前」= 上次提交之前、最近 captureContextTurns 个完整轮；悬空 user 作引子。
-        // 只算一次：既喂给 buildAsker，也用来判断「之前」是不是空的。
         const previous = tailTurns(
           messages.slice(0, cursor.lastCommitMessageCount),
           switches.captureContextTurns,
         );
         const previousEmpty = previous.length === 0;
+        const currentTopicId =
+          typeof state?.capture?.topicId === "string" ? state.capture.topicId : "";
+        // 候选池只读不写；归类本身不改表，落表要等 commit 成功（见下面 withTopics）。
+        const topics = readTopics(dataDir);
+        const candidates = candidatePool(topics, {
+          sessionId,
+          scope: switches.captureTopicScope,
+          limit: switches.captureTopicCandidates,
+        });
+        let classifyError = null;
+        const classify = async () => {
+          try {
+            return await buildClassifier({
+              judge,
+              sdk,
+              switches,
+              previous,
+              segment,
+              candidates,
+            })();
+          } catch (error) {
+            classifyError = error;
+            throw error;
+          }
+        };
+
         let decision = { commit: false, reason: "empty" };
         if (verdict.mayCommit) {
-          const ask = buildAsker({
-            mode,
-            sdk,
-            switches,
-            previous,
-            segment,
+          decision = await captureDecision({
+            early: switches.captureEffectiveEarly,
+            pendingTurns,
+            forcedTurns: switches.captureCommitTurns,
+            minTurns: switches.captureMinTurns,
+            previousEmpty,
+            currentTopicId,
+            classify,
           });
-          try {
-            decision = await captureDecision({
-              mode,
-              pendingTurns,
-              turnsLimit: switches.captureCommitTurns,
-              minTurns: switches.captureMinTurns,
-              previousEmpty,
-              ask,
-            });
-          } catch (error) {
-            // 主题判断失败不提交，也不把整轮写回打回去。
-            warn(sdk, `topic judge failed: ${errorText(error)}`);
-            decision = { commit: false, reason: "ask-failed" };
+          if (classifyError) {
+            // 探路失败本轮不切段；日志留证据，下一轮或强制轮数再来。
+            warn(sdk, `topic judge failed: ${errorText(classifyError)}`);
+            classifyError = null;
+          } else if (decision.reason === "classify-failed") {
+            warn(sdk, "topic judge failed: 答案认不出，本轮不切段");
           }
         }
 
         let committed = false;
+        let topicReport = null;
+        let committedTopicId = "";
         if (decision.commit) {
+          // 强制轮数 / 基线这两条路没有 verdict；提交时补一次归类。
+          // 这里失败按新话题落，不阻塞写入（判断失败不能变成漏写）。
+          let topicVerdict = decision.verdict || null;
+          if (!topicVerdict) {
+            try {
+              topicVerdict = await classify();
+            } catch (error) {
+              warn(sdk, `topic judge failed at commit: ${errorText(error)}`);
+              topicVerdict = null;
+            }
+            if (!topicVerdict) {
+              if (!classifyError) {
+                warn(sdk, "topic judge failed at commit: 按新话题处理");
+              }
+              topicVerdict = { kind: "new", ...deriveTopicTitle(segment) };
+            }
+            classifyError = null;
+          }
+          const commitAt = now();
           try {
-            await client.commit(sessionId);
+            const recorded = await withTopics(
+              dataDir,
+              async (table) => {
+                const outcome = recordSegment(table, {
+                  verdict: topicVerdict,
+                  sessionId,
+                  at: commitAt,
+                  label: topicVerdict.label,
+                  summary: topicVerdict.summary,
+                });
+                const tags = captureTags(outcome.topic, outcome.seq);
+                // commit 失败就抛：withTopics 只在 fn 正常返回后写盘，表与游标一起不动。
+                await client.commit(sessionId, { tags });
+                return outcome;
+              },
+              { onWriteError: (message) => warn(sdk, message) },
+            );
             cursor = markCommitted(cursor, {
-              at: now(),
+              at: commitAt,
               commitCount: cursor.lastCommitCount + 1,
             });
             committed = true;
+            committedTopicId = recorded.topic.id;
+            topicReport = {
+              id: recorded.topic.id,
+              seq: recorded.seq,
+              label: recorded.topic.label,
+              isNew: recorded.isNew,
+            };
           } catch (error) {
-            // 提交失败：游标不动。下一轮「commit 前进」那条对账会认出来。
+            // 提交失败：游标不动，话题表也不落。下一轮对账会认出来。
             warn(sdk, `commit failed: ${errorText(error)}`);
           }
         }
 
-        // 13. 落盘：会话卡的三行与下一轮游标。
+        // 13. 落盘：会话卡的四行与下一轮游标。
         //
         // pendingTurns 以 segment 口径为准（上次提交之后的所有消息），不沿用
         // advanceCursor 那份只看 delta 的累加：跨边界的半轮必须在这里补齐，
@@ -503,7 +719,12 @@ export function createCaptureHandler(sdk, deps = {}) {
         const at = now();
         const totalTurns = countTurns(messages.slice(0, cursor.lastMessageCount));
         patchSession(dataDir, sessionId, {
-          capture: { turns: totalTurns, cursor, lastAt: at },
+          capture: {
+            turns: totalTurns,
+            cursor,
+            lastAt: at,
+            ...(committedTopicId ? { topicId: committedTopicId } : {}),
+          },
         });
 
         return reportOf({
@@ -513,6 +734,7 @@ export function createCaptureHandler(sdk, deps = {}) {
           wrote,
           patched,
           committed,
+          topic: topicReport,
           pendingTurns: cursor.pendingTurns,
           written: cursor.lastMessageCount,
           error: null,

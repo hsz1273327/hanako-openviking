@@ -80,7 +80,7 @@ const controlsDisabled = computed(
   () => !state.sessionKey || !state.hasModel || state.writing,
 );
 
-// 三行状态：没有活动会话 / 写回关着 / 取数失败，都走同一条置灰路径。
+// 四行状态：没有活动会话 / 写回关着 / 取数失败，都走同一条置灰路径。
 const captureDisabled = computed(
   () => !state.capture.active || !state.capture.autoCapture,
 );

@@ -1,4 +1,4 @@
-// 写回界面共用的纯函数：记忆共享页（机器级设置）与侧边栏会话卡（本会话三行）。
+// 写回界面共用的纯函数：记忆共享页（机器级设置）与侧边栏会话卡（本会话四行）。
 //
 // 不 import vue，也不碰网络：冒烟可以直接跑，组件只负责排版与绑定。
 // 两个页面的边界不能混：
@@ -18,7 +18,8 @@ export const CAPTURE_PROMPT_MAX = 2000;
  * 内置默认题面。与 src/memory/capture.js 的 CAPTURE_TOPIC_QUESTION 逐字一致
  * （冒烟比对两边）。配置 capturePrompt 为空时就是它。
  */
-export const DEFAULT_CAPTURE_PROMPT = "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。";
+export const DEFAULT_CAPTURE_PROMPT =
+  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。";
 
 /** 与后端 normalizeCapturePrompt 同一口径：非字符串 / 空 → 空串，否则按字符截断。 */
 export function normalizeCapturePrompt(value) {
@@ -47,29 +48,15 @@ export function capturePromptStatus(text) {
   return "已修改";
 }
 
-/** 固定轮次 / 判据上下文 / 最少触发轮数与空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
+/** 强制轮数 / 上下文轮数 / 最少轮数 / 候选池 / 空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
 export const CAPTURE_TURNS_RANGE = Object.freeze([1, 100]);
 export const CAPTURE_CONTEXT_RANGE = Object.freeze([1, 20]);
 export const CAPTURE_MIN_RANGE = Object.freeze([1, 50]);
+export const CAPTURE_TOPIC_CANDIDATES_RANGE = Object.freeze([1, 20]);
 export const CAPTURE_IDLE_RANGE = Object.freeze([60, 86400]);
-
-/** 三档标签与 manifest 的 ui.enumLabels 逐字一致。 */
-export const captureModeLabels = Object.freeze({
-  fixed: "固定轮次",
-  llm: "语言模型判断",
-  discriminator: "判别模型判断",
-});
-
-export function captureModeOptions() {
-  return ["fixed", "llm", "discriminator"].map((value) => ({
-    value,
-    label: captureModeLabels[value],
-  }));
-}
 
 /** 回落原因里的配置键 → 人话。 */
 export const CAPTURE_MISSING_LABELS = Object.freeze({
-  captureModel: "判断模型",
   captureServiceUrl: "判别服务地址",
   systemoneServiceModel: "决策服务模型",
 });
@@ -93,10 +80,10 @@ function formatCount(value) {
 }
 
 /**
- * 会话卡三行的文字。
+ * 会话卡四行的文字。
  *
  * opts.active === false（没有活动会话）、opts.autoCapture === false（写回关着）
- * 或整份数据缺项时，三行一律占位并置灰。单条字段缺失只让那一行占位，
+ * 或整份数据缺项时，四行一律占位并置灰。单条字段缺失只让那一行占位，
  * 不把整块拖成不可用。
  */
 export function captureStatusView(data, opts = {}) {
@@ -107,6 +94,7 @@ export function captureStatusView(data, opts = {}) {
       written: CAPTURE_EMPTY,
       lastCommit: CAPTURE_EMPTY,
       pending: CAPTURE_EMPTY,
+      topics: CAPTURE_EMPTY,
       disabled: true,
     };
   }
@@ -114,35 +102,38 @@ export function captureStatusView(data, opts = {}) {
   const writtenCount = formatCount(data.written);
   const lastCommit = formatTimestamp(data.lastCommitAt);
   const pendingCount = formatCount(data.pendingTurns);
+  const topicCount = formatCount(data.topics);
   return {
     written: writtenCount !== "" ? `${writtenCount} 条` : CAPTURE_EMPTY,
     lastCommit: lastCommit || CAPTURE_EMPTY,
     pending: pendingCount !== "" ? `${pendingCount} 轮` : CAPTURE_EMPTY,
+    topics: topicCount !== "" ? `${topicCount} 个` : CAPTURE_EMPTY,
     disabled: false,
   };
 }
 
-/** 给 CardApp 直接 v-for 的三行；label 是固定的三件套。 */
+/** 给 CardApp 直接 v-for 的四行；label 是固定的四件套。 */
 export function captureStatusRows(data, opts = {}) {
   const view = captureStatusView(data, opts);
   return [
     { key: "written", label: "本会话已写", value: view.written },
     { key: "lastCommit", label: "上次提交", value: view.lastCommit },
     { key: "pending", label: "待提交", value: view.pending },
+    { key: "topics", label: "本会话话题数", value: view.topics },
   ];
 }
 
 /**
- * 设置页的回落提示：存的档位与真正生效的档不一致时，说清缺什么。
- * 两档一致（或还没读到服务端投影）时返回空串。
+ * 设置页的提示：提前提交存着开着，但判断方式缺配置，所以这一轮没生效。
+ * 开关本身关着（或已经生效）时不提示。
  */
 export function captureFallbackNote(config) {
   if (!config || typeof config !== "object") return "";
-  if (!config.mode || !config.effectiveMode || config.effectiveMode === config.mode) return "";
+  if (config.early === true || config.earlyStored !== true) return "";
   const missing = (Array.isArray(config.missing) ? config.missing : [])
     .map((key) => CAPTURE_MISSING_LABELS[key] || String(key || ""))
     .filter(Boolean);
   return missing.length
-    ? `当前回落到固定轮次：还缺 ${missing.join("、")}`
-    : "当前回落到固定轮次";
+    ? `当前不提前提交：还缺 ${missing.join("、")}`
+    : "当前不提前提交";
 }

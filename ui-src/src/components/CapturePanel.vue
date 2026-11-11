@@ -28,7 +28,6 @@ import {
   CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
-  captureModeOptions,
 } from "../lib/capture-view.js";
 
 const {
@@ -44,29 +43,20 @@ const {
 } = useConfig();
 const { options } = useModels();
 
-const modeOptions = Object.freeze(captureModeOptions());
+const judgeOptions = Object.freeze([
+  { value: "llm", label: "语言模型" },
+  { value: "discriminator", label: "判别模型" },
+]);
+const scopeOptions = Object.freeze([
+  { value: "session", label: "会话内" },
+  { value: "global", label: "全局" },
+]);
 const modelOptions = computed(() => options(state.form.captureModel));
 const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
 
-// 判断题面只在两档判断里出现：固定轮次那一档不看题面。
-const promptOpen = computed(() => ["llm", "discriminator"].includes(state.form.captureCommitMode));
+// 提前提交打开后，判断方式与它的上下文才有意义。
+const earlyOpen = computed(() => state.form.captureEarlyCommit === true);
 const promptStatusText = computed(() => capturePromptStatusOf());
-
-// 标签跟「真正生效的档」走，不跟用户选的档走。选了语言模型但判断模型没配时会回落
-// 到固定轮次，这时这个数就是唯一判据，标签再写「兜底轮次」说的是另一回事。
-const effectiveOpen = computed(() => {
-  const effective = state.captureConfig?.effectiveMode || state.form.captureCommitMode;
-  return ["llm", "discriminator"].includes(effective);
-});
-
-// 同一个数字，两处语义：固定轮次档它是唯一判据，主题两档它是「模型一直说没换话题」
-// 时的兜底。标签与说明跟着档位走，不然「固定轮次」这个名字会把兜底用途藏起来。
-const commitTurnsLabel = computed(() => (effectiveOpen.value ? "兜底轮次" : "固定轮次"));
-const commitTurnsHint = computed(() =>
-  effectiveOpen.value
-    ? "模型一直判没有换话题时，攒够这么多轮强制提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。"
-    : "攒够这么多轮就提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。",
-);
 
 function onPromptInput(value) {
   touchCapturePrompt(value ?? "");
@@ -111,47 +101,9 @@ function onEnter(event) {
       <div class="capture-group">
         <div class="capture-group-title">提交策略</div>
 
+        <!-- 强制线所有情况共用：攒够就交，不看提前提交开关。 -->
         <div class="field">
-          <span class="field-label">策略</span>
-          <NSelect
-            size="small"
-            aria-label="提交策略"
-            :options="modeOptions"
-            :input-props="{ id: 'captureCommitMode' }"
-            :value="state.form.captureCommitMode"
-            @focus="setFocus('captureCommitMode')"
-            @blur="setFocus('')"
-            @update:value="(value) => setCaptureForm('captureCommitMode', value)"
-          />
-          <span class="field-hint">固定轮次攒够就交；语言模型 / 判别模型只在换话题时交。</span>
-        </div>
-
-        <!-- 判断题面：语言模型与判别模型两档共用这一句。留空 = 内置那句默认问法；
-             判别模型的 yes/no 两条判定描述是内置的，这一格只改怎么问。 -->
-        <div v-if="promptOpen" class="field">
-          <div class="prompt-head">
-            <label for="capturePrompt">判断题面</label>
-            <span id="capturePromptStatus" class="prompt-status">{{ promptStatusText }}</span>
-            <NButton id="captureResetPrompt" size="small" quaternary @click="resetCapturePrompt()">恢复默认</NButton>
-          </div>
-          <NInput
-            type="textarea"
-            size="small"
-            :autosize="{ minRows: 3, maxRows: 6 }"
-            :maxlength="CAPTURE_PROMPT_MAX"
-            :input-props="{ id: 'capturePrompt', spellcheck: 'false' }"
-            :value="state.form.capturePrompt"
-            @focus="setFocus('capturePrompt')"
-            @blur="setFocus('')"
-            @update:value="onPromptInput"
-            @change="onPromptChange"
-          />
-          <span class="field-hint">语言模型判断与判别模型判断共用这一句；留空 = 内置那句默认问法；判别模型的 yes/no 两条判定描述是内置的，这一格只决定怎么问。</span>
-        </div>
-
-        <!-- 轮数格三档都在：固定轮次档是唯一判据，主题两档是兜底。 -->
-        <div class="field">
-          <label for="captureCommitTurns">{{ commitTurnsLabel }}</label>
+          <label for="captureCommitTurns">强制提交轮数</label>
           <NInputNumber
             size="small"
             style="width: 100%"
@@ -161,17 +113,57 @@ function onEnter(event) {
             :max="CAPTURE_TURNS_RANGE[1]"
             :step="1"
             placeholder="默认 12"
-            :aria-label="commitTurnsLabel"
+            aria-label="强制提交轮数"
             :input-props="{ id: 'captureCommitTurns' }"
             :value="typeof state.form.captureCommitTurns === 'number' ? state.form.captureCommitTurns : null"
             @focus="setFocus('captureCommitTurns')"
             @blur="setFocus('')"
             @update:value="(value) => setCaptureNumber('captureCommitTurns', value)"
           />
-          <span class="field-hint">{{ commitTurnsHint }}</span>
+          <span class="field-hint">所有情况共用：攒够这么多轮就提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。</span>
         </div>
 
-        <div v-if="promptOpen" class="field">
+        <div class="field">
+          <span class="field-label">提前提交</span>
+          <NSwitch
+            aria-label="提前提交"
+            :value="state.form.captureEarlyCommit"
+            @update:value="(next) => setCaptureForm('captureEarlyCommit', next)"
+          />
+          <span class="field-hint">打开后每次提交前先归类：换话题就提前交，不必等到强制轮数。</span>
+        </div>
+
+        <div v-if="earlyOpen" class="field">
+          <span class="field-label">判断方式</span>
+          <NSelect
+            size="small"
+            aria-label="判断方式"
+            :options="judgeOptions"
+            :input-props="{ id: 'captureEarlyJudge' }"
+            :value="state.form.captureEarlyJudge"
+            @focus="setFocus('captureEarlyJudge')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureForm('captureEarlyJudge', value)"
+          />
+          <span class="field-hint">语言模型读题面回答编号；判别模型走 /v1/systemone 做多选判断。</span>
+        </div>
+
+        <div v-if="earlyOpen" class="field">
+          <span class="field-label">话题作用域</span>
+          <NSelect
+            size="small"
+            aria-label="话题作用域"
+            :options="scopeOptions"
+            :input-props="{ id: 'captureTopicScope' }"
+            :value="state.form.captureTopicScope"
+            @focus="setFocus('captureTopicScope')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureForm('captureTopicScope', value)"
+          />
+          <span class="field-hint">会话内：候选少、判断准，但跨会话的同一件事连不起来。全局：能跨会话连起来，但候选多，容易并错。</span>
+        </div>
+
+        <div v-if="earlyOpen" class="field">
           <label for="captureContextTurns">上下文轮数</label>
           <NInputNumber
             size="small"
@@ -189,10 +181,10 @@ function onEnter(event) {
             @blur="setFocus('')"
             @update:value="(value) => setCaptureNumber('captureContextTurns', value)"
           />
-          <span class="field-hint">判断时回看几轮之前的对话，默认 3。范围 1–20。</span>
+          <span class="field-hint">归类时回看几轮之前的对话，默认 3。范围 1–20。</span>
         </div>
 
-        <div v-if="promptOpen" class="field">
+        <div v-if="earlyOpen" class="field">
           <label for="captureMinTurns">最少触发轮数</label>
           <NInputNumber
             size="small"
@@ -210,10 +202,32 @@ function onEnter(event) {
             @blur="setFocus('')"
             @update:value="(value) => setCaptureNumber('captureMinTurns', value)"
           />
-          <span class="field-hint">攒够这么多轮之前不判断、不提交，默认 2。范围 1–50。</span>
+          <span class="field-hint">攒够这么多轮之前不归类、不提前提交，默认 2。范围 1–50。</span>
         </div>
 
-        <div v-if="state.form.captureCommitMode === 'llm'" class="field">
+        <!-- 判断题面：语言模型与判别模型共用这一句。留空 = 内置那句默认问法。 -->
+        <div v-if="earlyOpen" class="field">
+          <div class="prompt-head">
+            <label for="capturePrompt">判断题面</label>
+            <span id="capturePromptStatus" class="prompt-status">{{ promptStatusText }}</span>
+            <NButton id="captureResetPrompt" size="small" quaternary @click="resetCapturePrompt()">恢复默认</NButton>
+          </div>
+          <NInput
+            type="textarea"
+            size="small"
+            :autosize="{ minRows: 3, maxRows: 6 }"
+            :maxlength="CAPTURE_PROMPT_MAX"
+            :input-props="{ id: 'capturePrompt', spellcheck: 'false' }"
+            :value="state.form.capturePrompt"
+            @focus="setFocus('capturePrompt')"
+            @blur="setFocus('')"
+            @update:value="onPromptInput"
+            @change="onPromptChange"
+          />
+          <span class="field-hint">提前提交时共用这一句，留空 = 内置那句默认问法。判别模型的选项由话题表自动生成，这一格只决定怎么问。</span>
+        </div>
+
+        <div v-if="earlyOpen && state.form.captureEarlyJudge === 'llm'" class="field">
           <span class="field-label">判断模型</span>
           <NSelect
             size="small"
@@ -225,10 +239,10 @@ function onEnter(event) {
             @blur="setFocus('')"
             @update:value="(value) => setCaptureForm('captureModel', value)"
           />
-          <span class="field-hint">留空 = 用宿主的辅助模型；非空形如 provider/model。</span>
+          <span class="field-hint">留空 = 用宿主的辅助模型（utility）；非空形如 provider/model。</span>
         </div>
 
-        <div v-if="state.form.captureCommitMode === 'discriminator'" class="field">
+        <div v-if="earlyOpen && state.form.captureEarlyJudge === 'discriminator'" class="field">
           <label for="captureServiceUrl">判别服务地址</label>
           <NInput
             size="small"

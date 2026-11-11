@@ -112,15 +112,27 @@ export const DEDUPE_THRESHOLD_MAX = 1;
 export const DEDUPE_THRESHOLD_STEP = 0.05;
 
 /**
- * 写回的提交策略：
- *   fixed         攒够若干完整轮就提交
- *   llm           用语言模型判断「这一段跟上一段是不是同一件事」
- *   discriminator 用判别模型（systemone）做同样的二值判断
- *
- * 后两档缺配置时回落到 fixed，但**不改存值**：页面仍要能显示用户选过的那一档，
- * 并告诉他缺什么。判据见 captureModeMissing / captureCommitModeOf。
+ * 写回的老三档。现在只用于迁移与 manifest 声明，运行时不再按它判定。
+ *   fixed         攒够若干完整轮就提交（= 提前提交关）
+ *   llm           提前提交 + 语言模型判断
+ *   discriminator 提前提交 + 判别模型判断
  */
 export const CAPTURE_COMMIT_MODES = Object.freeze(["fixed", "llm", "discriminator"]);
+
+/** 提前提交时的两种判断方式。 */
+export const CAPTURE_EARLY_JUDGES = Object.freeze(["llm", "discriminator"]);
+
+/** 候选池作用域：会话内只看本会话提到过的话题，全局看整张表。 */
+export const CAPTURE_TOPIC_SCOPES = Object.freeze(["session", "global"]);
+
+/** 候选池上限：默认 8，范围 1–20。 */
+export const CAPTURE_TOPIC_CANDIDATES_DEFAULT = 8;
+export const CAPTURE_TOPIC_CANDIDATES_MIN = 1;
+export const CAPTURE_TOPIC_CANDIDATES_MAX = 20;
+export const CAPTURE_TOPIC_CANDIDATES_STEP = 1;
+
+/** 提交策略的语义版本。空串 = 老配置（按旧的 captureCommitMode 迁移）。 */
+export const CAPTURE_COMMIT_SCHEMA = 2;
 
 /** 固定轮次档的默认值、边界与面板步长。 */
 export const CAPTURE_COMMIT_TURNS_DEFAULT = 12;
@@ -129,8 +141,8 @@ export const CAPTURE_COMMIT_TURNS_MAX = 100;
 export const CAPTURE_COMMIT_TURNS_STEP = 1;
 
 /**
- * 两档判断题的回看轮数与最少触发轮数。只对 llm / discriminator 有意义：
- * fixed 档仍用 captureCommitTurns，不受 captureMinTurns 影响。
+ * 提前提交打开时，判断回看的轮数与最少触发轮数。
+ * captureCommitTurns 是「攒够就交」的强制线，与提前提交无关。
  */
 export const CAPTURE_CONTEXT_TURNS_DEFAULT = 3;
 export const CAPTURE_CONTEXT_TURNS_MIN = 1;
@@ -154,8 +166,14 @@ export const DEFAULTS = {
   mergeMemory: false,
   autoRecall: true,
   autoCapture: true,
-  // 写回：提交策略、固定轮次、服务端兜底与两档判断各自要的配置。
+  // 写回：老档位只用于迁移；运行时的判据是「提前提交 + 判断方式」。
   captureCommitMode: "fixed",
+  // 提交策略语义版本：空串 = 老配置（读侧按 captureCommitMode 迁移）。
+  captureCommitSchema: "",
+  captureEarlyCommit: false,
+  captureEarlyJudge: "llm",
+  captureTopicScope: "session",
+  captureTopicCandidates: CAPTURE_TOPIC_CANDIDATES_DEFAULT,
   captureCommitTurns: CAPTURE_COMMIT_TURNS_DEFAULT,
   captureContextTurns: CAPTURE_CONTEXT_TURNS_DEFAULT,
   captureMinTurns: CAPTURE_MIN_TURNS_DEFAULT,
@@ -398,7 +416,7 @@ export function normalizeQueryChars(raw) {
  * 写回判断题面：空串 = 用内置那句默认问法，非空按字符截断到 CAPTURE_PROMPT_MAX。
  *
  * 与 normalizeGatePrompt 同一口径，只是上限常量换成写回那一份；不 trim——
- * 用户那句原样留着，判空是运行时（buildAsker）的事。
+ * 用户那句原样留着，判空是运行时（buildClassifier）的事。
  */
 export function normalizeCapturePrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
@@ -408,6 +426,73 @@ export function normalizeCapturePrompt(raw) {
 /** 写回提交策略：只认三档，其余（缺项、类型不对、脏值）一律回 fixed。 */
 export function normalizeCaptureCommitMode(raw) {
   return oneOf(raw, CAPTURE_COMMIT_MODES, "fixed");
+}
+
+/** 提前提交开关：只认布尔 true，其余一律关。 */
+export function normalizeCaptureEarlyCommit(raw) {
+  return raw === true;
+}
+
+/** 提前提交的判断方式：只认两种，脏值回语言模型。 */
+export function normalizeCaptureEarlyJudge(raw) {
+  return oneOf(raw, CAPTURE_EARLY_JUDGES, "llm");
+}
+
+/** 话题作用域：只认会话内 / 全局，脏值回会话内（候选少，判断更稳）。 */
+export function normalizeCaptureTopicScope(raw) {
+  return oneOf(raw, CAPTURE_TOPIC_SCOPES, "session");
+}
+
+/** 候选池上限：数字或数字串 → 1–20 的整数（四舍五入后夹边界）。 */
+export function normalizeCaptureTopicCandidates(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return CAPTURE_TOPIC_CANDIDATES_DEFAULT;
+  if (!Number.isFinite(value)) return CAPTURE_TOPIC_CANDIDATES_DEFAULT;
+  const rounded = Math.round(value);
+  return Math.min(
+    CAPTURE_TOPIC_CANDIDATES_MAX,
+    Math.max(CAPTURE_TOPIC_CANDIDATES_MIN, rounded),
+  );
+}
+
+/** 写进配置的形状：数字串。 */
+export function serializeCaptureTopicCandidates(raw) {
+  return String(normalizeCaptureTopicCandidates(raw));
+}
+
+/** 这份提交策略是不是老语义（三档、没有提前提交开关）？ */
+export function captureCommitSchemaIsLegacy(raw) {
+  const value = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+  if (!Number.isFinite(value)) return true;
+  return value < CAPTURE_COMMIT_SCHEMA;
+}
+
+/** 读出来的版本号：老语义一律当 2 用（迁移已经在读侧做完）。 */
+export function normalizeCaptureCommitSchema(raw) {
+  if (captureCommitSchemaIsLegacy(raw)) return CAPTURE_COMMIT_SCHEMA;
+  return Math.trunc(Number(raw));
+}
+
+/** 写回配置的形状：一律存数字串。 */
+export function serializeCaptureCommitSchema(raw) {
+  return String(normalizeCaptureCommitSchema(raw));
+}
+
+/**
+ * 老档位 → 新语义。只在 captureCommitSchema 还是老版本时使用。
+ * fixed 关提前提交；llm / discriminator 打开并带上对应判断方式。
+ */
+export function applyCaptureCommitSchema({ early, judge, mode } = {}) {
+  switch (normalizeCaptureCommitMode(mode)) {
+    case "llm":
+      return { early: true, judge: "llm" };
+    case "discriminator":
+      return { early: true, judge: "discriminator" };
+    default:
+      return { early: false, judge: "llm" };
+  }
 }
 
 /**
@@ -480,36 +565,26 @@ export function serializeCaptureIdleSeconds(raw) {
 }
 
 /**
- * 某一档现在缺什么配置。返回空数组表示不缺；fixed 永远不缺。
+ * 这个判断方式现在缺什么配置。返回空数组表示不缺。
  *
- * discriminator 的服务地址用 captureServiceUrl，模型与密钥沿用精排页那组
+ * llm 永远不缺：宿主辅助模型（utility）就是这个判断方式的默认实现，captureModel
+ * 留空走的就是它。把它算成「缺配置」会让默认状态永远打不开提前提交，而提交时刻的
+ * 补归类同一条路又照常走 utility，自相矛盾。
+ *
+ * discriminator 必须显式配好：服务地址用 captureServiceUrl，模型与密钥沿用精排页那组
  * 「决策服务」配置：/v1/systemone 是这个仓库里唯一接判别模型的地方。
+ * 传 "fixed" 是给老调用方留的口子：提前提交关着时没有判断方式，当然不缺。
  */
-export function captureModeMissing(switches, mode) {
-  const value = normalizeCaptureCommitMode(mode);
-  if (value === "llm") {
-    return String(switches?.captureModel ?? "").trim() ? [] : ["captureModel"];
+export function captureModeMissing(switches, judge) {
+  if (judge === "fixed") return [];
+  const value = normalizeCaptureEarlyJudge(judge);
+  if (value === "llm") return [];
+  const missing = [];
+  if (!String(switches?.captureServiceUrl ?? "").trim()) missing.push("captureServiceUrl");
+  if (!String(switches?.systemoneServiceModel ?? "").trim()) {
+    missing.push("systemoneServiceModel");
   }
-  if (value === "discriminator") {
-    const missing = [];
-    if (!String(switches?.captureServiceUrl ?? "").trim()) missing.push("captureServiceUrl");
-    if (!String(switches?.systemoneServiceModel ?? "").trim()) {
-      missing.push("systemoneServiceModel");
-    }
-    return missing;
-  }
-  return [];
-}
-
-/**
- * 这一轮真正会跑的档：存的档位缺配置时回落到 fixed。
- *
- * 只改读出来的判定，不改存值：用户把模型删了，页面仍该显示「语言模型判断」
- * 并告诉他缺什么，而不是把选择悄悄抹掉。
- */
-export function captureCommitModeOf(switches) {
-  const stored = normalizeCaptureCommitMode(switches?.captureCommitMode);
-  return captureModeMissing(switches, stored).length ? "fixed" : stored;
+  return missing;
 }
 
 /** 召回超时归一化：500–30000 的整数毫秒，其余一律回默认 5000。 */
@@ -1082,19 +1157,42 @@ export async function readSwitches(sdk) {
   // 迁移只在这一层做（内存里），落库等下一次整单保存，见 routes/recall-mode.js。
   const rerankLaneSchemaRaw = await read(sdk, "rerankLaneSchema");
   const legacyLanes = rerankLaneSchemaIsLegacy(rerankLaneSchemaRaw);
-  // 写回的存值与原样值分开：captureCommitMode 是用户选的，captureEffectiveMode
-  // 是缺配置回落之后这一轮真正会跑的。两者都读出来，界面才有得显示。
+  // 写回：老的 captureCommitMode 只在 schema 还是老版本时参与迁移，之后不再当判据。
   const captureCommitMode = normalizeCaptureCommitMode(await read(sdk, "captureCommitMode"));
   const captureModel = String((await read(sdk, "captureModel")) ?? "").trim();
   const captureServiceUrl = normalizeServiceUrl(await read(sdk, "captureServiceUrl"));
   const captureChoice = { captureModel, captureServiceUrl, systemoneServiceModel };
+  const captureCommitSchemaRaw = await read(sdk, "captureCommitSchema");
+  const legacyCaptureCommit = captureCommitSchemaIsLegacy(captureCommitSchemaRaw);
+  const storedEarlyCommit = normalizeCaptureEarlyCommit(await read(sdk, "captureEarlyCommit"));
+  const storedEarlyJudge = normalizeCaptureEarlyJudge(await read(sdk, "captureEarlyJudge"));
+  // 老配置里没有这两个键，唯一的凭据是旧档位：fixed 关，llm / discriminator 开。
+  const earlyCommit = legacyCaptureCommit
+    ? applyCaptureCommitSchema({
+        early: storedEarlyCommit,
+        judge: storedEarlyJudge,
+        mode: captureCommitMode,
+      })
+    : { early: storedEarlyCommit, judge: storedEarlyJudge };
+  const captureEarlyMissing = captureModeMissing(
+    { ...captureChoice, captureEarlyCommit: earlyCommit.early, captureEarlyJudge: earlyCommit.judge },
+    earlyCommit.judge,
+  );
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
     autoCapture: await read(sdk, "autoCapture"),
-    // 写回：存值 / 实际生效档 / 固定轮次 / 服务端兜底。
+    // 写回：老档位留着给兼容报告；运行时只看提前提交与判断方式。
     captureCommitMode,
-    captureEffectiveMode: captureCommitModeOf({ ...captureChoice, captureCommitMode }),
+    captureCommitSchema: normalizeCaptureCommitSchema(captureCommitSchemaRaw),
+    captureEarlyCommit: earlyCommit.early,
+    captureEffectiveEarly: earlyCommit.early && captureEarlyMissing.length === 0,
+    captureEarlyJudge: earlyCommit.judge,
+    captureEarlyMissing,
+    captureTopicScope: normalizeCaptureTopicScope(await read(sdk, "captureTopicScope")),
+    captureTopicCandidates: normalizeCaptureTopicCandidates(
+      await read(sdk, "captureTopicCandidates"),
+    ),
     captureCommitTurns: normalizeCaptureCommitTurns(await read(sdk, "captureCommitTurns")),
     captureContextTurns: normalizeCaptureContextTurns(await read(sdk, "captureContextTurns")),
     captureMinTurns: normalizeCaptureMinTurns(await read(sdk, "captureMinTurns")),
@@ -1104,7 +1202,7 @@ export async function readSwitches(sdk) {
     ),
     captureModel,
     captureServiceUrl,
-    // 写回判断题面：两档共用这一句，空串 = 运行时不变量那句默认问法。
+    // 写回判断题面：提前提交时共用这一句，空串 = 运行时不变量那句默认问法。
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,

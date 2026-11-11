@@ -77,6 +77,7 @@ import {
   CAPTURE_CONTEXT_RANGE,
   CAPTURE_IDLE_RANGE,
   CAPTURE_MIN_RANGE,
+  CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   capturePromptDraft,
@@ -221,8 +222,8 @@ export function createPanelStore(deps = {}) {
     },
     // 服务端确认过的召回投影（回滚目标）。
     layers: paintRecallConfig(null),
-    // 服务端确认过的写回投影（只留回落判据需要的那三项）。
-    captureConfig: { mode: "fixed", effectiveMode: "fixed", missing: [] },
+    // 服务端确认过的写回投影（只留提前提交的生效判据）。
+    captureConfig: { early: false, earlyStored: false, judge: "llm", missing: [] },
     // 控件此刻的值（下拉 / 提示词 / 打分服务草稿）。改了立刻提交。
     form: {
       recallGate: "off",
@@ -243,7 +244,10 @@ export function createPanelStore(deps = {}) {
       assembleMode: "rules",
       gateModel: "",
       // 写回：机器级设置。轮次 / 秒数在界面上是数字，提交时服务端收数字或数字串。
-      captureCommitMode: "fixed",
+      captureEarlyCommit: false,
+      captureEarlyJudge: "llm",
+      captureTopicScope: "session",
+      captureTopicCandidates: 8,
       captureCommitTurns: 12,
       captureContextTurns: 3,
       captureMinTurns: 2,
@@ -289,7 +293,10 @@ export function createPanelStore(deps = {}) {
   };
 
   const CAPTURE_FORM_KEYS = [
-    "captureCommitMode",
+    "captureEarlyCommit",
+    "captureEarlyJudge",
+    "captureTopicScope",
+    "captureTopicCandidates",
     "captureCommitTurns",
     "captureContextTurns",
     "captureMinTurns",
@@ -301,7 +308,10 @@ export function createPanelStore(deps = {}) {
   ];
 
   const captureDefaults = () => ({
-    captureCommitMode: "fixed",
+    captureEarlyCommit: false,
+    captureEarlyJudge: "llm",
+    captureTopicScope: "session",
+    captureTopicCandidates: 8,
     captureCommitTurns: 12,
     captureContextTurns: 3,
     captureMinTurns: 2,
@@ -350,20 +360,24 @@ export function createPanelStore(deps = {}) {
    */
   function applyCaptureConfig(out) {
     if (!out || typeof out !== "object") return;
-    const mode = typeof out.mode === "string" ? out.mode : "fixed";
-    const effectiveMode =
-      typeof out.effectiveMode === "string" ? out.effectiveMode : mode;
+    const early = out.early === true;
+    const earlyStored = out.earlyStored === true;
+    const judge = out.judge === "discriminator" ? "discriminator" : "llm";
     const missing = Array.isArray(out.missing)
       ? out.missing.filter((key) => typeof key === "string")
       : [];
-    state.captureConfig = { mode, effectiveMode, missing };
+    state.captureConfig = { early, earlyStored, judge, missing };
 
     const turns = Number(out.turns);
     const contextTurns = Number(out.contextTurns);
     const minTurns = Number(out.minTurns);
     const idle = Number(out.idleSeconds);
+    const topicCandidates = Number(out.topicCandidates);
     captureConfirmed = {
-      captureCommitMode: mode,
+      captureEarlyCommit: earlyStored,
+      captureEarlyJudge: judge,
+      captureTopicScope: out.topicScope === "global" ? "global" : "session",
+      captureTopicCandidates: Number.isFinite(topicCandidates) ? topicCandidates : 8,
       captureCommitTurns: Number.isFinite(turns) ? turns : 12,
       captureContextTurns: Number.isFinite(contextTurns) ? contextTurns : 3,
       captureMinTurns: Number.isFinite(minTurns) ? minTurns : 2,
@@ -758,7 +772,13 @@ export function createPanelStore(deps = {}) {
 
   function readCapture() {
     return {
-      captureCommitMode: state.form.captureCommitMode,
+      captureEarlyCommit: state.form.captureEarlyCommit === true,
+      captureEarlyJudge: state.form.captureEarlyJudge,
+      captureTopicScope: state.form.captureTopicScope,
+      captureTopicCandidates:
+        state.form.captureTopicCandidates === ""
+          ? captureConfirmed.captureTopicCandidates
+          : state.form.captureTopicCandidates,
       // 数字格被清空时按「还没填完」处理：发已确认的值，不让一次无关改动被空串拖成 400。
       captureCommitTurns:
         state.form.captureCommitTurns === ""
@@ -872,7 +892,9 @@ export function createPanelStore(deps = {}) {
           ? CAPTURE_CONTEXT_RANGE
           : key === "captureMinTurns"
             ? CAPTURE_MIN_RANGE
-            : CAPTURE_TURNS_RANGE;
+            : key === "captureTopicCandidates"
+              ? CAPTURE_TOPIC_CANDIDATES_RANGE
+              : CAPTURE_TURNS_RANGE;
     state.form[key] = Math.min(max, Math.max(min, Math.round(value)));
     return saveCapture();
   }

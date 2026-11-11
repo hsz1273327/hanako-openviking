@@ -9,26 +9,33 @@
 // 两者不许混在一个响应里：机器级设置跟具体会话无关，会话级数字也不该被写进全局配置。
 
 import {
-  CAPTURE_COMMIT_MODES,
+  CAPTURE_COMMIT_SCHEMA,
   CAPTURE_COMMIT_TURNS_MAX,
   CAPTURE_COMMIT_TURNS_MIN,
   CAPTURE_CONTEXT_TURNS_MAX,
   CAPTURE_CONTEXT_TURNS_MIN,
+  CAPTURE_EARLY_JUDGES,
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_MIN_TURNS_MAX,
   CAPTURE_MIN_TURNS_MIN,
   CAPTURE_PROMPT_MAX,
+  CAPTURE_TOPIC_CANDIDATES_MAX,
+  CAPTURE_TOPIC_CANDIDATES_MIN,
+  CAPTURE_TOPIC_SCOPES,
   captureModeMissing,
   normalizeGateModel,
   normalizeServiceUrl,
   readSwitches,
+  serializeCaptureCommitSchema,
   serializeCaptureCommitTurns,
   serializeCaptureContextTurns,
   serializeCaptureIdleSeconds,
   serializeCaptureMinTurns,
+  serializeCaptureTopicCandidates,
 } from "../src/ov/settings.js";
 import { captureCounts } from "../src/memory/cursor.js";
+import { readTopics, topicsForSession } from "../src/memory/topics.js";
 import { readSession, sessionKeyOf } from "../src/state/session.js";
 
 function dataDirOf(ctx) {
@@ -46,21 +53,26 @@ function has(body, key) {
 async function project(ctx) {
   const switches = await readSwitches(ctx);
   return {
-    mode: switches.captureCommitMode,
-    effectiveMode: switches.captureEffectiveMode,
-    missing: captureModeMissing(switches, switches.captureCommitMode),
+    early: switches.captureEffectiveEarly,
+    earlyStored: switches.captureEarlyCommit,
+    judge: switches.captureEarlyJudge,
+    missing: captureModeMissing(switches, switches.captureEarlyJudge),
     turns: serializeCaptureCommitTurns(switches.captureCommitTurns),
     contextTurns: serializeCaptureContextTurns(switches.captureContextTurns),
     minTurns: serializeCaptureMinTurns(switches.captureMinTurns),
+    topicScope: switches.captureTopicScope,
+    topicCandidates: serializeCaptureTopicCandidates(switches.captureTopicCandidates),
     serverFallback: switches.captureServerFallback,
     idleSeconds: serializeCaptureIdleSeconds(switches.captureServerIdleSeconds),
     model: switches.captureModel,
     serviceUrl: switches.captureServiceUrl,
     prompt: switches.capturePrompt,
-    modes: [...CAPTURE_COMMIT_MODES],
+    judges: [...CAPTURE_EARLY_JUDGES],
+    scopes: [...CAPTURE_TOPIC_SCOPES],
     turnsRange: [CAPTURE_COMMIT_TURNS_MIN, CAPTURE_COMMIT_TURNS_MAX],
     contextTurnsRange: [CAPTURE_CONTEXT_TURNS_MIN, CAPTURE_CONTEXT_TURNS_MAX],
     minTurnsRange: [CAPTURE_MIN_TURNS_MIN, CAPTURE_MIN_TURNS_MAX],
+    topicCandidatesRange: [CAPTURE_TOPIC_CANDIDATES_MIN, CAPTURE_TOPIC_CANDIDATES_MAX],
     idleRange: [CAPTURE_IDLE_SECONDS_MIN, CAPTURE_IDLE_SECONDS_MAX],
   };
 }
@@ -97,15 +109,49 @@ export default function registerCaptureRoutes(app, ctx) {
 
     const changes = [];
 
-    if (has(body, "captureCommitMode")) {
-      const value = body.captureCommitMode;
-      if (typeof value !== "string" || !CAPTURE_COMMIT_MODES.includes(value)) {
+    // 提前提交：开关 / 判断方式 / 话题作用域 / 候选池上限。
+    // 旧的 captureCommitMode 当未知键忽略：不再 400，也不再写。
+    if (has(body, "captureEarlyCommit")) {
+      if (typeof body.captureEarlyCommit !== "boolean") {
+        return c.json({ ok: false, error: "captureEarlyCommit 只能是 true / false" }, 400);
+      }
+      changes.push(["captureEarlyCommit", body.captureEarlyCommit]);
+    }
+
+    if (has(body, "captureEarlyJudge")) {
+      const value = body.captureEarlyJudge;
+      if (typeof value !== "string" || !CAPTURE_EARLY_JUDGES.includes(value)) {
         return c.json(
-          { ok: false, error: `captureCommitMode 只能是 ${CAPTURE_COMMIT_MODES.join(" / ")}` },
+          { ok: false, error: `captureEarlyJudge 只能是 ${CAPTURE_EARLY_JUDGES.join(" / ")}` },
           400,
         );
       }
-      changes.push(["captureCommitMode", value]);
+      changes.push(["captureEarlyJudge", value]);
+    }
+
+    if (has(body, "captureTopicScope")) {
+      const value = body.captureTopicScope;
+      if (typeof value !== "string" || !CAPTURE_TOPIC_SCOPES.includes(value)) {
+        return c.json(
+          { ok: false, error: `captureTopicScope 只能是 ${CAPTURE_TOPIC_SCOPES.join(" / ")}` },
+          400,
+        );
+      }
+      changes.push(["captureTopicScope", value]);
+    }
+
+    if (has(body, "captureTopicCandidates")) {
+      const problem = integerError(
+        body.captureTopicCandidates,
+        "captureTopicCandidates",
+        CAPTURE_TOPIC_CANDIDATES_MIN,
+        CAPTURE_TOPIC_CANDIDATES_MAX,
+      );
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push([
+        "captureTopicCandidates",
+        serializeCaptureTopicCandidates(body.captureTopicCandidates),
+      ]);
     }
 
     if (has(body, "captureCommitTurns")) {
@@ -210,6 +256,10 @@ export default function registerCaptureRoutes(app, ctx) {
     }
 
     // 认不出的键一律忽略：前端半新半旧不该整单失败。
+    // 保存成功就写语义版本：下一次读侧不再把这份配置当老三档迁移。
+    if (changes.length) {
+      changes.push(["captureCommitSchema", serializeCaptureCommitSchema(CAPTURE_COMMIT_SCHEMA)]);
+    }
     for (const [key, value] of changes) await ctx.config.set(key, value);
 
     return c.json(
@@ -226,16 +276,19 @@ export default function registerCaptureRoutes(app, ctx) {
       sessionId: sessionId || null,
       active: Boolean(sessionId),
       autoCapture: Boolean(switches.autoCapture),
-      mode: switches.captureEffectiveMode,
+      mode: switches.captureEffectiveEarly ? switches.captureEarlyJudge : "fixed",
       written: 0,
       lastCommitAt: null,
       pendingTurns: 0,
+      topics: 0,
     };
     if (!sessionId) return c.json(base, 200);
 
-    // 只读：readSession 不会建文件；captureCounts 与写回链路同源。
-    const state = readSession(dataDirOf(ctx), sessionId);
+    // 只读：readSession / readTopics 都不会建文件；captureCounts 与写回链路同源。
+    const dataDir = dataDirOf(ctx);
+    const state = readSession(dataDir, sessionId);
     const counts = captureCounts(state.capture?.cursor);
-    return c.json({ ...base, ...counts }, 200);
+    const topics = topicsForSession(readTopics(dataDir), sessionId).length;
+    return c.json({ ...base, ...counts, topics }, 200);
   });
 }
