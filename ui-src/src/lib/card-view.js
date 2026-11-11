@@ -2,14 +2,14 @@
 // 输出是卡片要显示的文字 / 类名，以及「改一项」「交回全局」要提交的 overrides。
 //
 // 为什么单独一层：卡片很小，但语义不轻——
-//   * 三个开关与召回范围改的是本会话覆盖值；
+//   * 两个开关与召回范围改的是本会话覆盖值；
 //   * 「跟随全局」不是把值写成 false，而是提交 null 让后端 delete；
 //   * 无活动会话时整块控件不可操作。
 // 这些规则不依赖 Vue / DOM，dev/smoke.mjs 可以直接验，不用去 .vue 里正则捞字符串。
 
 import { sessionKeyOf } from "./session-key.js";
 
-export const BOOL_KEYS = Object.freeze(["autoRecall", "autoCapture", "readOnly"]);
+export const BOOL_KEYS = Object.freeze(["autoRecall", "readOnly"]);
 export const SCOPE_KEY = "recallPeerScope";
 export const OVERRIDE_KEYS = Object.freeze([...BOOL_KEYS, SCOPE_KEY]);
 export const SCOPE_VALUES = Object.freeze(["all", "self"]);
@@ -56,7 +56,12 @@ export function pillView(status) {
     : { text: "全局关", tone: "off" };
 }
 
-/** 状态点：总闸开着且至少一个自动开关生效时是 ok，否则 idle。 */
+/**
+ * 状态点：总闸开着且至少一个自动开关生效时是 ok，否则 idle。
+ *
+ * autoCapture 是全局值（写回在面板「记忆共享」页里改，不能按会话覆盖），
+ * 但 effective.autoCapture 仍参与状态点：它开着时这段对话仍会自动写回。
+ */
 export function dotTone(data, enabled) {
   const effective = data?.effective || {};
   return enabled && (effective.autoRecall || effective.autoCapture) ? "ok" : "idle";

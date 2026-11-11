@@ -13,17 +13,20 @@ import path from "node:path";
 
 const MAX_AGE_DAYS = 30;
 
-/** 允许被会话覆盖的键。总闸不在里面——关整台机器是全局决定，不该由某段对话代劳。 */
+/**
+ * 允许被会话覆盖的键。总闸不在里面——关整台机器是全局决定，不该由某段对话代劳。
+ * 写回（autoCapture）也不在里面，它是机器级的，在面板的「记忆共享」页里改；
+ * 会话卡上早已没有这一行。
+ */
 export const OVERRIDE_KEYS = Object.freeze([
   "autoRecall",
-  "autoCapture",
   "readOnly",
   "skillRouting",
   "probe",
   "recallPeerScope",
 ]);
 
-const BOOLEAN_KEYS = new Set(["autoRecall", "autoCapture", "readOnly", "skillRouting", "probe"]);
+export const BOOLEAN_KEYS = new Set(["autoRecall", "readOnly", "skillRouting", "probe"]);
 
 // key 的形状：宿主会话文件里的 uuid 是小写，所以正则不带 i 标志。
 // 形状不对的一律当“认不出来”：readSession 会给任何字符串回一份空状态，而写路径
@@ -101,7 +104,7 @@ export function readSession(dataDir, sessionId) {
     return {
       ...emptyState(sessionId),
       ...parsed,
-      overrides: { ...(parsed.overrides || {}) },
+      overrides: sanitizeOverrides(parsed.overrides),
       recall: { ...emptyState().recall, ...(parsed.recall || {}) },
       capture: { ...emptyState().capture, ...(parsed.capture || {}) },
     };
@@ -127,6 +130,23 @@ function sanitizeOverride(key, value) {
     return value === "all" || value === "self" ? value : undefined;
   }
   return undefined;
+}
+
+/**
+ * 按白名单清洗 overrides：只保留合法的键，丢掉白名单外与非法的值。
+ *
+ * 老会话文件里可能还留着 autoCapture（它曾经能被会话覆盖）；白名单一改，
+ * 那条就成了永远消不掉的脏键。读的时候过一遍，下一次 patchSession 落盘就干净，
+ * 界面也不会再声称「有本会话设置」。
+ */
+function sanitizeOverrides(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const sanitized = sanitizeOverride(key, value);
+    if (sanitized !== undefined) out[key] = sanitized;
+  }
+  return out;
 }
 
 /**
@@ -237,7 +257,7 @@ export function listSessions(dataDir, { maxAgeDays = MAX_AGE_DAYS } = {}) {
         createdAt: state.createdAt,
         updatedAt: state.updatedAt,
         closedAt: state.closedAt,
-        overrides: state.overrides || {},
+        overrides: sanitizeOverrides(state.overrides),
         recall: state.recall || {},
         capture: state.capture || {},
         mtime: stat.mtimeMs,

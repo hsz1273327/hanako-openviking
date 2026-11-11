@@ -86,7 +86,7 @@ function onTabKeydown(event, name) {
   </NCard>
 
   <p class="scoped-note">
-    记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
+    记忆召回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改；写回在「记忆共享」页里改。
   </p>
 
   <!-- 五个子页签：line + small，不叠第三层容器；aria 由这里补（n-tabs 不输出语义）。 -->

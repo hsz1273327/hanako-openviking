@@ -2,11 +2,11 @@
 // 边栏会话卡：这段对话里的记忆行为，全部按会话算。
 //
 // 行为与已删除的手写会话卡（历史实现）逐条对齐：
-//   - 三个开关与召回范围改的是本会话覆盖值，选了立刻 POST；
+//   - 记忆召回与只读两个开关、加上召回范围，改的是本会话覆盖值，选了立刻 POST；
 //   - 小字「本会话 / 跟随全局」：已覆盖时点它交回全局，提交的是 { [key]: null }，
 //     不是 false（后端 patchSession 里只有 null 才 delete）；
 //   - 提交先乐观改，失败退回点之前的值，并把错误写进 hint；
-//   - 没有活动会话时标题写「无活动会话」，四个键的控件与「跟随全局」全部 disabled；
+//   - 没有活动会话时标题写「无活动会话」，三个键的控件与「跟随全局」全部 disabled；
 //   - 状态点 / 药丸 / stats / hint 的文案规则来自 lib/card-view.js，与旧卡同一份。
 //
 // 形态：侧边栏是宿主 warm-paper 亮色（--sidebar-bg #F4F0EA），卡片不画自己的底色，
@@ -330,22 +330,6 @@ onBeforeUnmount(() => {
             :value="Boolean(state.effective.autoRecall)"
             :disabled="controlsDisabled"
             @update:value="(next) => toggle('autoRecall', next)"
-          />
-        </CardRow>
-
-        <CardRow
-          row-key="autoCapture"
-          label="写回"
-          :overridden="overridden.autoCapture"
-          :disabled="controlsDisabled"
-          @reset="reset('autoCapture')"
-        >
-          <NSwitch
-            size="small"
-            aria-label="写回"
-            :value="Boolean(state.effective.autoCapture)"
-            :disabled="controlsDisabled"
-            @update:value="(next) => toggle('autoCapture', next)"
           />
         </CardRow>
 

@@ -285,6 +285,7 @@ import {
   markClosed,
   sessionKeyOf,
   OVERRIDE_KEYS,
+  BOOLEAN_KEYS,
 } from "../src/state/session.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
@@ -3129,6 +3130,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       name,
     );
   }
+
+  const cardApp = uiCode("CardApp.vue");
+  check(
+    "会话卡上不再有写回开关",
+    !cardApp.includes('row-key="autoCapture"') && !cardApp.includes('aria-label="写回"'),
+    cardApp.slice(cardApp.indexOf("CardRow"), cardApp.indexOf("CardRow") + 600),
+  );
+
+  const memoryNote = uiCode("components/MemoryPanel.vue").match(/<p class="scoped-note">[\s\S]*?<\/p>/)?.[0] ?? "";
+  check(
+    "记忆搜索页的说明不再声称写回按会话、并指向记忆共享",
+    memoryNote.includes("记忆共享") && !memoryNote.includes("写回、只读"),
+    memoryNote,
+  );
 
   for (const name of ["App.vue", "components/TabBar.vue"]) {
     check(
@@ -6653,8 +6668,57 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [true, true],
   );
   check("覆盖键集合不含总闸", !OVERRIDE_KEYS.includes("enabled"));
+  check(
+    "autoCapture 不在会话覆盖白名单里",
+    !OVERRIDE_KEYS.includes("autoCapture") && !BOOLEAN_KEYS.has("autoCapture") &&
+      CARD_OVERRIDE_KEYS.every((key) => OVERRIDE_KEYS.includes(key)),
+    [OVERRIDE_KEYS, [...BOOLEAN_KEYS], CARD_OVERRIDE_KEYS].map((arr) => arr.join(", ")).join(" | "),
+  );
 
-  patchSession(dir, "sess-b", { overrides: { autoCapture: false } });
+  const captureRejected = patchSession(dir, "sess-b", {
+    overrides: { autoCapture: false, autoRecall: false },
+  });
+  eq(
+    "patchSession 写不进 autoCapture：白名单外键被丢弃，合法键留下",
+    [captureRejected.overrides, captureRejected.overrides.autoRecall],
+    [{ autoRecall: false }, false],
+  );
+  const captureEffective = effective(
+    { autoRecall: true, autoCapture: true, readOnly: false },
+    captureRejected,
+  );
+  eq(
+    "autoCapture 覆盖被拒后 effective() 仍取全局值",
+    captureEffective.autoCapture,
+    true,
+  );
+
+  // 模拟老会话文件里残留 autoCapture 覆盖：读出来要被清洗掉。
+  const legacyFile = path.join(dir, "sessions", "sess-legacy.json");
+  fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+  fs.writeFileSync(
+    legacyFile,
+    JSON.stringify({
+      sessionId: "sess-legacy",
+      overrides: { autoCapture: false, autoRecall: false },
+    }),
+  );
+  const legacyRead = readSession(dir, "sess-legacy");
+  eq(
+    "老会话文件里的 autoCapture 覆盖读出来被丢掉",
+    [legacyRead.overrides, "autoCapture" in legacyRead.overrides],
+    [{ autoRecall: false }, false],
+  );
+  const legacyListed = listSessions(dir).find((row) => row.sessionId === "sess-legacy");
+  check(
+    "listSessions 返回的 overrides 也洗掉了 autoCapture",
+    legacyListed && !("autoCapture" in legacyListed.overrides),
+    JSON.stringify(legacyListed?.overrides),
+  );
+  // 清掉遗留文件，避免影响后续「列出两个会话」的计数。
+  fs.rmSync(legacyFile, { force: true });
+
+  patchSession(dir, "sess-b", { overrides: { readOnly: true } });
   const rows = listSessions(dir);
   eq("列出两个会话", rows.length, 2);
   check("列表带会话 id", rows.some((row) => row.sessionId === "sess-b"));
@@ -8398,16 +8462,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   const filesBeforePathWrite = fs.readdirSync(path.join(dir, "sessions")).sort();
   const pathWrite = await postSession(
     `/Users/u/.hanako/agents/agent-x/sessions/2026-10-20T08-09-15-730Z_${BOUND_KEY}.jsonl`,
-    { overrides: { autoCapture: false } },
+    { overrides: { readOnly: true } },
   );
   eq(
     "路径写入落到同一个 key、写的是同一份状态、且没有多出一份文件",
     [
       pathWrite.body.sessionId,
-      readSession(dir, BOUND_KEY).overrides.autoCapture,
+      readSession(dir, BOUND_KEY).overrides.readOnly,
       fs.readdirSync(path.join(dir, "sessions")).sort(),
     ],
-    [BOUND_KEY, false, filesBeforePathWrite],
+    [BOUND_KEY, true, filesBeforePathWrite],
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
@@ -15412,15 +15476,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
 // ================= 边栏会话卡：覆盖语义（纯函数） =================
 {
-  // 卡不在一屏面板里，但语义最密：三项开关 + 召回范围都改会话覆盖，
+  // 卡不在一屏面板里，但语义最密：两项开关 + 召回范围都改会话覆盖，
   // 「跟随全局」提交 null 而不是 false。这里只验纯函数的输入输出，不看组件结构。
   eq(
-    "会话卡的四个键（三个布尔 + 一个范围）覆盖后端白名单里的同名键",
+    "会话卡的三个键（两个布尔 + 一个范围）覆盖后端白名单里的同名键",
     [CARD_BOOL_KEYS, CARD_SCOPE_KEY, CARD_OVERRIDE_KEYS],
-    [["autoRecall", "autoCapture", "readOnly"], "recallPeerScope", ["autoRecall", "autoCapture", "readOnly", "recallPeerScope"]],
+    [["autoRecall", "readOnly"], "recallPeerScope", ["autoRecall", "readOnly", "recallPeerScope"]],
   );
   check(
-    "卡上四个键都在后端的 OVERRIDE_KEYS 白名单里",
+    "卡上三个键都在后端的 OVERRIDE_KEYS 白名单里",
     CARD_OVERRIDE_KEYS.every((key) => OVERRIDE_KEYS.includes(key)),
     CARD_OVERRIDE_KEYS.filter((key) => OVERRIDE_KEYS.includes(key) === false).join(", "),
   );

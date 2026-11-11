@@ -76,4 +76,4 @@ node dev/smoke.mjs     # 必须全绿
 
 - 记忆与开关按**会话**绑定，状态落在 `<appDataDir>/sessions/<sessionId>.json`，一会话一文件。
 - 全局配置与 `preferences.json` 的 `settings_contributions.v2-hanako-openviking` 对应。
-- 总闸（`enabled`）**不可**被会话覆盖。会话只能改 `autoRecall` / `autoCapture` / `readOnly` / `skillRouting` / `probe` / `recallPeerScope`。
+- 总闸（`enabled`）**不可**被会话覆盖。会话只能改 `autoRecall` / `readOnly` / `skillRouting` / `probe` / `recallPeerScope`。写回（`autoCapture`）是机器级的，在面板的「记忆共享」页里改。
