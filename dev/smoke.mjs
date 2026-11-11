@@ -5945,15 +5945,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 决策提示词自己的草稿与三态（与 gatePrompt 同一套，只是另一格） ----
   eq(
-    "决策提示词草稿（空配置坐默认问法、动过不再填、自定义照显、超长按码点截断） / 三态小字（默认 / 已修改 / 空＝照常召回）",
+    "决策提示词草稿（空配置坐默认问法、动过不再填、自定义照显、超长按码点截断） / 三态小字（默认 / 已修改 / 留空用内置默认）",
     [
       decisionPromptDraft(""),
       decisionPromptDraft("", true),
       decisionPromptDraft("自定义判据"),
       decisionPromptStatus(UI_DEFAULT_GATE_DECISION_PROMPT),
       decisionPromptStatus("自定义判据"),
-      decisionPromptStatus("").includes("不会拦截任何召回"),
-      decisionPromptStatus("   \n ").includes("不会拦截任何召回"),
+      decisionPromptStatus("").includes("留空时使用内置默认提示词"),
+      decisionPromptStatus("   \n ").includes("留空时使用内置默认提示词"),
       paintDecisionConfig({ gateDecisionPrompt: "字".repeat(GATE_PROMPT_MAX + 10) })
         .gateDecisionPrompt.length,
       paintDecisionConfig({}).gateDecisionPrompt,
@@ -8919,12 +8919,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         promptForStorage("capturePrompt", CAPTURE_PROMPT_RETIRED_DEFAULTS[0]),
         promptForStorage("gatePrompt", GATE_PROMPT_RETIRED_DEFAULTS[0]),
         promptForStorage("gateContextPrompt", DEFAULT_GATE_CONTEXT_PROMPT),
+        promptForStorage("gateDecisionPrompt", DEFAULT_GATE_DECISION_PROMPT),
+        promptForStorage("rerankSystemonePrompt", DEFAULT_RERANK_SYSTEMONE_PROMPT),
         promptForStorage("rerankPrompt", "我的题面"),
         promptForStorage("gatePrompt", "  自定义  "),
+        promptForStorage("gateDecisionPrompt", "自定义决策题面"),
+        promptForStorage("rerankSystemonePrompt", "自定义判别题面"),
         promptForStorage("rerankPrompt", ""),
         promptForStorage("rerankPrompt", 42),
       ],
-      ["", "", "", "", "我的题面", "  自定义  ", "", 42],
+      ["", "", "", "", "", "", "我的题面", "  自定义  ", "自定义决策题面", "自定义判别题面", "", 42],
     );
     check(
       "gate 历史默认以「只回一个词：需要，或不需要。」结尾，且与当前默认不相等",
@@ -8940,6 +8944,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         gatePrompt: DEFAULT_GATE_PROMPT,
         gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
         rerankPrompt: DEFAULT_RERANK_PROMPT,
+        gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+        rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
       }),
     );
     eq(
@@ -8949,12 +8955,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         readCurrent.gatePrompt,
         readCurrent.gateContextPrompt,
         readCurrent.rerankPrompt,
+        readCurrent.gateDecisionPrompt,
+        readCurrent.rerankSystemonePrompt,
       ],
       [
         CAPTURE_TOPIC_QUESTION,
         DEFAULT_GATE_PROMPT,
         DEFAULT_GATE_CONTEXT_PROMPT,
         DEFAULT_RERANK_PROMPT,
+        DEFAULT_GATE_DECISION_PROMPT,
+        DEFAULT_RERANK_SYSTEMONE_PROMPT,
       ],
     );
     const readEmpty = await readSwitches(
@@ -8963,6 +8973,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         gatePrompt: "",
         gateContextPrompt: "",
         rerankPrompt: "",
+        gateDecisionPrompt: "",
+        rerankSystemonePrompt: "",
       }),
     );
     eq(
@@ -8972,18 +8984,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         readEmpty.gatePrompt,
         readEmpty.gateContextPrompt,
         readEmpty.rerankPrompt,
+        readEmpty.gateDecisionPrompt,
+        readEmpty.rerankSystemonePrompt,
       ],
-      ["", "", "", ""],
+      ["", "", "", "", "", ""],
     );
 
-    // 迁移：四个键各自默认全文 + 一个自定义 + 一个空串。
+    // 迁移：六个键各自默认全文。
     const store = {
       capturePrompt: CAPTURE_TOPIC_QUESTION,
       gatePrompt: GATE_PROMPT_RETIRED_DEFAULTS[0],
       gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
       rerankPrompt: DEFAULT_RERANK_PROMPT,
-      rerankSystemonePrompt: "自定义判别题面",
-      gateDecisionPrompt: "",
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
     };
     const writes = [];
     const sdk = {
@@ -8997,18 +9011,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     };
     const first = await migratePromptDefaults(sdk);
     eq(
-      "migratePromptDefaults：四个默认全文各写成空串，自定义与空串不动，返回被改写的键",
-      [writes, first, store.rerankSystemonePrompt, store.gateDecisionPrompt],
+      "migratePromptDefaults：六个默认全文各写成空串，返回六个被改写的键",
+      [writes, first],
       [
         [
           ["capturePrompt", ""],
           ["gatePrompt", ""],
           ["gateContextPrompt", ""],
           ["rerankPrompt", ""],
+          ["gateDecisionPrompt", ""],
+          ["rerankSystemonePrompt", ""],
         ],
-        ["capturePrompt", "gatePrompt", "gateContextPrompt", "rerankPrompt"],
-        "自定义判别题面",
-        "",
+        [
+          "capturePrompt",
+          "gatePrompt",
+          "gateContextPrompt",
+          "rerankPrompt",
+          "gateDecisionPrompt",
+          "rerankSystemonePrompt",
+        ],
       ],
     );
     const afterFirst = writes.length;
@@ -9029,6 +9050,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       gatePrompt: DEFAULT_GATE_PROMPT,
       gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
       rerankPrompt: DEFAULT_RERANK_PROMPT,
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
     };
     let markerGets = 0;
     const markerSdk = {
@@ -9060,13 +9083,77 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [
         true,
         PROMPT_DEFAULTS_MIGRATION_VERSION,
-        ["capturePrompt", "gatePrompt", "gateContextPrompt", "rerankPrompt"],
+        [
+          "capturePrompt",
+          "gatePrompt",
+          "gateContextPrompt",
+          "rerankPrompt",
+          "gateDecisionPrompt",
+          "rerankSystemonePrompt",
+        ],
         [],
         0,
         PROMPT_DEFAULTS_MIGRATION_VERSION,
       ],
     );
     fs.rmSync(markerDir, { recursive: true, force: true });
+
+    // v1 标记必须触发重扫：否则 v2 新增的两个键永远迁不到。
+    const v1Dir = path.join(import.meta.dirname, ".tmp-prompt-defaults-v1");
+    fs.rmSync(v1Dir, { recursive: true, force: true });
+    fs.mkdirSync(v1Dir, { recursive: true });
+    const v1File = path.join(v1Dir, "prompt-defaults.json");
+    fs.writeFileSync(
+      v1File,
+      JSON.stringify({ version: 1, at: "2026-01-01T00:00:00.000Z" }),
+    );
+    const v1Store = {
+      capturePrompt: "自定义题面",
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
+    };
+    let v1Gets = 0;
+    const v1Sdk = {
+      dataDir: v1Dir,
+      config: {
+        get: async (key) => {
+          v1Gets += 1;
+          return v1Store[key];
+        },
+        set: async (key, value) => {
+          v1Store[key] = value;
+        },
+      },
+    };
+    const v1First = await migratePromptDefaults(v1Sdk);
+    const v1GetsAfterFirst = v1Gets;
+    const v1Second = await migratePromptDefaults(v1Sdk);
+    eq(
+      "v1 标记不会挡掉新键：重扫一次、迁完写 v2，之后再跑零调用",
+      [
+        v1Gets > 0,
+        v1Store.gateDecisionPrompt,
+        v1Store.rerankSystemonePrompt,
+        v1First.includes("gateDecisionPrompt"),
+        v1First.includes("rerankSystemonePrompt"),
+        JSON.parse(fs.readFileSync(v1File, "utf8")).version,
+        v1Second,
+        v1Gets - v1GetsAfterFirst,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+      ],
+      [
+        true,
+        "",
+        "",
+        true,
+        true,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+        [],
+        0,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+      ],
+    );
+    fs.rmSync(v1Dir, { recursive: true, force: true });
 
     // 失败不抛、不写标记；换一个不抛的 set 再调一次 → 补上那个键并写标记。
     const retryDir = path.join(import.meta.dirname, ".tmp-prompt-defaults-retry");
@@ -9078,6 +9165,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       gatePrompt: DEFAULT_GATE_PROMPT,
       gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
       rerankPrompt: DEFAULT_RERANK_PROMPT,
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
     };
     const retryWarns = [];
     let failing = true;
@@ -9104,6 +9193,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       gatePrompt: retryStore.gatePrompt,
       gateContextPrompt: retryStore.gateContextPrompt,
       rerankPrompt: retryStore.rerankPrompt,
+      gateDecisionPrompt: retryStore.gateDecisionPrompt,
+      rerankSystemonePrompt: retryStore.rerankSystemonePrompt,
     };
     const retryMarkerAfterFailure = fs.existsSync(retryFile);
     failing = false;
@@ -9123,12 +9214,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         null,
-        ["capturePrompt", "gateContextPrompt", "rerankPrompt"],
+        [
+          "capturePrompt",
+          "gateContextPrompt",
+          "rerankPrompt",
+          "gateDecisionPrompt",
+          "rerankSystemonePrompt",
+        ],
         {
           capturePrompt: "",
           gatePrompt: DEFAULT_GATE_PROMPT,
           gateContextPrompt: "",
           rerankPrompt: "",
+          gateDecisionPrompt: "",
+          rerankSystemonePrompt: "",
         },
         false,
         true,
@@ -10055,7 +10154,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   writes.length = 0;
   const clearedDecisionPrompt = await post({ gateDecisionPrompt: "" });
   eq(
-    "决策提示词可以清空（空 = 没有判据，照常召回），清空也不影响 gatePrompt",
+    "决策提示词可以留空（空 = 用内置默认题面），清空也不影响 gatePrompt",
     [clearedDecisionPrompt.status, store.gateDecisionPrompt, clearedDecisionPrompt.body.gateDecisionPrompt, store.gatePrompt],
     [200, "", "", "语言模型那份改回来"],
   );
@@ -10150,7 +10249,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
     await post({ gateContext: "none", gateContextTurns: 4, gateContextPrompt: "" });
     eq(
-      "题面可以清空（空 = 没有判据，照常召回），开关与轮数各自独立",
+      "题面可以留空（空 = 用内置默认题面），开关与轮数各自独立",
       [store.gateContext, store.gateContextTurns, store.gateContextPrompt],
       ["none", "4", ""],
     );
@@ -10243,25 +10342,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
     [[400, 400, 400, 400], [400, 400], 0, "llm", ["只改提示词", "只改题面"]]);
 
-  // 写时归一：gatePrompt / gateContextPrompt / rerankPrompt 提交各自默认全文 → 落库空串。
+  // 写时归一：六个提示词键提交各自默认全文 → 落库空串。
   const normalizedPromptWrites = [];
   for (const [key, value] of [
     ["gatePrompt", DEFAULT_GATE_PROMPT],
     ["gatePrompt", GATE_PROMPT_RETIRED_DEFAULTS[0]],
     ["gateContextPrompt", DEFAULT_GATE_CONTEXT_PROMPT],
     ["rerankPrompt", DEFAULT_RERANK_PROMPT],
+    ["gateDecisionPrompt", DEFAULT_GATE_DECISION_PROMPT],
+    ["rerankSystemonePrompt", DEFAULT_RERANK_SYSTEMONE_PROMPT],
     ["gatePrompt", "自定义题面"],
     ["gatePrompt", "  自定义  "],
     ["gateContextPrompt", "自定义带前文题面"],
     ["rerankPrompt", "自定义精排题面"],
+    ["gateDecisionPrompt", "自定义决策题面"],
+    ["rerankSystemonePrompt", "自定义判别题面"],
   ]) {
     const saved = await post({ [key]: value });
     normalizedPromptWrites.push([saved.status, store[key], saved.body[key]]);
   }
   eq(
-    "POST /recall-mode 写时归一：gatePrompt 当前 / 历史默认、gateContextPrompt / rerankPrompt 默认都落库空串；自定义原样",
+    "POST /recall-mode 写时归一：六个提示词键的默认全文都落库空串；自定义原样",
     normalizedPromptWrites,
     [
+      [200, "", ""],
+      [200, "", ""],
       [200, "", ""],
       [200, "", ""],
       [200, "", ""],
@@ -10270,6 +10375,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [200, "  自定义  ", "  自定义  "],
       [200, "自定义带前文题面", "自定义带前文题面"],
       [200, "自定义精排题面", "自定义精排题面"],
+      [200, "自定义决策题面", "自定义决策题面"],
+      [200, "自定义判别题面", "自定义判别题面"],
     ],
   );
 
@@ -12798,7 +12905,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- 空判据：没有判据就不拦，一次请求都不发 ----
+  // ---- 空判据 = 用内置默认，模型照问 ----
   {
     const request = decisionFetch({ choice: "need", confidence: 0.1 });
     const infos = [];
@@ -12814,26 +12921,32 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       payload: { messages: [{ role: "user", content: "空提示词也要召回" }] },
       session: { sessionId: "decision-empty-prompt" },
     });
+    const body = JSON.parse(request.systemone()[0]?.init?.body || "{}");
     eq(
-      "decision 空提示词 = 没有判据：一次判断请求都不发、照常召回",
-      [Boolean(result?.payload), request.systemone().length, request.calls.length],
-      [true, 0, 1],
+      "decision 空题面 = 用内置默认：照问一次 /v1/systemone，instructions 是默认题面，按模型结果判断",
+      [
+        result,
+        request.systemone().length,
+        body.questions?.q?.instructions,
+        request.calls.length,
+      ],
+      [undefined, 1, DEFAULT_GATE_DECISION_PROMPT, 1],
     );
     check(
-      "空提示词日志说清照常召回（gate: decision prompt empty, recall anyway）",
-      infos.some((m) => m.includes("gate: decision prompt empty") && m.includes("recall anyway")),
+      "空题面不再走 decision prompt empty 兜底",
+      !infos.some((m) => m.includes("decision prompt empty")),
       infos.join(" | "),
     );
   }
 
   eq(
-    "gateDecisionPromptOf：缺项 / 只有空白给空串（没有判据），自定义去首尾空白",
+    "gateDecisionPromptOf：缺项 / 只有空白 → 内置默认，自定义去首尾空白",
     [
       gateDecisionPromptOf({}),
       gateDecisionPromptOf({ gateDecisionPrompt: "  \n " }),
       gateDecisionPromptOf({ gateDecisionPrompt: "  自定义  " }),
     ],
-    ["", "", "自定义"],
+    [DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_DECISION_PROMPT, "自定义"],
   );
   eq(
     "gateContextOf / gateContextTurnsOf / gateContextPromptOf：缺项与脏值回默认 / 轮数越界回 4 / 空题面回内置默认、自定义去首尾空白",
@@ -13426,7 +13539,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
 
-  // ---- 四种失败 × 两条兜底：decision 档 ----
+  // ---- 三种失败 × 两条兜底：decision 档 ----
   // 每一行：失败种类 -> [rules+短指令, rules+长句, recall+短指令]
   //   rules+短指令：退到规则，规则说跳过 -> 只发那一发失败请求，不发召回；
   //   rules+长句：退到规则，规则说召回 -> 照常召回；
@@ -13435,13 +13548,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     { label: "网络错", mode: "refuse" },
     { label: "超时", mode: "timeout", timeout: "100" },
     { label: "结构不认识", mode: "shape" },
-    { label: "空题面", mode: "empty", prompt: "" },
   ];
   const rows = [];
   for (const [index, item] of matrix.entries()) {
     const extra = {
       ...(item.timeout ? { systemoneServiceTimeoutMs: item.timeout } : {}),
-      ...(item.prompt === "" ? { gateDecisionPrompt: "" } : {}),
     };
     const rulesShort = await run({
       values: { gateFallback: "rules", ...extra },
@@ -13478,13 +13589,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ]);
   }
   eq(
-    "decision 档四种失败（网络错 / 超时 / 结构不认识 / 空题面）在 fallback=rules 下都退到规则：极短纯操作指令跳过、其它照常召回；默认 fallback=recall 时一律照常召回（空题面一次判断请求都不发）",
+    "decision 档三种失败（网络错 / 超时 / 结构不认识）在 fallback=rules 下都退到规则：极短纯操作指令跳过、其它照常召回；默认 fallback=recall 时一律照常召回",
     rows,
     [
       ["网络错", [false, 1, 1, true], [true, 2], [true, 2, true]],
       ["超时", [false, 1, 1, true], [true, 2], [true, 2, true]],
       ["结构不认识", [false, 1, 1, true], [true, 2], [true, 2, true]],
-      ["空题面", [false, 0, 0, true], [true, 1], [true, 1, true]],
     ],
   );
 

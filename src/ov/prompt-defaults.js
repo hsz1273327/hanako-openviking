@@ -36,6 +36,13 @@ export const GATE_PROMPT_RETIRED_DEFAULTS = Object.freeze([
 ]);
 
 /**
+ * 判别模型的默认题面。导出给测试与面板文案对照。
+ * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
+ * 冒烟会比对两边；rerankSystemonePrompt 为空时就用这段。
+ */
+export const DEFAULT_RERANK_SYSTEMONE_PROMPT = "第 {{n}} 条候选能帮助回答用户的问题吗";
+
+/**
  * llm 精排的默认提示词模板。导出给测试与面板文案对照。
  * 配置里的 rerankPrompt 为空时就用这段。
  */

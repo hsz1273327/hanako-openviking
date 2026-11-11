@@ -681,7 +681,7 @@ export function normalizeGatePrompt(value) {
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
 }
 
-/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串 = 没有判据（照常召回）。 */
+/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串在运行时 = 用内置默认题面。 */
 export function normalizeGateDecisionPrompt(value) {
   if (typeof value !== "string" || !value) return "";
   return Array.from(value).slice(0, GATE_PROMPT_MAX).join("");
@@ -845,9 +845,8 @@ export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答�
 /**
  * 决策模型判断的默认题面。与 src/ov/settings.js 的 DEFAULT_GATE_DECISION_PROMPT 逐字一致。
  *
- * 它只是「配过没配过」时的默认值：空值仍然是空（没有判据，照常召回），
- * 面板只在用户还没动过这一格时拿它当草稿。判定标准是内置的两条 criteria，
- * 不在这份可编辑文本里。
+ * 空串 = 用内置默认题面（与 gatePrompt / gateContextPrompt 同一规则）；要关掉判断请切
+ * recallGate。判定标准是内置的两条 criteria，不在这份可编辑文本里。
  */
 export const DEFAULT_GATE_DECISION_PROMPT =
   "只看这一句话、不看之前的对话，够不够回答它？";
@@ -911,11 +910,11 @@ export function decisionPromptDraft(configValue, touched = false) {
   return touched ? "" : DEFAULT_GATE_DECISION_PROMPT;
 }
 
-/** 决策提示词旁边那行小字：默认 / 已修改 / 空（不拦截，照常召回）。 */
+/** 决策提示词旁边那行小字：默认 / 已修改 / 留空（用内置默认）。 */
 export function decisionPromptStatus(text) {
   const value = normalizeGateDecisionPrompt(text);
   if (value === DEFAULT_GATE_DECISION_PROMPT) return "当前为默认提示词";
-  if (!value.trim()) return "已修改 · 提示词为空时不会拦截任何召回";
+  if (!value.trim()) return "已修改 · 留空时使用内置默认提示词";
   return "已修改";
 }
 

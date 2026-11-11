@@ -10,6 +10,7 @@ import {
   CAPTURE_TOPIC_QUESTION,
   DEFAULT_GATE_PROMPT,
   DEFAULT_RERANK_PROMPT,
+  DEFAULT_RERANK_SYSTEMONE_PROMPT,
   GATE_PROMPT_RETIRED_DEFAULTS,
 } from "./prompt-defaults.js";
 
@@ -19,7 +20,8 @@ import {
  * 与 gatePrompt 的默认值不一样：那一条空串 = 用内置默认题面，这一条默认给一句完整问法，
  * 因为决策模型的题型固定是 choice + criteria（两条内置描述写在 src/memory/recall.js 的
  * DECISION_GATE_CRITERIA 里），用户能改的只是「题面」怎么问，不是判定标准。
- * 空值仍然是「没有判据，照常召回」——这里给的是「没配过时读到什么」，不是「空值时偷偷套什么」。
+ * 空串 = 用内置默认题面（与 gatePrompt / gateContextPrompt 同一规则）；要关掉判断请切
+ * recallGate，不要靠清空这一格。
  *
  * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
  * 冒烟会比对两边。
@@ -232,12 +234,14 @@ export const DEFAULTS = {
   systemoneServiceKey: "",
 };
 
-/** 四个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
+/** 六个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
 const PROMPT_DEFAULT_VALUES = Object.freeze({
   capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
   gatePrompt: Object.freeze([DEFAULT_GATE_PROMPT, ...GATE_PROMPT_RETIRED_DEFAULTS]),
   gateContextPrompt: Object.freeze([DEFAULT_GATE_CONTEXT_PROMPT]),
   rerankPrompt: Object.freeze([DEFAULT_RERANK_PROMPT]),
+  gateDecisionPrompt: Object.freeze([DEFAULT_GATE_DECISION_PROMPT]),
+  rerankSystemonePrompt: Object.freeze([DEFAULT_RERANK_SYSTEMONE_PROMPT]),
 });
 
 /** 写入前归一：值等于内置默认就存空串，其余原样（不 trim、不截断、不做类型转换）。 */
@@ -246,8 +250,12 @@ export function promptForStorage(key, raw) {
   return typeof raw === "string" && defaults.includes(raw) ? "" : raw;
 }
 
-/** 迁移标记的版本。标记里的 version >= 这个值就不再扫配置。 */
-export const PROMPT_DEFAULTS_MIGRATION_VERSION = 1;
+/**
+ * 迁移标记的版本。标记里的 version >= 这个值就不再扫配置。
+ * v2 把 gateDecisionPrompt / rerankSystemonePrompt 纳入同一张表：写过 v1 标记的装载
+ * 会再扫一次，之后写 v2 标记（不升版的话这两个新键永远轮不到迁移）。
+ */
+export const PROMPT_DEFAULTS_MIGRATION_VERSION = 2;
 
 const PROMPT_DEFAULTS_MIGRATION_FILE = "prompt-defaults.json";
 
@@ -758,7 +766,7 @@ export function normalizeGatePrompt(raw) {
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
 }
 
-/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串 = 没有判据（照常召回）。 */
+/** 决策模型的判据与 gatePrompt 同口径：同一份长度上限，空串在运行时 = 用内置默认题面。 */
 export function normalizeGateDecisionPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");

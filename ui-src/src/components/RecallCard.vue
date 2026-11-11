@@ -108,9 +108,7 @@ const promptStatusText = computed(() => {
   if (promptWhich.value === "context") return contextPromptStatus();
   return decisionPromptStatus();
 });
-const promptPlaceholder = computed(() =>
-  promptWhich.value === "gate" ? "留空则用内置默认模板" : "留空则不拦截任何召回",
-);
+const promptPlaceholder = computed(() => "留空则用内置默认模板");
 const contextOptions = Object.freeze(gateContextOptions());
 // 决策服务状态行：纯函数给文案，组件只排版（与其它卡片同一习惯）。
 const decisionService = computed(() => decisionServiceView(state.layers));

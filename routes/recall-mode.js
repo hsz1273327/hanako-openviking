@@ -186,7 +186,7 @@ async function current(ctx) {
     queryMode: normalizeQueryMode(await ctx.config.get("queryMode")),
     gatePrompt: normalizeGatePrompt(await ctx.config.get("gatePrompt")),
     // 这一项的默认值不是空串：没配过时投影出那句默认题面（读侧与 readSwitches 同口径）。
-    // 用户明确清空（存了空串）仍然是空串——空就是「没有判据」，不拿默认去盖。
+    // 用户明确清空（存了空串）仍然投影空串——读取原样，运行时把空串当内置默认。
     gateDecisionPrompt: normalizeGateDecisionPrompt(
       (await ctx.config.get("gateDecisionPrompt")) ?? DEFAULT_GATE_DECISION_PROMPT,
     ),
@@ -311,7 +311,10 @@ export default function registerRecallModeRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["gateDecisionPrompt", body.gateDecisionPrompt]);
+      changes.push([
+        "gateDecisionPrompt",
+        promptForStorage("gateDecisionPrompt", body.gateDecisionPrompt),
+      ]);
     }
 
     if (has(body, "gateContextPrompt")) {
@@ -404,7 +407,10 @@ export default function registerRecallModeRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["rerankSystemonePrompt", body.rerankSystemonePrompt]);
+      changes.push([
+        "rerankSystemonePrompt",
+        promptForStorage("rerankSystemonePrompt", body.rerankSystemonePrompt),
+      ]);
     }
 
     // 保留条数：数字 / 数字串 / null 都收（null = 面板清空 = 不限），一律归一化后存数字串。

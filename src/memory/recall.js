@@ -17,9 +17,14 @@ import path from "node:path";
 import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
-import { DEFAULT_GATE_PROMPT, DEFAULT_RERANK_PROMPT } from "../ov/prompt-defaults.js";
+import {
+  DEFAULT_GATE_PROMPT,
+  DEFAULT_RERANK_PROMPT,
+  DEFAULT_RERANK_SYSTEMONE_PROMPT,
+} from "../ov/prompt-defaults.js";
 import {
   DEFAULT_GATE_CONTEXT_PROMPT,
+  DEFAULT_GATE_DECISION_PROMPT,
   GATE_DECISION_THRESHOLD_DEFAULT,
   RERANK_FALLBACK_CHANNEL_TYPE,
   RERANK_FALLBACK_MODEL,
@@ -198,11 +203,10 @@ export const RERANK_CANDIDATES_PLACEHOLDER = "{{candidates}}";
 export const SYSTEMONE_N_PLACEHOLDER = "{{n}}";
 
 /**
- * 判别模型的默认题面。导出给测试与面板文案对照。
- * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
- * 冒烟会比对两边；rerankSystemonePrompt 为空时就用这段。
+ * 判别模型的默认题面。字面量在 src/ov/prompt-defaults.js——settings.js 的写时归一
+ * 与启动迁移也要用它。继续从本模块导出，原有引用不用改。
  */
-export const DEFAULT_RERANK_SYSTEMONE_PROMPT = "第 {{n}} 条候选能帮助回答用户的问题吗";
+export { DEFAULT_RERANK_SYSTEMONE_PROMPT };
 
 /**
  * llm 精排的默认提示词模板。字面量在 src/ov/prompt-defaults.js，理由同上。
@@ -751,15 +755,17 @@ function noulScoreOf(value) {
  */
 
 /**
- * 决策那一档的判据：空串 = 没有判据（照常召回），与 gatePromptOf 不是同一条语义。
+ * 决策那一档的判据：空串 / 只有空白 → 用内置默认题面。
  *
- * 默认题面（DEFAULT_GATE_DECISION_PROMPT，在 src/ov/settings.js）是配置的默认值，
- * 不是空值时的兜底：用户把这一格清空就是「不想判」，不能偷偷把默认题面塞回去。
+ * 与 gatePromptOf / gateContextPromptOf 同一规则；要关掉判断请切 recallGate，
+ * 不要靠清空这一格。
  */
 export function gateDecisionPromptOf(switches) {
-  return typeof switches?.gateDecisionPrompt === "string"
-    ? switches.gateDecisionPrompt.trim()
-    : "";
+  const value =
+    typeof switches?.gateDecisionPrompt === "string"
+      ? switches.gateDecisionPrompt.trim()
+      : "";
+  return value || DEFAULT_GATE_DECISION_PROMPT;
 }
 
 /**
@@ -2381,9 +2387,6 @@ export function createRecallHandler(sdk, options = {}) {
         // 没配不是失败，是「没有判据」：照常召回，面板另给一句提示。不退回 llm。
         // 这一档在读取侧就已经归一化成 off 了，走到这里只是兜底。
         log(sdk, "info", `gate: decision unconfigured, recall anyway (session=${sessionId})`);
-      } else if (!prompt) {
-        // 空判据不是「用默认问法」：没有判据就不问，按兜底走。
-        gateFailure("decision prompt empty");
       } else {
         try {
           const answer = await askDecisionGate(sdk, switches, lastText, prompt, context);
