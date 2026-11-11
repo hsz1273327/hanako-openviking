@@ -300,6 +300,7 @@ export async function activateRuntime({
   logger,
   onNotReady,
 } = {}) {
+  setRuntimeBridge({ runtimeFetch, runtimeId, token });
   const probe = await probeRuntime({ runtimeFetch, runtimeId, token, timeoutMs });
   if (!probe.ok) {
     const message = `${probe.error}`;
@@ -347,6 +348,67 @@ export function setRuntimeTransport({ send = null, runtimeId = null, port = null
 
 export function resetRuntimeTransport() {
   active = { send: null, runtimeId: null, port: null, error: null };
+}
+
+// ---- 受管运行时的文件桥 ----
+//
+// 主进程跑在 Node 权限模型里，读不到 ~/.hanako/agents/<agent>/sessions/*.jsonl；
+// runtime 子进程不受这套限制。这里留着启动时的 runtimeFetch / runtimeId / token，
+// 只给 session-reader 的降级路径用，权限面在 runtime 那边按目录白名单收窄。
+
+let bridge = { runtimeFetch: null, runtimeId: null, token: null };
+
+export function setRuntimeBridge({ runtimeFetch = null, runtimeId = null, token = null } = {}) {
+  bridge = {
+    runtimeFetch: typeof runtimeFetch === "function" ? runtimeFetch : null,
+    runtimeId: typeof runtimeId === "string" && runtimeId ? runtimeId : null,
+    token: typeof token === "string" && token ? token : null,
+  };
+}
+
+export function resetRuntimeBridge() {
+  bridge = { runtimeFetch: null, runtimeId: null, token: null };
+}
+
+export function runtimeBridgeState() {
+  return {
+    ready: typeof bridge.runtimeFetch === "function" && !!bridge.runtimeId && !!bridge.token,
+  };
+}
+
+/**
+ * 走 runtime 的 POST /read-file 与 /list-sessions。
+ * 失败抛带 code 的 TransportError；不发日志（调用方决定怎么记）。
+ */
+export async function runtimeFileRequest(pathname, body, { timeoutMs = 15000 } = {}) {
+  const { runtimeFetch, runtimeId, token } = bridge;
+  if (typeof runtimeFetch !== "function" || !runtimeId || !token) {
+    throw new TransportError("RUNTIME_NOT_READY", "runtime file bridge unavailable");
+  }
+  let response;
+  try {
+    response = await runtimeFetch(runtimeId, pathname, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ov-token": token },
+      body: JSON.stringify(body || {}),
+      timeoutMs,
+    });
+  } catch (error) {
+    throw new TransportError(error?.code || "NETWORK", `runtime file bridge: ${messageOf(error)}`);
+  }
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok || (payload && typeof payload === "object" && payload.error)) {
+    throw new TransportError(
+      payload?.error?.code || `HTTP ${response.status}`,
+      payload?.error?.message || response.statusText || "",
+    );
+  }
+  return payload;
 }
 
 export function runtimeTransportState() {

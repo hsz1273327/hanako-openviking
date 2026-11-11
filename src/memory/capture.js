@@ -34,6 +34,7 @@ import {
   tailTurns,
 } from "./cursor.js";
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
+import { readSessionText } from "./session-reader.js";
 import { candidatePool, readTopics, recordSegment, withTopics } from "./topics.js";
 
 /**
@@ -525,7 +526,8 @@ export async function commitSegment({
  * no-transport / unreachable / error。报告是这条链路唯一可被断言的外观。
  */
 export function createCaptureHandler(sdk, deps = {}) {
-  const readFile = deps.readFile || ((file) => fs.readFileSync(file, "utf8"));
+  // 会话文件在 Node 权限模型之外：fs 被拒时由 session-reader 降级到 runtime 子进程。
+  const readFile = deps.readFile || ((file) => readSessionText(file, { logger: sdk?.logger }));
   const now = deps.now || (() => new Date().toISOString());
   const clientFor = deps.clientFor || createClient;
   // 同一个会话同时只跑一个写回：两轮 settled 挨得太近时，两次会读到同一份游标，

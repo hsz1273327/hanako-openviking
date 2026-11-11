@@ -7,6 +7,8 @@
 // 任何钩子失败都不得影响本轮对话：探针只写日志，召回失败返回 undefined。
 
 import { randomBytes } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { readConnection, readSwitches, runPromptMigration } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
@@ -55,7 +57,13 @@ async function startManagedRuntime(sdk) {
       entry: "runtime/service.mjs",
       profile: "native",
       network: "external",
-      args: [`--port=${port}`, `--token=${token}`],
+      // runtime 的 HOME 被宿主换成 /tmp/hana-home，os.homedir() 指不到真实的 ~/.hanako；
+      // agents 根必须由主进程算好传进去，读取白名单也钉在这个目录上。
+      args: [
+        `--port=${port}`,
+        `--token=${token}`,
+        `--agents-root=${path.join(os.homedir(), ".hanako", "agents")}`,
+      ],
       service: { port, readyMarker: "APP_READY" },
     });
     const runtimeId = info?.runtimeId;

@@ -17,7 +17,21 @@ import {
   setRuntimeTransport,
   transportFor,
 } from "../src/ov/transport.js";
-import { HEALTH_PATH, normalizeEnvelope, parseArgs } from "../runtime/service.mjs";
+import {
+  HEALTH_PATH,
+  LIST_SESSIONS_PATH,
+  READ_FILE_PATH,
+  listSessionFiles as runtimeListSessions,
+  normalizeEnvelope,
+  parseArgs,
+  readSessionChunk,
+  resolveSessionFile,
+} from "../runtime/service.mjs";
+import {
+  forEachRuntimeLine,
+  readSessionText,
+  resetSessionReaderWarning,
+} from "../src/memory/session-reader.js";
 import registerStatusRoutes from "../routes/status.js";
 import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
@@ -19953,6 +19967,116 @@ check(
 
   fs.rmSync(root, { recursive: true, force: true });
   resetBackfillScanCache();
+}
+
+// ================= 会话文件：runtime 白名单与权限降级 =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-session-reader");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(dir, "blueflower", "sessions"), { recursive: true });
+  const file = path.join(dir, "blueflower", "sessions", "sess_abcdef.jsonl");
+  fs.writeFileSync(file, "aaaa\nbbbb\ncccc\n", "utf8");
+  fs.writeFileSync(path.join(dir, "blueflower", "sessions", "note.txt"), "x", "utf8");
+
+  const throwsCode = (fn) => {
+    try {
+      fn();
+      return "";
+    } catch (error) {
+      return String(error?.code || error?.message || error);
+    }
+  };
+  eq(
+    "runtime 只读 agents 下 .jsonl：.. / 非 jsonl / 根外路径全部拒绝",
+    [
+      throwsCode(() => resolveSessionFile(path.join(dir, "..", "x.jsonl"), dir)),
+      throwsCode(() => resolveSessionFile(path.join(dir, "a.txt"), dir)),
+      throwsCode(() => resolveSessionFile("/etc/passwd.jsonl", dir)),
+      throwsCode(() => resolveSessionFile(dir, dir)),
+    ],
+    ["BAD_REQUEST", "BAD_REQUEST", "BAD_REQUEST", "BAD_REQUEST"],
+  );
+  eq("runtime 接受 agents 下的 .jsonl", resolveSessionFile(file, dir), file);
+
+  const firstChunk = await readSessionChunk(file, { agentsRoot: dir, offset: 0, limit: 7 });
+  const restChunk = await readSessionChunk(file, { agentsRoot: dir, offset: 5, limit: 1024 });
+  eq(
+    "readSessionChunk：块在换行处收尾、按字节推进 offset、末块 eof",
+    [firstChunk.chunk, firstChunk.eof, restChunk.chunk, restChunk.eof, restChunk.size],
+    ["aaaa\n", false, "bbbb\ncccc\n", true, 15],
+  );
+
+  const listed = await runtimeListSessions({ agentsRoot: dir });
+  eq(
+    "runtime 列会话：只认 sessions/*.jsonl，带回大小",
+    [listed.root, listed.sessions.map((row) => path.basename(row.path)), listed.sessions[0]?.size],
+    [dir, ["sess_abcdef.jsonl"], 15],
+  );
+
+  resetSessionReaderWarning();
+  const warns = [];
+  const parts = [
+    { chunk: "a\nb\n", eof: false, size: 6 },
+    { chunk: "c\n", eof: true, size: 6 },
+  ];
+  const deniedRead = async () => {
+    const error = new Error("Access to this API has been restricted");
+    error.code = "ERR_ACCESS_DENIED";
+    throw error;
+  };
+  const text = await readSessionText(file, {
+    readFile: deniedRead,
+    readChunk: async () => parts.shift(),
+    logger: { warn: (message) => warns.push(message) },
+  });
+  eq(
+    "readSessionText：权限被拒 → 走 runtime 分块拼接，并记一次 warn",
+    [text, warns.length, warns[0]?.includes("fell back to runtime")],
+    ["a\nb\nc\n", 1, true],
+  );
+  await readSessionText(file, {
+    readFile: deniedRead,
+    readChunk: async () => ({ chunk: "", eof: true, size: 0 }),
+    logger: { warn: (message) => warns.push(message) },
+  });
+  eq("降级 warn 只记一次", warns.length, 1);
+
+  const lineParts = [
+    { chunk: '{"a":1}\n{"b"', eof: false, size: 20 },
+    { chunk: ':2}\r\n{"c":3}\n', eof: true, size: 29 },
+  ];
+  const lines = [];
+  await forEachRuntimeLine(
+    file,
+    async (line) => {
+      lines.push(line);
+    },
+    { readChunk: async () => lineParts.shift() },
+  );
+  eq("runtime 逐行：跨块行拼回、CRLF 去掉", lines, ['{"a":1}', '{"b":2}', '{"c":3}']);
+
+  const stopParts = [
+    { chunk: '{"a":1}\n{"b":2}\n', eof: false, size: 99 },
+    { chunk: '{"c":3}\n', eof: true, size: 99 },
+  ];
+  let fetched = 0;
+  const stopped = [];
+  await forEachRuntimeLine(
+    file,
+    async (line) => {
+      stopped.push(line);
+      return false;
+    },
+    {
+      readChunk: async () => {
+        fetched += 1;
+        return stopParts.shift();
+      },
+    },
+  );
+  eq("回调 false 立刻停：只取一块、只给一行", [stopped, fetched], [['{"a":1}'], 1]);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 // ================= 存量补交：界面 =================

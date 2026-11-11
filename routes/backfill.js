@@ -22,12 +22,17 @@ export default function registerBackfillRoutes(app, ctx, deps = {}) {
   app.get("/backfill-sessions", async (c) => {
     const raw = typeof c.req?.query === "function" ? c.req.query("sessionId") : "";
     const wanted = sessionKeyOf(typeof raw === "string" ? raw : "");
-    const all = await listBackfillSessions(ctx, deps);
+    const listDeps = { ...deps, logger: deps.logger || ctx?.logger };
+    const all = await listBackfillSessions(ctx, listDeps);
     const sessions = wanted ? all.filter((row) => row.sessionId === wanted) : all;
-    const root = agentsRootOf(dataDirOf(ctx), deps);
+    const root = agentsRootOf(dataDirOf(ctx), listDeps);
+    // root 推不出来，或一条会话都列不出来时给一句原因：面板据此显示「没有可补交的会话」
+    // 而不是把空数组当成接口坏了。
+    const reason = !root ? "agents-root-unavailable" : all.length ? "" : "no-sessions";
     return c.json(
       {
         root,
+        reason,
         sessions,
         totals: {
           sessions: sessions.length,

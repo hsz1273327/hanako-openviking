@@ -18,13 +18,20 @@
 // /health 是启动后探活用的：宿主可能先把 runtimeId 交出来、服务却还没应，
 // 光看 runtimeId 会把一条死路当成出口（见 src/ov/transport.js 的 probeRuntime）。
 
+import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
+import path from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 export const READY_MARKER = "APP_READY";
 export const HEALTH_PATH = "/health";
+export const READ_FILE_PATH = "/read-file";
+export const LIST_SESSIONS_PATH = "/list-sessions";
+export const DEFAULT_READ_BYTES = 1_048_576;
+export const MAX_READ_BYTES = 8_388_608;
 export const DEFAULT_PORT = 47821;
 export const DEFAULT_TIMEOUT_MS = 1500;
 export const MAX_TIMEOUT_MS = 30000;
@@ -50,7 +57,7 @@ function httpError(code, message, status) {
 }
 
 export function parseArgs(argv = []) {
-  const out = { port: DEFAULT_PORT, token: "" };
+  const out = { port: DEFAULT_PORT, token: "", agentsRoot: "" };
   for (const raw of argv) {
     const text = String(raw ?? "");
     if (text.startsWith("--port=")) {
@@ -60,6 +67,9 @@ export function parseArgs(argv = []) {
     }
     if (text.startsWith("--token=")) {
       out.token = text.slice("--token=".length);
+    }
+    if (text.startsWith("--agents-root=")) {
+      out.agentsRoot = text.slice("--agents-root=".length);
     }
   }
   return out;
@@ -257,6 +267,102 @@ function respond(res, status, payload) {
   }
 }
 
+export function agentsRootOf(options = {}) {
+  const raw = typeof options.agentsRoot === "string" ? options.agentsRoot.trim() : "";
+  return path.resolve(raw || path.join(os.homedir(), ".hanako", "agents"));
+}
+
+/**
+ * 只放行 agents 目录下、以 .jsonl 结尾的会话文件。
+ * 先拒绝 `..` 段，再 path.resolve，最后比前缀——顺序反过来会让 `a/../../b` 混过前缀检查。
+ */
+export function resolveSessionFile(rawPath, agentsRoot) {
+  const root = path.resolve(agentsRoot);
+  if (typeof rawPath !== "string" || !rawPath.trim()) {
+    throw httpError("BAD_REQUEST", "path 必填", 400);
+  }
+  const segments = rawPath.split(/[\\/]+/);
+  if (segments.includes("..")) {
+    throw httpError("BAD_REQUEST", "path 不能包含 ..", 400);
+  }
+  if (!/\.jsonl$/i.test(rawPath)) {
+    throw httpError("BAD_REQUEST", "只接受 .jsonl 文件", 400);
+  }
+  const target = path.resolve(rawPath);
+  if (target === root || !target.startsWith(root + path.sep)) {
+    throw httpError("BAD_REQUEST", "path 不在 agents 目录内", 400);
+  }
+  return target;
+}
+
+/**
+ * 分块读会话文件。返回的 chunk 尽量在换行处收尾，避免把多字节字符切成两半；
+ * 客户端按 Buffer.byteLength(chunk) 推进 offset。
+ */
+export async function readSessionChunk(rawPath, { agentsRoot, offset = 0, limit = DEFAULT_READ_BYTES } = {}) {
+  const target = resolveSessionFile(rawPath, agentsRoot);
+  const stat = await fs.promises.stat(target);
+  if (!stat.isFile()) throw httpError("BAD_REQUEST", "不是普通文件", 400);
+  const size = stat.size;
+  const from = Math.max(0, Math.floor(Number(offset) || 0));
+  const want = Math.min(
+    MAX_READ_BYTES,
+    Math.max(1, Math.floor(Number(limit) || DEFAULT_READ_BYTES)),
+    Math.max(0, size - from),
+  );
+  if (want === 0) return { ok: true, chunk: "", eof: true, size };
+
+  const buffer = Buffer.alloc(want);
+  const handle = await fs.promises.open(target, "r");
+  let read = 0;
+  try {
+    const result = await handle.read(buffer, 0, want, from);
+    read = result.bytesRead;
+  } finally {
+    await handle.close();
+  }
+  let slice = buffer.subarray(0, read);
+  let next = from + read;
+  let eof = next >= size;
+  if (!eof) {
+    const lastNewline = slice.lastIndexOf(0x0a);
+    if (lastNewline >= 0) {
+      slice = slice.subarray(0, lastNewline + 1);
+      next = from + lastNewline + 1;
+    }
+  }
+  return { ok: true, chunk: slice.toString("utf8"), eof, size };
+}
+
+/** 列 <agentsRoot>/<agent>/sessions/*.jsonl；只读元数据，不读内容。 */
+export async function listSessionFiles(options = {}) {
+  const root = agentsRootOf(options);
+  const out = [];
+  const agents = await fs.promises.readdir(root, { withFileTypes: true });
+  for (const agent of agents) {
+    if (!agent.isDirectory()) continue;
+    const dir = path.join(root, agent.name, "sessions");
+    let names = [];
+    try {
+      names = await fs.promises.readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!/\.jsonl$/i.test(name)) continue;
+      const file = path.join(dir, name);
+      try {
+        const stat = await fs.promises.stat(file);
+        out.push({ path: file, size: stat.size, mtimeMs: stat.mtimeMs });
+      } catch {
+        /* 单个文件读不到就跳过 */
+      }
+    }
+  }
+  out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { ok: true, root, sessions: out };
+}
+
 async function handleFetch(req, res, options) {
   const pathname = String(req.url || "").split("?")[0];
   // 探活：只证明这个进程还在应答，不碰上游、不看 token、不回任何可用的信息。
@@ -264,8 +370,11 @@ async function handleFetch(req, res, options) {
     respond(res, 200, { ok: true, ready: true });
     return;
   }
-  if (req.method !== "POST" || pathname !== "/fetch") {
-    respond(res, 404, { error: { code: "BAD_REQUEST", message: "只接受 POST /fetch 与 GET /health" } });
+  const allowed = pathname === "/fetch" || pathname === READ_FILE_PATH || pathname === LIST_SESSIONS_PATH;
+  if (req.method !== "POST" || !allowed) {
+    respond(res, 404, {
+      error: { code: "BAD_REQUEST", message: "只接受 POST /fetch、POST /read-file、POST /list-sessions 与 GET /health" },
+    });
     return;
   }
   if (!tokenMatches(req.headers["x-ov-token"], options.token)) {
@@ -283,9 +392,37 @@ async function handleFetch(req, res, options) {
 
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = raw ? JSON.parse(raw) : {};
   } catch {
     respond(res, 400, { error: { code: "BAD_REQUEST", message: "body 不是 JSON" } });
+    return;
+  }
+
+  if (pathname === READ_FILE_PATH) {
+    try {
+      const result = await readSessionChunk(parsed?.path, {
+        agentsRoot: agentsRootOf(options),
+        offset: parsed?.offset,
+        limit: parsed?.limit,
+      });
+      respond(res, 200, result);
+    } catch (error) {
+      respond(res, error.status || 500, {
+        error: { code: error.code || "READ_FAILED", message: error?.message || String(error) },
+      });
+    }
+    return;
+  }
+
+  if (pathname === LIST_SESSIONS_PATH) {
+    try {
+      const result = await listSessionFiles(options);
+      respond(res, 200, result);
+    } catch (error) {
+      respond(res, error.status || 500, {
+        error: { code: error.code || "LIST_FAILED", message: error?.message || String(error) },
+      });
+    }
     return;
   }
 
@@ -327,7 +464,7 @@ export function main(argv = process.argv.slice(2)) {
     return null;
   }
 
-  const server = createProxyServer({ token: args.token });
+  const server = createProxyServer({ token: args.token, agentsRoot: args.agentsRoot });
   server.on("error", (error) => {
     process.stderr.write(`runtime/service.mjs: ${error?.message || error}\n`);
     process.exit(1);

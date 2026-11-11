@@ -11,14 +11,15 @@
 // 所有网络都走 client.js / transportFor，不裸 fetch。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
 import { readConnection, readSwitches } from "../ov/settings.js";
 import { transportFor } from "../ov/transport.js";
 import { patchSession, readSession, sessionKeyOf } from "../state/session.js";
 import { commitSegment } from "./capture.js";
+import { forEachSessionLine, listSessionFiles } from "./session-reader.js";
 import {
   countTurns,
   isCaptureMessage,
@@ -92,17 +93,8 @@ async function forEachLine(file, onLine, deps = {}) {
   if (typeof deps.openLines === "function") {
     return deps.openLines(file, onLine);
   }
-  const stream = fs.createReadStream(file, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      if ((await onLine(line)) === false) break;
-    }
-  } finally {
-    rl.close();
-    stream.destroy();
-  }
-  return undefined;
+  // fs 直读被权限模型拒绝时，session-reader 会按块走 runtime，行在这里拼好再喂进来。
+  return forEachSessionLine(file, onLine, deps);
 }
 
 function parseRecord(line) {
@@ -281,14 +273,18 @@ function isDirectory(target) {
 /** agents 根的形状：自己存在，且至少有一个 <agent>/sessions 子目录。 */
 function usableAgentsRoot(root) {
   const dir = String(root ?? "").trim();
-  if (!dir || !isDirectory(dir)) return "";
+  if (!dir) return "";
   try {
+    if (!fs.statSync(dir).isDirectory()) return "";
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (isDirectory(path.join(dir, entry.name, "sessions"))) return dir;
     }
-  } catch {
+  } catch (error) {
+    // 权限模型拒绝读这个目录时，不能断言「没有」：路径存在与否由运行时那边回答。
+    const code = String(error?.code || "");
+    if (code === "ERR_ACCESS_DENIED" || code === "EACCES" || code === "EPERM") return dir;
     return "";
   }
   return "";
@@ -309,8 +305,11 @@ function recordedAgentDirs(dataDir) {
     try {
       const stat = fs.statSync(file);
       const state = readSession(dataDir, name.replace(/\.json$/i, ""));
-      if (typeof state.agentDir === "string" && state.agentDir.trim()) {
-        rows.push({ agentDir: state.agentDir.trim(), mtimeMs: stat.mtimeMs });
+      const agentDir = typeof state.agentDir === "string" ? state.agentDir.trim() : "";
+      // 只认绝对路径：有些旧状态里存的是 agent 名字（"blueflower"），dirname 会得到 "."，
+      // 拿当前工作目录去比，会把「随便一个带 sessions 的目录」当成 agents 根。
+      if (agentDir && path.isAbsolute(agentDir)) {
+        rows.push({ agentDir, mtimeMs: stat.mtimeMs });
       }
     } catch {
       /* 坏文件跳过 */
@@ -333,6 +332,9 @@ export function agentsRootOf(dataDir, deps = {}) {
     candidates.push(path.dirname(agentDir));
   }
   candidates.push(path.resolve(dataDir || ".", "../..", "agents"));
+  // 宿主布局的兜底：~/.hanako/agents。上面两条都推不出来时（权限模型不让 stat），
+  // 这条至少给出正确的根，列不列得出来由 listSessionFiles 决定。
+  candidates.push(path.join(os.homedir(), ".hanako", "agents"));
 
   for (const candidate of candidates) {
     const usable = usableAgentsRoot(candidate);
@@ -342,30 +344,27 @@ export function agentsRootOf(dataDir, deps = {}) {
 }
 
 /** <agentsRoot>/<agent>/sessions/*.jsonl；只认 .jsonl 结尾，认不出 sessionId 的跳过。 */
-function sessionFilesOf(root) {
+async function sessionFilesOf(root, deps = {}) {
   const out = [];
   if (!root) return out;
-  let agents = [];
+  // 目录也可能在权限模型之外：session-reader 先试 fs，被拒再走 runtime 的 /list-sessions。
+  let listed = [];
   try {
-    agents = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
+    listed = await listSessionFiles(root, deps);
+  } catch (error) {
+    try {
+      deps.logger?.warn?.(`openviking backfill list failed: ${error?.message || error}`);
+    } catch {
+      /* 日志不能影响补交 */
+    }
     return out;
   }
-  for (const agent of agents) {
-    if (!agent.isDirectory()) continue;
-    const sessionsDir = path.join(root, agent.name, "sessions");
-    let names = [];
-    try {
-      names = fs.readdirSync(sessionsDir);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (!/\.jsonl$/i.test(name)) continue;
-      const sessionId = sessionKeyOf(name);
-      if (!sessionId) continue;
-      out.push({ file: path.join(sessionsDir, name), sessionId });
-    }
+  for (const entry of listed) {
+    const file = typeof entry?.path === "string" ? entry.path : "";
+    if (!file) continue;
+    const sessionId = sessionKeyOf(path.basename(file));
+    if (!sessionId) continue;
+    out.push({ file, sessionId });
   }
   out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   return out;
@@ -389,7 +388,11 @@ function nowMsOf(deps = {}) {
 /** 带 30 秒缓存的扫描：文件大小 / mtime 变了才重扫。 */
 async function scanCached(file, deps = {}) {
   const stat = await statOf(file);
-  if (!stat) return null;
+  if (!stat) {
+    // stat 也可能被权限模型拒掉：不缓存，直接扫，结果照样对，只是每次都重扫。
+    const scan = typeof deps.scanSessionFile === "function" ? deps.scanSessionFile : scanSessionFile;
+    return scan(file, deps);
+  }
   const at = nowMsOf(deps);
   const cached = scanCache.get(file);
   if (
@@ -429,7 +432,7 @@ export async function listBackfillSessions(ctx, deps = {}) {
   if (!root) return [];
 
   const rows = [];
-  for (const { file, sessionId } of sessionFilesOf(root)) {
+  for (const { file, sessionId } of await sessionFilesOf(root, deps)) {
     const scan = await scanCached(file, deps);
     if (!scan || !(scan.messages > 0)) continue;
     const written = normalizeCursor(readSession(dataDir, sessionId).capture?.cursor).lastMessageCount;
@@ -519,7 +522,7 @@ export function createBackfillController(ctx, deps = {}) {
   async function plannedEntries({ scope, sessionId, client }) {
     const root = agentsRootOf(dataDir, deps);
     if (!root) return { entries: [], missingSession: false };
-    const files = sessionFilesOf(root);
+    const files = await sessionFilesOf(root, deps);
     let chosen = files;
     if (scope === "session") {
       const key = sessionKeyOf(String(sessionId ?? ""));
