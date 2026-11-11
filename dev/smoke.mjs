@@ -133,7 +133,9 @@ import {
   CAPTURE_IDLE_SECONDS_DEFAULT,
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
+  CAPTURE_PROMPT_MAX,
   normalizeCaptureCommitMode,
+  normalizeCapturePrompt,
   normalizeCaptureCommitTurns,
   serializeCaptureCommitTurns,
   normalizeCaptureIdleSeconds,
@@ -358,12 +360,17 @@ import {
 import {
   CAPTURE_EMPTY,
   CAPTURE_IDLE_RANGE,
+  CAPTURE_PROMPT_MAX as UI_CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
+  DEFAULT_CAPTURE_PROMPT,
   captureFallbackNote,
   captureModeLabels,
   captureModeOptions,
+  capturePromptDraft,
+  capturePromptStatus,
   captureStatusRows,
   captureStatusView,
+  normalizeCapturePrompt as uiNormalizeCapturePrompt,
 } from "../ui-src/src/lib/capture-view.js";
 // 记忆页三个子页签：纯逻辑 + 组件挂载方式。
 import {
@@ -2814,6 +2821,54 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
   );
 
+  // 写回判断题面：默认文本与上限两端同值 / 归一化同一口径。
+  eq(
+    "写回判断题面两端同值：默认题面与后端 CAPTURE_TOPIC_QUESTION 逐字相等、上限与判断提示词同一口径、脏值都回空串、超长按字符截断到 2000",
+    [
+      [DEFAULT_CAPTURE_PROMPT, CAPTURE_TOPIC_QUESTION],
+      [UI_CAPTURE_PROMPT_MAX, CAPTURE_PROMPT_MAX, GATE_PROMPT_MAX],
+      ["", null, undefined, 42, "字".repeat(GATE_PROMPT_MAX + 5)]
+        .map(normalizeCapturePrompt)
+        .map((value) => Array.from(value).length),
+      ["", null, undefined, 42, "字".repeat(GATE_PROMPT_MAX + 5)]
+        .map(uiNormalizeCapturePrompt)
+        .map((value) => Array.from(value).length),
+      [normalizeCapturePrompt("自定义题面XYZ"), uiNormalizeCapturePrompt("自定义题面XYZ")],
+    ],
+    [
+      [CAPTURE_TOPIC_QUESTION, CAPTURE_TOPIC_QUESTION],
+      [GATE_PROMPT_MAX, GATE_PROMPT_MAX, GATE_PROMPT_MAX],
+      [0, 0, 0, 0, GATE_PROMPT_MAX],
+      [0, 0, 0, 0, GATE_PROMPT_MAX],
+      ["自定义题面XYZ", "自定义题面XYZ"],
+    ],
+  );
+
+  // 三态草稿与三态小字：空配置坐默认全文、动过不再填、自定义照显、清空提醒回内置默认。
+  eq(
+    "写回判断题面三态：空配置坐默认全文 / 动过之后不再填默认 / 自定义照显 / 清空提醒使用内置默认；manifest 声明为 string 且默认空串",
+    [
+      capturePromptDraft(""),
+      capturePromptDraft("", true),
+      capturePromptDraft("自定义题面XYZ"),
+      capturePromptStatus(DEFAULT_CAPTURE_PROMPT),
+      capturePromptStatus("自定义题面XYZ"),
+      capturePromptStatus("").includes("使用内置默认"),
+      [props.capturePrompt?.type, props.capturePrompt?.default],
+      DEFAULTS.capturePrompt,
+    ],
+    [
+      DEFAULT_CAPTURE_PROMPT,
+      "",
+      "自定义题面XYZ",
+      "当前为默认题面",
+      "已修改",
+      true,
+      ["string", ""],
+      "",
+    ],
+  );
+
   eq(
     "两个服务密钥在 manifest 里标了 sensitive（不当普通字符串存）",
     [props.rerankServiceKey?.sensitive, props.systemoneServiceKey?.sensitive],
@@ -3232,6 +3287,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "CapturePanel 没有出现「重排」字样",
     !capture.includes("重排"),
     capture.match(/重排/)?.[0],
+  );
+
+  const capturePromptOpenLine =
+    capture.split("\n").find((line) => line.includes("promptOpen = computed")) || "";
+  check(
+    "CapturePanel 判断题面：textarea + 恢复默认按钮 + 只在 llm / discriminator 两档显示",
+    capture.includes('type="textarea"') &&
+      capture.includes("capturePrompt") &&
+      capture.includes("captureResetPrompt") &&
+      capture.includes('v-if="promptOpen"') &&
+      capturePromptOpenLine.includes("llm") &&
+      capturePromptOpenLine.includes("discriminator"),
+    capturePromptOpenLine || capture.slice(capture.indexOf("判断题面"), capture.indexOf("判断题面") + 600),
   );
 
   const cardApp = uiCode("CardApp.vue");
@@ -5246,7 +5314,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await cap.setCaptureForm("captureCommitMode", "fixed");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 六个键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 七个键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
@@ -5262,6 +5330,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "captureCommitMode",
           "captureCommitTurns",
           "captureModel",
+          "capturePrompt",
           "captureServerFallback",
           "captureServerIdleSeconds",
           "captureServiceUrl",
@@ -5287,6 +5356,62 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         cap.state.note.text.includes("写回设置写入失败"),
       ],
       [confirmedTurns, "fixed", true, true],
+    );
+
+    // ---- 判断题面：touch 不发请求；set 发一单带 capturePrompt；reset 发默认全文；失败回滚 ----
+    const promptPosts = () =>
+      calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
+
+    const beforeTouch = promptPosts().length;
+    await cap.touchCapturePrompt("草稿不该提交");
+    eq(
+      "touchCapturePrompt 只改草稿：一单 POST 都不发，状态小字说已修改",
+      [
+        promptPosts().length - beforeTouch,
+        cap.state.form.capturePrompt,
+        cap.capturePromptStatusOf(),
+      ],
+      [0, "草稿不该提交", "已修改"],
+    );
+
+    backend["/capture-config"].prompt = "自定义题面XYZ";
+    const beforeSet = promptPosts().length;
+    await cap.setCapturePrompt("自定义题面XYZ");
+    eq(
+      "setCapturePrompt 发一单且 body 带 capturePrompt，成功后停在新值",
+      [
+        promptPosts().length - beforeSet,
+        promptPosts().at(-1)?.body?.capturePrompt,
+        cap.state.form.capturePrompt,
+        cap.capturePromptStatusOf(),
+      ],
+      [1, "自定义题面XYZ", "自定义题面XYZ", "已修改"],
+    );
+
+    backend["/capture-config"].prompt = DEFAULT_CAPTURE_PROMPT;
+    const beforeReset = promptPosts().length;
+    await cap.resetCapturePrompt();
+    eq(
+      "resetCapturePrompt 填回默认全文并正常提交，状态回到默认题面",
+      [
+        promptPosts().length - beforeReset,
+        promptPosts().at(-1)?.body?.capturePrompt,
+        cap.state.form.capturePrompt,
+        cap.capturePromptStatusOf(),
+      ],
+      [1, DEFAULT_CAPTURE_PROMPT, DEFAULT_CAPTURE_PROMPT, "当前为默认题面"],
+    );
+
+    rejectNextPost = "capturePrompt 最多 2000 个字符";
+    await cap.setCapturePrompt("这一单会被拒");
+    eq(
+      "判断题面写入失败：回滚到上一次确认值，提示位带服务端原文",
+      [
+        cap.state.form.capturePrompt,
+        cap.state.note.text.includes("capturePrompt"),
+        cap.state.note.bad,
+      ],
+      [DEFAULT_CAPTURE_PROMPT, true, true],
     );
   }
 }
@@ -7792,6 +7917,100 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
+  // ---- 8.1 判断题面可配：两档都读 capturePrompt，空 = 内置默认 ----
+  {
+    const lines = [
+      record({ id: "q1", role: "user", content: "继续看发布窗口" }),
+      record({ id: "q2", role: "assistant", content: "好" }),
+    ];
+    const judgeCursor = {
+      lastCommitSample: "上一段：发布窗口",
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const custom = "自定义题面XYZ";
+
+    // 空配置：两档都落到 CAPTURE_TOPIC_QUESTION。
+    const emptyModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    await runCapture({
+      token: "prompt-empty-llm",
+      lines,
+      cursor: judgeCursor,
+      values: { captureCommitMode: "llm", captureModel: "acme/model", capturePrompt: "" },
+      models: emptyModel.models,
+      server: pending,
+    });
+    const emptyLlmContent = String(emptyModel.calls.stream[0]?.messages?.[0]?.content || "");
+    const emptyDisc = await runCapture({
+      token: "prompt-empty-disc",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+        capturePrompt: "",
+      },
+      server: pending,
+      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
+    });
+    const emptyDiscCall = emptyDisc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    eq(
+      "capturePrompt 为空：llm 的 content 以 CAPTURE_TOPIC_QUESTION 开头，discriminator 的 instructions 就是它",
+      [
+        emptyLlmContent.startsWith(CAPTURE_TOPIC_QUESTION),
+        emptyDiscCall ? bodyOf(emptyDiscCall).questions?.q?.instructions : undefined,
+      ],
+      [true, CAPTURE_TOPIC_QUESTION],
+    );
+
+    // 非空：两档都用用户那句，内置那句不再出现；criteria 仍是写死的那两条。
+    const customModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    await runCapture({
+      token: "prompt-custom-llm",
+      lines,
+      cursor: judgeCursor,
+      values: { captureCommitMode: "llm", captureModel: "acme/model", capturePrompt: custom },
+      models: customModel.models,
+      server: pending,
+    });
+    const customLlmContent = String(customModel.calls.stream[0]?.messages?.[0]?.content || "");
+    const customDisc = await runCapture({
+      token: "prompt-custom-disc",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+        capturePrompt: custom,
+      },
+      server: pending,
+      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
+    });
+    const customDiscCall = customDisc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    const customBody = customDiscCall ? bodyOf(customDiscCall) : {};
+    eq(
+      "capturePrompt 非空：llm 以用户那句开头 / discriminator 的 instructions 就是它，criteria 仍写死",
+      [
+        customLlmContent.startsWith(custom),
+        customLlmContent.includes(CAPTURE_TOPIC_QUESTION),
+        customBody.questions?.q?.instructions,
+        customBody.questions?.q?.criteria?.yes,
+        customBody.questions?.q?.criteria?.no,
+      ],
+      [true, false, custom, "两段在讲同一件事", "两段换了一件事"],
+    );
+  }
+
   // ---- 9. 缺配置回落 fixed（存值不改） ----
   {
     eq(
@@ -9837,6 +10056,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       idleSeconds: "600",
       model: "",
       serviceUrl: "",
+      prompt: "",
       modes: ["fixed", "llm", "discriminator"],
       turnsRange: [1, 100],
       idleRange: [60, 86400],
@@ -9910,6 +10130,38 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         false,
       ],
     );
+  }
+
+  // ---- 2.1 判断题面：投影带 prompt（默认空串），写入后跟着变；非字符串 / 超长整单拒 ----
+  {
+    const before = writes.length;
+    const tooLong = await postConfig({
+      captureCommitMode: "fixed",
+      capturePrompt: "字".repeat(CAPTURE_PROMPT_MAX + 1),
+    });
+    eq(
+      "POST /capture-config 判断题面超长 → 400 且这一单一个字段都没写",
+      [tooLong.status, tooLong.body.ok, tooLong.body.error, writes.length],
+      [400, false, `capturePrompt 最多 ${CAPTURE_PROMPT_MAX} 个字符`, before],
+    );
+
+    const notString = await postConfig({ capturePrompt: 123 });
+    eq(
+      "POST /capture-config 判断题面非字符串 → 400 且仍不写",
+      [notString.status, notString.body.ok, notString.body.error, writes.length],
+      [400, false, "capturePrompt 必须是字符串", before],
+    );
+
+    const writtenText = "只看这两段像不像同一件事？";
+    const written = await postConfig({ capturePrompt: writtenText });
+    eq(
+      "POST /capture-config 写入 capturePrompt 后 GET 投影的 prompt 跟着变（原样存，不 trim、不规范化）",
+      [written.status, written.body.prompt, writes.at(-1), (await getConfig()).body.prompt],
+      [200, writtenText, ["capturePrompt", writtenText], writtenText],
+    );
+
+    // 收尾：清回空串，后面的断言按默认投影走。
+    await postConfig({ capturePrompt: "" });
   }
 
   // ---- 3. llm 缺模型回落 fixed，补模型后生效 ----

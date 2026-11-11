@@ -32,6 +32,7 @@ import {
 } from "./cursor.js";
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
 
+/** 内置默认题面；配置 capturePrompt 非空时以配置为准（见 buildAsker）。 */
 export const CAPTURE_TOPIC_QUESTION = "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。";
 export const CAPTURE_SAMPLE_CHARS = 1200;
 export const CAPTURE_ASK_TIMEOUT_MS = 1500;
@@ -171,13 +172,18 @@ function desiredPolicyOf(switches) {
 function buildAsker({ mode, sdk, switches, cursor, segment }) {
   const previous = cursor.lastCommitSample;
   const current = segmentText(segment);
+  // 两档共用同一句题面：配置非空就用用户写的那句，否则用内置默认。
+  // trim 只用来判空，不把用户那句本身 trim 掉。
+  const question = String(switches.capturePrompt ?? "").trim()
+    ? switches.capturePrompt
+    : CAPTURE_TOPIC_QUESTION;
 
   if (mode === "llm") {
     return async () => {
       if (!previous) return null;
       const answer = await askModelChannel(sdk, {
         modelRef: switches.captureModel,
-        prompt: `${CAPTURE_TOPIC_QUESTION}\n\n${renderTopicPrompt(previous, current)}`,
+        prompt: `${question}\n\n${renderTopicPrompt(previous, current)}`,
         timeoutMs: CAPTURE_ASK_TIMEOUT_MS,
         maxTokens: CAPTURE_ASK_MAX_TOKENS,
       });
@@ -198,7 +204,7 @@ function buildAsker({ mode, sdk, switches, cursor, segment }) {
           questions: {
             q: {
               type: "choice",
-              instructions: CAPTURE_TOPIC_QUESTION,
+              instructions: question,
               criteria: {
                 yes: "两段在讲同一件事",
                 no: "两段换了一件事",

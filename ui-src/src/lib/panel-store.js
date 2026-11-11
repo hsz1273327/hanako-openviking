@@ -73,7 +73,14 @@ import {
   systemonePromptStatus,
 } from "./recall-layers.js";
 import { summarizeChecks } from "./check-summary.js";
-import { CAPTURE_IDLE_RANGE, CAPTURE_TURNS_RANGE } from "./capture-view.js";
+import {
+  CAPTURE_IDLE_RANGE,
+  CAPTURE_TURNS_RANGE,
+  DEFAULT_CAPTURE_PROMPT,
+  capturePromptDraft,
+  capturePromptStatus,
+  normalizeCapturePrompt,
+} from "./capture-view.js";
 import {
   PEER_EMPTY,
   PEER_UNREADABLE,
@@ -240,6 +247,8 @@ export function createPanelStore(deps = {}) {
       captureServerIdleSeconds: 600,
       captureModel: "",
       captureServiceUrl: "",
+      // 写回判断题面：初始坐默认那段的草稿，首次 refresh 后以服务端投影为准。
+      capturePrompt: "",
     },
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
@@ -271,6 +280,8 @@ export function createPanelStore(deps = {}) {
     foot: "",
     // 正在编辑的那一格（刷新时不抢光标与内容）。
     focus: "",
+    // 用户动过判断题面之后，刷新不再拿默认文本去盖他（包括他故意清空的那次）。
+    capturePromptTouched: false,
   };
 
   const CAPTURE_FORM_KEYS = [
@@ -280,6 +291,7 @@ export function createPanelStore(deps = {}) {
     "captureServerIdleSeconds",
     "captureModel",
     "captureServiceUrl",
+    "capturePrompt",
   ];
 
   const captureDefaults = () => ({
@@ -289,9 +301,10 @@ export function createPanelStore(deps = {}) {
     captureServerIdleSeconds: 600,
     captureModel: "",
     captureServiceUrl: "",
+    capturePrompt: "",
   });
   // 上一次服务端确认过的 form（回滚目标）。与 state.captureConfig 互补：
-  // 后者只留回落提示需要的三项，这里留六个控件的值。
+  // 后者只留回落提示需要的三项，这里留七个控件的值。
   let captureConfirmed = captureDefaults();
 
   // 首屏给空值，等 applyLayers 落地；初始化一次保证草稿键齐全。
@@ -346,10 +359,20 @@ export function createPanelStore(deps = {}) {
       captureServerIdleSeconds: Number.isFinite(idle) ? idle : 600,
       captureModel: typeof out.model === "string" ? out.model : "",
       captureServiceUrl: typeof out.serviceUrl === "string" ? out.serviceUrl : "",
+      capturePrompt: normalizeCapturePrompt(out.prompt),
     };
 
     for (const key of CAPTURE_FORM_KEYS) {
       if (state.focus === key) continue;
+      // 判断题面存的可能是空串（= 用默认），框里得坐默认全文当草稿：
+      // 不能跟其它键一样直接赋值，否则一刷新框就空了。
+      if (key === "capturePrompt") {
+        state.form.capturePrompt = capturePromptDraft(
+          captureConfirmed.capturePrompt,
+          state.capturePromptTouched,
+        );
+        continue;
+      }
       state.form[key] = captureConfirmed[key];
     }
   }
@@ -736,6 +759,8 @@ export function createPanelStore(deps = {}) {
           : state.form.captureServerIdleSeconds,
       captureModel: state.form.captureModel,
       captureServiceUrl: state.form.captureServiceUrl,
+      // 空串要原样发：空 = 用内置默认，是有意义的值，不能像数字那样替换成已确认值。
+      capturePrompt: state.form.capturePrompt,
     };
   }
 
@@ -787,6 +812,28 @@ export function createPanelStore(deps = {}) {
   function setCaptureForm(key, value) {
     state.form[key] = value;
     return saveCapture();
+  }
+
+  /** 判断题面：只改草稿，不发请求（与 touchPrompt 同一套收笔方式）。 */
+  function touchCapturePrompt(value) {
+    state.capturePromptTouched = true;
+    state.form.capturePrompt = value;
+  }
+
+  /** 判断题面：失焦 / 回车才提交，走它自己那一单（/capture-config）。 */
+  function setCapturePrompt(value) {
+    state.form.capturePrompt = value;
+    return saveCapture();
+  }
+
+  /** 恢复默认：把默认全文填回框里，再走正常提交，不绕过校验也不偷写配置。 */
+  function resetCapturePrompt() {
+    touchCapturePrompt(DEFAULT_CAPTURE_PROMPT);
+    return saveCapture();
+  }
+
+  function capturePromptStatusOf() {
+    return capturePromptStatus(state.form.capturePrompt);
   }
 
   /** 数字格：null / 空 → 空串且不提交；其余收敛到该键的范围后再整单提交。 */
@@ -1297,6 +1344,10 @@ export function createPanelStore(deps = {}) {
     setForm,
     setCaptureForm,
     setCaptureNumber,
+    touchCapturePrompt,
+    setCapturePrompt,
+    resetCapturePrompt,
+    capturePromptStatusOf,
     saveCapture,
     setDecisionThreshold,
     setGateContextTurns,

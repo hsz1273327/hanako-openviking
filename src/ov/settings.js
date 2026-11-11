@@ -148,6 +148,8 @@ export const DEFAULTS = {
   captureServerIdleSeconds: CAPTURE_IDLE_SECONDS_DEFAULT,
   captureModel: "",
   captureServiceUrl: "",
+  // 写回判断题面：空串 = 用内置那句默认问法（见 src/memory/capture.js）。
+  capturePrompt: "",
   // 记忆搜索总开关：只停读这一半，写回不受影响。
   recallEnabled: true,
   readOnly: false,
@@ -335,6 +337,14 @@ export const GATE_PROMPT_MAX = 2000;
 /** 精排提示词上限，与判断提示词同一口径。 */
 export const RERANK_PROMPT_MAX = 2000;
 
+/**
+ * 写回判断题面的上限：与召回那两段提示词同一口径（同一个数，不另编一套限制）。
+ *
+ * 声明必须放在 GATE_PROMPT_MAX 之后：这里直接引用它，提前会踩 TDZ。
+ * 面板另存一份逐字相同的常量，见 ui-src/src/lib/capture-view.js。
+ */
+export const CAPTURE_PROMPT_MAX = GATE_PROMPT_MAX;
+
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
 function oneOf(raw, allowed, fallback) {
   return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
@@ -367,6 +377,17 @@ export function normalizeQueryChars(raw) {
   if (!Number.isFinite(value) || !Number.isInteger(value)) return QUERY_CHARS_DEFAULT;
   if (value < QUERY_CHARS_MIN || value > QUERY_CHARS_MAX) return QUERY_CHARS_DEFAULT;
   return value;
+}
+
+/**
+ * 写回判断题面：空串 = 用内置那句默认问法，非空按字符截断到 CAPTURE_PROMPT_MAX。
+ *
+ * 与 normalizeGatePrompt 同一口径，只是上限常量换成写回那一份；不 trim——
+ * 用户那句原样留着，判空是运行时（buildAsker）的事。
+ */
+export function normalizeCapturePrompt(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, CAPTURE_PROMPT_MAX).join("");
 }
 
 /** 写回提交策略：只认三档，其余（缺项、类型不对、脏值）一律回 fixed。 */
@@ -1034,6 +1055,8 @@ export async function readSwitches(sdk) {
     ),
     captureModel,
     captureServiceUrl,
+    // 写回判断题面：两档共用这一句，空串 = 运行时不变量那句默认问法。
+    capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,
     readOnly: await read(sdk, "readOnly"),

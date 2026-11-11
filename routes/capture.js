@@ -14,6 +14,7 @@ import {
   CAPTURE_COMMIT_TURNS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_IDLE_SECONDS_MIN,
+  CAPTURE_PROMPT_MAX,
   captureModeMissing,
   normalizeGateModel,
   normalizeServiceUrl,
@@ -47,6 +48,7 @@ async function project(ctx) {
     idleSeconds: serializeCaptureIdleSeconds(switches.captureServerIdleSeconds),
     model: switches.captureModel,
     serviceUrl: switches.captureServiceUrl,
+    prompt: switches.capturePrompt,
     modes: [...CAPTURE_COMMIT_MODES],
     turnsRange: [CAPTURE_COMMIT_TURNS_MIN, CAPTURE_COMMIT_TURNS_MAX],
     idleRange: [CAPTURE_IDLE_SECONDS_MIN, CAPTURE_IDLE_SECONDS_MAX],
@@ -155,6 +157,21 @@ export default function registerCaptureRoutes(app, ctx) {
         }
         changes.push(["captureServiceUrl", normalized]);
       }
+    }
+
+    // 判断题面：非字符串直接拒，超长整单拒；存原样，不 trim、不规范化
+    // （空串是有意义的值：= 用内置那句默认问法）。
+    if (has(body, "capturePrompt")) {
+      if (typeof body.capturePrompt !== "string") {
+        return c.json({ ok: false, error: "capturePrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.capturePrompt).length > CAPTURE_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `capturePrompt 最多 ${CAPTURE_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["capturePrompt", body.capturePrompt]);
     }
 
     // 认不出的键一律忽略：前端半新半旧不该整单失败。

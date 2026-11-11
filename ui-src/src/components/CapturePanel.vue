@@ -11,6 +11,7 @@
 // 样式在 ui/assets/panel.css，组件不写 <style>。
 import { computed } from "vue";
 import {
+  NButton,
   NCard,
   NInput,
   NInputNumber,
@@ -22,17 +23,40 @@ import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import {
   CAPTURE_IDLE_RANGE,
+  CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
   captureModeOptions,
 } from "../lib/capture-view.js";
 
-const { state, flip, setCaptureForm, setCaptureNumber, setFocus } = useConfig();
+const {
+  state,
+  flip,
+  setCaptureForm,
+  setCaptureNumber,
+  setFocus,
+  touchCapturePrompt,
+  setCapturePrompt,
+  resetCapturePrompt,
+  capturePromptStatusOf,
+} = useConfig();
 const { options } = useModels();
 
 const modeOptions = Object.freeze(captureModeOptions());
 const modelOptions = computed(() => options(state.form.captureModel));
 const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
+
+// 判断题面只在两档判断里出现：固定轮次那一档不看题面。
+const promptOpen = computed(() => ["llm", "discriminator"].includes(state.form.captureCommitMode));
+const promptStatusText = computed(() => capturePromptStatusOf());
+
+function onPromptInput(value) {
+  touchCapturePrompt(value ?? "");
+}
+
+function onPromptChange(value) {
+  setCapturePrompt(value ?? "");
+}
 
 function onServiceUrlInput(value) {
   state.form.captureServiceUrl = value ?? "";
@@ -82,6 +106,29 @@ function onEnter(event) {
             @update:value="(value) => setCaptureForm('captureCommitMode', value)"
           />
           <span class="field-hint">固定轮次攒够就交；语言模型 / 判别模型只在换话题时交。</span>
+        </div>
+
+        <!-- 判断题面：语言模型与判别模型两档共用这一句。留空 = 内置那句默认问法；
+             判别模型的 yes/no 两条判定描述是内置的，这一格只改怎么问。 -->
+        <div v-if="promptOpen" class="field">
+          <div class="prompt-head">
+            <label for="capturePrompt">判断题面</label>
+            <span id="capturePromptStatus" class="prompt-status">{{ promptStatusText }}</span>
+            <NButton id="captureResetPrompt" size="small" quaternary @click="resetCapturePrompt()">恢复默认</NButton>
+          </div>
+          <NInput
+            type="textarea"
+            size="small"
+            :autosize="{ minRows: 3, maxRows: 6 }"
+            :maxlength="CAPTURE_PROMPT_MAX"
+            :input-props="{ id: 'capturePrompt', spellcheck: 'false' }"
+            :value="state.form.capturePrompt"
+            @focus="setFocus('capturePrompt')"
+            @blur="setFocus('')"
+            @update:value="onPromptInput"
+            @change="onPromptChange"
+          />
+          <span class="field-hint">语言模型判断与判别模型判断共用这一句；留空 = 内置那句默认问法；判别模型的 yes/no 两条判定描述是内置的，这一格只决定怎么问。</span>
         </div>
 
         <div v-if="state.form.captureCommitMode === 'fixed'" class="field">

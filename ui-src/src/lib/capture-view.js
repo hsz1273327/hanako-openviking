@@ -7,6 +7,46 @@
 
 export const CAPTURE_EMPTY = "暂无";
 
+/**
+ * 判断题面的字符上限：与后端 src/ov/settings.js 的 CAPTURE_PROMPT_MAX
+ * （= GATE_PROMPT_MAX，2000）同值。面板加载不了 Node 模块，只能在这里存一份，
+ * 冒烟会断言两边相等。
+ */
+export const CAPTURE_PROMPT_MAX = 2000;
+
+/**
+ * 内置默认题面。与 src/memory/capture.js 的 CAPTURE_TOPIC_QUESTION 逐字一致
+ * （冒烟比对两边）。配置 capturePrompt 为空时就是它。
+ */
+export const DEFAULT_CAPTURE_PROMPT = "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。";
+
+/** 与后端 normalizeCapturePrompt 同一口径：非字符串 / 空 → 空串，否则按字符截断。 */
+export function normalizeCapturePrompt(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, CAPTURE_PROMPT_MAX).join("");
+}
+
+/**
+ * textarea 里该显示什么。
+ *
+ * 配置为空时把默认题面整段填进去当草稿：placeholder 一敲键盘就消失，
+ * 而人很可能就是拿默认这份当底稿直接改。
+ * touched 为真（用户动过或已经提交过空值）就不再拿默认去盖他。
+ */
+export function capturePromptDraft(configValue, touched = false) {
+  const value = normalizeCapturePrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_CAPTURE_PROMPT;
+}
+
+/** 题面旁边那行小字：默认 / 已修改 / 空（回内置默认）。 */
+export function capturePromptStatus(text) {
+  const value = normalizeCapturePrompt(text);
+  if (value === DEFAULT_CAPTURE_PROMPT) return "当前为默认题面";
+  if (!value.trim()) return "已修改 · 题面为空时使用内置默认";
+  return "已修改";
+}
+
 /** 固定轮次与空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
 export const CAPTURE_TURNS_RANGE = Object.freeze([1, 100]);
 export const CAPTURE_IDLE_RANGE = Object.freeze([60, 86400]);

@@ -356,6 +356,12 @@
             "description": "判别模型判断策略使用的服务地址，需兼容 /v1/systemone。只接受 http:// 或 https://，留空表示未配置。模型与密钥沿用「决策服务」那组配置；缺地址或模型时回落到固定轮次。",
             "default": ""
           },
+          "capturePrompt": {
+            "type": "string",
+            "title": "写回判断题面",
+            "description": "语言模型判断与判别模型判断共用的题面，最长 2000 字符。留空表示用内置那句默认问法。判别模型的 yes/no 两条判定描述是内置的，这一格只决定怎么问。",
+            "default": ""
+          },
           "readOnly": {
             "type": "boolean",
             "title": "只读模式",
