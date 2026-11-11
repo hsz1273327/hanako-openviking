@@ -52,11 +52,18 @@ const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
 const promptOpen = computed(() => ["llm", "discriminator"].includes(state.form.captureCommitMode));
 const promptStatusText = computed(() => capturePromptStatusOf());
 
+// 标签跟「真正生效的档」走，不跟用户选的档走。选了语言模型但判断模型没配时会回落
+// 到固定轮次，这时这个数就是唯一判据，标签再写「兜底轮次」说的是另一回事。
+const effectiveOpen = computed(() => {
+  const effective = state.captureConfig?.effectiveMode || state.form.captureCommitMode;
+  return ["llm", "discriminator"].includes(effective);
+});
+
 // 同一个数字，两处语义：固定轮次档它是唯一判据，主题两档它是「模型一直说没换话题」
 // 时的兜底。标签与说明跟着档位走，不然「固定轮次」这个名字会把兜底用途藏起来。
-const commitTurnsLabel = computed(() => (promptOpen.value ? "兜底轮次" : "固定轮次"));
+const commitTurnsLabel = computed(() => (effectiveOpen.value ? "兜底轮次" : "固定轮次"));
 const commitTurnsHint = computed(() =>
-  promptOpen.value
+  effectiveOpen.value
     ? "模型一直判没有换话题时，攒够这么多轮强制提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。"
     : "攒够这么多轮就提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。",
 );
