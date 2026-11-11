@@ -12,15 +12,21 @@ import {
   CAPTURE_COMMIT_MODES,
   CAPTURE_COMMIT_TURNS_MAX,
   CAPTURE_COMMIT_TURNS_MIN,
+  CAPTURE_CONTEXT_TURNS_MAX,
+  CAPTURE_CONTEXT_TURNS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_IDLE_SECONDS_MIN,
+  CAPTURE_MIN_TURNS_MAX,
+  CAPTURE_MIN_TURNS_MIN,
   CAPTURE_PROMPT_MAX,
   captureModeMissing,
   normalizeGateModel,
   normalizeServiceUrl,
   readSwitches,
   serializeCaptureCommitTurns,
+  serializeCaptureContextTurns,
   serializeCaptureIdleSeconds,
+  serializeCaptureMinTurns,
 } from "../src/ov/settings.js";
 import { captureCounts } from "../src/memory/cursor.js";
 import { readSession, sessionKeyOf } from "../src/state/session.js";
@@ -44,6 +50,8 @@ async function project(ctx) {
     effectiveMode: switches.captureEffectiveMode,
     missing: captureModeMissing(switches, switches.captureCommitMode),
     turns: serializeCaptureCommitTurns(switches.captureCommitTurns),
+    contextTurns: serializeCaptureContextTurns(switches.captureContextTurns),
+    minTurns: serializeCaptureMinTurns(switches.captureMinTurns),
     serverFallback: switches.captureServerFallback,
     idleSeconds: serializeCaptureIdleSeconds(switches.captureServerIdleSeconds),
     model: switches.captureModel,
@@ -51,6 +59,8 @@ async function project(ctx) {
     prompt: switches.capturePrompt,
     modes: [...CAPTURE_COMMIT_MODES],
     turnsRange: [CAPTURE_COMMIT_TURNS_MIN, CAPTURE_COMMIT_TURNS_MAX],
+    contextTurnsRange: [CAPTURE_CONTEXT_TURNS_MIN, CAPTURE_CONTEXT_TURNS_MAX],
+    minTurnsRange: [CAPTURE_MIN_TURNS_MIN, CAPTURE_MIN_TURNS_MAX],
     idleRange: [CAPTURE_IDLE_SECONDS_MIN, CAPTURE_IDLE_SECONDS_MAX],
   };
 }
@@ -107,6 +117,31 @@ export default function registerCaptureRoutes(app, ctx) {
       );
       if (problem) return c.json({ ok: false, error: problem }, 400);
       changes.push(["captureCommitTurns", serializeCaptureCommitTurns(body.captureCommitTurns)]);
+    }
+
+    if (has(body, "captureContextTurns")) {
+      const problem = integerError(
+        body.captureContextTurns,
+        "captureContextTurns",
+        CAPTURE_CONTEXT_TURNS_MIN,
+        CAPTURE_CONTEXT_TURNS_MAX,
+      );
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push([
+        "captureContextTurns",
+        serializeCaptureContextTurns(body.captureContextTurns),
+      ]);
+    }
+
+    if (has(body, "captureMinTurns")) {
+      const problem = integerError(
+        body.captureMinTurns,
+        "captureMinTurns",
+        CAPTURE_MIN_TURNS_MIN,
+        CAPTURE_MIN_TURNS_MAX,
+      );
+      if (problem) return c.json({ ok: false, error: problem }, 400);
+      changes.push(["captureMinTurns", serializeCaptureMinTurns(body.captureMinTurns)]);
     }
 
     if (has(body, "captureServerFallback")) {

@@ -130,6 +130,14 @@ import {
   CAPTURE_COMMIT_TURNS_MIN,
   CAPTURE_COMMIT_TURNS_MAX,
   CAPTURE_COMMIT_TURNS_STEP,
+  CAPTURE_CONTEXT_TURNS_DEFAULT,
+  CAPTURE_CONTEXT_TURNS_MIN,
+  CAPTURE_CONTEXT_TURNS_MAX,
+  CAPTURE_CONTEXT_TURNS_STEP,
+  CAPTURE_MIN_TURNS_DEFAULT,
+  CAPTURE_MIN_TURNS_MIN,
+  CAPTURE_MIN_TURNS_MAX,
+  CAPTURE_MIN_TURNS_STEP,
   CAPTURE_IDLE_SECONDS_DEFAULT,
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
@@ -138,6 +146,10 @@ import {
   normalizeCapturePrompt,
   normalizeCaptureCommitTurns,
   serializeCaptureCommitTurns,
+  normalizeCaptureContextTurns,
+  serializeCaptureContextTurns,
+  normalizeCaptureMinTurns,
+  serializeCaptureMinTurns,
   normalizeCaptureIdleSeconds,
   serializeCaptureIdleSeconds,
   captureModeMissing,
@@ -316,6 +328,7 @@ import {
   captureMessages,
   collectDelta,
   countTurns,
+  tailTurns,
   reconcileCapture,
   captureCounts,
 } from "../src/memory/cursor.js";
@@ -360,6 +373,8 @@ import {
 import {
   CAPTURE_EMPTY,
   CAPTURE_IDLE_RANGE,
+  CAPTURE_CONTEXT_RANGE,
+  CAPTURE_MIN_RANGE,
   CAPTURE_PROMPT_MAX as UI_CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
@@ -3302,6 +3317,42 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     capturePromptOpenLine || capture.slice(capture.indexOf("判断题面"), capture.indexOf("判断题面") + 600),
   );
 
+  {
+    const captureLines = capture.split("\n");
+    const fieldBlock = (id) => {
+      const index = captureLines.findIndex((line) => line.includes(`id: '${id}'`));
+      return index < 0 ? "" : captureLines.slice(Math.max(0, index - 16), index + 1).join("\n");
+    };
+    const contextBlock = fieldBlock("captureContextTurns");
+    const minBlock = fieldBlock("captureMinTurns");
+    check(
+      "CapturePanel 判据上下文 / 最少触发轮数两格都在，且条件与判断题面同（llm / discriminator）",
+      Boolean(contextBlock) &&
+        Boolean(minBlock) &&
+        contextBlock.includes('v-if="promptOpen"') &&
+        minBlock.includes('v-if="promptOpen"'),
+      `${contextBlock.slice(0, 200)} || ${minBlock.slice(0, 200)}`,
+    );
+    check(
+      "UI 的判据上下文 / 最少触发轮数范围与后端常量同值",
+      JSON.stringify(CAPTURE_CONTEXT_RANGE) ===
+        JSON.stringify([CAPTURE_CONTEXT_TURNS_MIN, CAPTURE_CONTEXT_TURNS_MAX]) &&
+        JSON.stringify(CAPTURE_MIN_RANGE) ===
+          JSON.stringify([CAPTURE_MIN_TURNS_MIN, CAPTURE_MIN_TURNS_MAX]),
+      `${JSON.stringify(CAPTURE_CONTEXT_RANGE)} ${JSON.stringify(CAPTURE_MIN_RANGE)}`,
+    );
+    const commitTurnsBlock = fieldBlock("captureCommitTurns");
+    check(
+      "CapturePanel 兜底轮数那一格三档都在：不带 fixed 专属 v-if，标签走 commitTurnsLabel，固定轮次/兜底轮次两个词都在",
+      Boolean(commitTurnsBlock) &&
+        !commitTurnsBlock.includes("v-if=\"state.form.captureCommitMode === 'fixed'\"") &&
+        commitTurnsBlock.includes("commitTurnsLabel") &&
+        capture.includes("固定轮次") &&
+        capture.includes("兜底轮次"),
+      commitTurnsBlock.slice(0, 400),
+    );
+  }
+
   const cardApp = uiCode("CardApp.vue");
   const captureViewCode = uiCode("lib/capture-view.js");
   check(
@@ -5273,6 +5324,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       effectiveMode: "fixed",
       missing: ["captureModel"],
       turns: "20",
+      contextTurns: "3",
+      minTurns: "2",
       serverFallback: true,
       idleSeconds: "900",
       model: "",
@@ -5287,6 +5340,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         cap.state.captureConfig,
         cap.state.form.captureCommitMode,
         cap.state.form.captureCommitTurns,
+        cap.state.form.captureContextTurns,
+        cap.state.form.captureMinTurns,
         cap.state.form.captureServerFallback,
         cap.state.form.captureServerIdleSeconds,
       ],
@@ -5294,6 +5349,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         { mode: "llm", effectiveMode: "fixed", missing: ["captureModel"] },
         "llm",
         20,
+        3,
+        2,
         true,
         900,
       ],
@@ -5305,6 +5362,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       effectiveMode: "fixed",
       missing: [],
       turns: "33",
+      contextTurns: "4",
+      minTurns: "5",
       serverFallback: false,
       idleSeconds: "777",
       model: "p/m",
@@ -5314,11 +5373,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await cap.setCaptureForm("captureCommitMode", "fixed");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 七个键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 九个键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
         cap.state.form.captureCommitTurns,
+        cap.state.form.captureContextTurns,
+        cap.state.form.captureMinTurns,
         cap.state.form.captureServerIdleSeconds,
         cap.state.form.captureModel,
         cap.state.form.captureServiceUrl,
@@ -5329,6 +5390,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         [
           "captureCommitMode",
           "captureCommitTurns",
+          "captureContextTurns",
+          "captureMinTurns",
           "captureModel",
           "capturePrompt",
           "captureServerFallback",
@@ -5336,6 +5399,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "captureServiceUrl",
         ],
         33,
+        4,
+        5,
         777,
         "p/m",
         "http://judge:1",
@@ -7410,7 +7475,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         lastCommitCount: 1,
         lastCommitAt: "2026-11-10T00:00:00.000Z",
         lastCommitMessageCount: 2,
-        lastCommitSample: "上一段",
         pendingTurns: 0,
         serverPolicy: { enabled: false, idleSeconds: null },
       },
@@ -7694,9 +7758,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         enough.cursor.lastCommitCount,
         enough.cursor.lastCommitAt,
         enough.cursor.lastCommitMessageCount,
-        enough.cursor.lastCommitSample,
       ],
-      [1, NOW, 2, "第一问\n第一答"],
+      [1, NOW, 2],
     );
 
     const below = await runCapture({
@@ -7741,15 +7804,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 7. llm：no 提交 / yes 不提交 / ask 抛错不提交 ----
   {
     const judgeCursor = {
-      lastCommitSample: "上一段：讨论了发布窗口",
+      lastEntryId: "p2",
+      lastMessageCount: 2,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 2,
       serverPolicy: { enabled: false, idleSeconds: null },
     };
     const lines = [
+      record({ id: "p1", role: "user", content: "上一轮：发布窗口" }),
+      record({ id: "p2", role: "assistant", content: "上一轮：定在周四" }),
       record({ id: "l1", role: "user", content: "今天聊部署" }),
       record({ id: "l2", role: "assistant", content: "好，先看环境" }),
     ];
-    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
-    const llmValues = { captureCommitMode: "llm", captureModel: "acme/model" };
+    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
+    const llmValues = {
+      captureCommitMode: "llm",
+      captureModel: "acme/model",
+      captureMinTurns: "1",
+    };
 
     const noModel = modelSdk({
       stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
@@ -7773,12 +7845,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     eq(
       "llm 提交后 lastCommitCount / lastCommitAt / lastCommitMessageCount 都动了",
       [no.cursor.lastCommitCount, no.cursor.lastCommitAt, no.cursor.lastCommitMessageCount],
-      [1, NOW, 2],
+      [1, NOW, 4],
     );
+    const noPrompt = String(noModel.calls.stream[0]?.messages?.[0]?.content || "");
     check(
-      "llm 的题面带「上一段 / 这一段」两个抬头，maxTokens 用写回那一档",
-      String(noModel.calls.stream[0]?.messages?.[0]?.content || "").includes("上一段：") &&
-        String(noModel.calls.stream[0]?.messages?.[0]?.content || "").includes("这一段：") &&
+      "llm 的题面带「之前 / 现在」两个抬头、按角色标记逐条渲染，maxTokens 用写回那一档",
+      noPrompt.includes("之前：") &&
+        noPrompt.includes("现在：") &&
+        noPrompt.includes("[用户] 上一轮：发布窗口") &&
+        noPrompt.includes("[助手] 上一轮：定在周四") &&
+        noPrompt.includes("[用户] 今天聊部署") &&
         noModel.calls.stream[0]?.maxTokens === CAPTURE_ASK_MAX_TOKENS,
       JSON.stringify(noModel.calls.stream[0] || {}),
     );
@@ -7836,19 +7912,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 8. discriminator：choice=no 提交 / yes 不提交 / 形状不认识不提交 ----
   {
     const judgeCursor = {
-      lastCommitSample: "上一段：项目评审",
+      lastEntryId: "p2",
+      lastMessageCount: 2,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 2,
       serverPolicy: { enabled: false, idleSeconds: null },
     };
     const lines = [
+      record({ id: "p1", role: "user", content: "上一轮：项目评审" }),
+      record({ id: "p2", role: "assistant", content: "上一轮：定在周三" }),
       record({ id: "d1", role: "user", content: "评审改到周五" }),
       record({ id: "d2", role: "assistant", content: "我记下了" }),
     ];
-    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
     const discValues = {
       captureCommitMode: "discriminator",
       captureServiceUrl: "http://judge:1",
       systemoneServiceModel: "judge-model",
       systemoneServiceKey: "",
+      captureMinTurns: "1",
     };
 
     const no = await runCapture({
@@ -7874,7 +7956,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "discriminator 请求体带 model / state.content / choice 题面与 yes/no criteria",
       Boolean(judgeCall) &&
         bodyOf(judgeCall).model === "judge-model" &&
-        String(bodyOf(judgeCall).state?.content || "").includes("上一段：") &&
+        String(bodyOf(judgeCall).state?.content || "").includes("之前：") &&
+        String(bodyOf(judgeCall).state?.content || "").includes("[用户] 上一轮：项目评审") &&
         bodyOf(judgeCall).questions?.q?.type === "choice" &&
         bodyOf(judgeCall).questions?.q?.instructions === CAPTURE_TOPIC_QUESTION &&
         Boolean(bodyOf(judgeCall).questions?.q?.criteria?.yes) &&
@@ -7920,14 +8003,19 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   // ---- 8.1 判断题面可配：两档都读 capturePrompt，空 = 内置默认 ----
   {
     const lines = [
+      record({ id: "p1", role: "user", content: "上一轮：发布窗口" }),
+      record({ id: "p2", role: "assistant", content: "上一轮：定在周四" }),
       record({ id: "q1", role: "user", content: "继续看发布窗口" }),
       record({ id: "q2", role: "assistant", content: "好" }),
     ];
     const judgeCursor = {
-      lastCommitSample: "上一段：发布窗口",
+      lastEntryId: "p2",
+      lastMessageCount: 2,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 2,
       serverPolicy: { enabled: false, idleSeconds: null },
     };
-    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
     const custom = "自定义题面XYZ";
 
     // 空配置：两档都落到 CAPTURE_TOPIC_QUESTION。
@@ -7938,7 +8026,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       token: "prompt-empty-llm",
       lines,
       cursor: judgeCursor,
-      values: { captureCommitMode: "llm", captureModel: "acme/model", capturePrompt: "" },
+      values: {
+        captureCommitMode: "llm",
+        captureModel: "acme/model",
+        capturePrompt: "",
+        captureMinTurns: "1",
+      },
       models: emptyModel.models,
       server: pending,
     });
@@ -7952,6 +8045,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         captureServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
         capturePrompt: "",
+        captureMinTurns: "1",
       },
       server: pending,
       judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
@@ -7976,7 +8070,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       token: "prompt-custom-llm",
       lines,
       cursor: judgeCursor,
-      values: { captureCommitMode: "llm", captureModel: "acme/model", capturePrompt: custom },
+      values: {
+        captureCommitMode: "llm",
+        captureModel: "acme/model",
+        capturePrompt: custom,
+        captureMinTurns: "1",
+      },
       models: customModel.models,
       server: pending,
     });
@@ -7990,6 +8089,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         captureServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
         capturePrompt: custom,
+        captureMinTurns: "1",
       },
       server: pending,
       judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
@@ -8011,6 +8111,415 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
+  // ---- 8.2 两档的最少触发轮数与判据回看轮数 ----
+  {
+    const judgeCursor = {
+      lastEntryId: "p2",
+      lastMessageCount: 2,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 2,
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const lines = [
+      record({ id: "p1", role: "user", content: "上一轮用户" }),
+      record({ id: "p2", role: "assistant", content: "上一轮助手" }),
+      record({ id: "c1", role: "user", content: "这一段用户" }),
+      record({ id: "c2", role: "assistant", content: "这一段助手" }),
+    ];
+    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
+    const llmBase = { captureCommitMode: "llm", captureModel: "acme/model" };
+
+    const tooFewModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    });
+    const tooFewLlm = await runCapture({
+      token: "min-turns-llm",
+      lines,
+      cursor: judgeCursor,
+      values: { ...llmBase, captureMinTurns: "2" },
+      models: tooFewModel.models,
+      server: pending,
+    });
+    const tooFewLlmCommit = tooFewLlm.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "llm：待提交 1 轮、captureMinTurns=2 → 不提交、不调模型",
+      [
+        tooFewLlm.report.committed,
+        Boolean(tooFewLlmCommit),
+        tooFewModel.calls.stream.length,
+      ],
+      [false, false, 0],
+    );
+
+    let discAsks = 0;
+    const tooFewDisc = await runCapture({
+      token: "min-turns-disc",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+        captureMinTurns: "2",
+      },
+      server: pending,
+      judge: () => {
+        discAsks += 1;
+        return { answers: { q: { choice: "no", confidence: 0.9 } } };
+      },
+    });
+    const tooFewDiscCommit = tooFewDisc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    const tooFewDiscJudge = tooFewDisc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    eq(
+      "discriminator：待提交 1 轮、captureMinTurns=2 → 不提交、不发 /v1/systemone",
+      [
+        tooFewDisc.report.committed,
+        Boolean(tooFewDiscCommit),
+        Boolean(tooFewDiscJudge),
+        discAsks,
+      ],
+      [false, false, false, 0],
+    );
+
+    const enoughModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    const enough = await runCapture({
+      token: "min-turns-enough",
+      lines,
+      cursor: judgeCursor,
+      values: { ...llmBase, captureMinTurns: "1" },
+      models: enoughModel.models,
+      server: pending,
+    });
+    eq(
+      "llm：同样夹具把 captureMinTurns 设成 1 → 正常调一次模型",
+      [enoughModel.calls.stream.length, enough.report.committed],
+      [1, false],
+    );
+
+    const fixed = await runCapture({
+      token: "min-turns-fixed-ignored",
+      lines: [
+        record({ id: "f1", role: "user", content: "固定档用户" }),
+        record({ id: "f2", role: "assistant", content: "固定档助手" }),
+      ],
+      cursor: { serverPolicy: { enabled: false, idleSeconds: null } },
+      values: {
+        captureCommitMode: "fixed",
+        captureCommitTurns: "1",
+        captureMinTurns: "50",
+      },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+    });
+    const fixedCommit = fixed.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "fixed 不受 captureMinTurns 影响：1 轮、阈值 1、min 50 → 仍然提交",
+      [fixed.report.committed, Boolean(fixedCommit)],
+      [true, true],
+    );
+
+    const contextLines = [];
+    for (let index = 1; index <= 5; index += 1) {
+      contextLines.push(
+        record({ id: `o${index * 2 - 1}`, role: "user", content: `旧轮${index}用户` }),
+        record({ id: `o${index * 2}`, role: "assistant", content: `旧轮${index}助手` }),
+      );
+    }
+    contextLines.push(
+      record({ id: "n1", role: "user", content: "现在话题用户" }),
+      record({ id: "n2", role: "assistant", content: "现在话题助手" }),
+    );
+    const contextCursor = {
+      lastEntryId: "o10",
+      lastMessageCount: 10,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 10,
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const contextModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    await runCapture({
+      token: "context-turns-2",
+      lines: contextLines,
+      cursor: contextCursor,
+      values: { ...llmBase, captureContextTurns: "2", captureMinTurns: "1" },
+      models: contextModel.models,
+      server: { commit_count: 0, message_count: 10, pending_tokens: 10 },
+    });
+    const contextContent = String(
+      contextModel.calls.stream[0]?.messages?.[0]?.content || "",
+    );
+    check(
+      "captureContextTurns=2：判据只带最近 2 轮旧对话，最早那轮不出现，现在那段仍在",
+      contextContent.includes("[用户] 旧轮4用户") &&
+        contextContent.includes("[助手] 旧轮4助手") &&
+        contextContent.includes("[用户] 旧轮5用户") &&
+        contextContent.includes("[助手] 旧轮5助手") &&
+        !contextContent.includes("旧轮1用户") &&
+        !contextContent.includes("旧轮1助手") &&
+        !contextContent.includes("旧轮3用户") &&
+        contextContent.includes("[用户] 现在话题用户"),
+      contextContent,
+    );
+  }
+
+  // ---- 8.2.1 兜底轮数：到阈值不再问模型，直接提交 ----
+  {
+    const judgeCursor = {
+      lastEntryId: "p2",
+      lastMessageCount: 2,
+      lastCommitCount: 0,
+      lastCommitMessageCount: 2,
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    // 两轮待提交（c1–c4），阈值 2、最少 1：正好卡在兜底线上。
+    const lines = [
+      record({ id: "p1", role: "user", content: "上一轮用户" }),
+      record({ id: "p2", role: "assistant", content: "上一轮助手" }),
+      record({ id: "c1", role: "user", content: "这一段用户一" }),
+      record({ id: "c2", role: "assistant", content: "这一段助手一" }),
+      record({ id: "c3", role: "user", content: "这一段用户二" }),
+      record({ id: "c4", role: "assistant", content: "这一段助手二" }),
+    ];
+    const pending = { commit_count: 0, message_count: 2, pending_tokens: 10 };
+
+    const maxModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "same" }]),
+    });
+    const maxLlm = await runCapture({
+      token: "max-turns-llm",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        captureCommitMode: "llm",
+        captureModel: "acme/model",
+        captureMinTurns: "1",
+        captureCommitTurns: "2",
+      },
+      models: maxModel.models,
+      server: pending,
+    });
+    const maxLlmCommit = maxLlm.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "端到端 llm：待提交 2 轮、兜底阈值 2 → 直接提交，模型一次都不调",
+      [
+        maxLlm.report.committed,
+        Boolean(maxLlmCommit),
+        maxModel.calls.stream.length,
+      ],
+      [true, true, 0],
+    );
+
+    let maxDiscAsks = 0;
+    const maxDisc = await runCapture({
+      token: "max-turns-disc",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+        captureMinTurns: "1",
+        captureCommitTurns: "2",
+      },
+      server: pending,
+      judge: () => {
+        maxDiscAsks += 1;
+        return { answers: { q: { choice: "yes", confidence: 0.9 } } };
+      },
+    });
+    const maxDiscCommit = maxDisc.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    const maxDiscSystemone = maxDisc.calls.filter((call) =>
+      pathOf(call.url).endsWith("/v1/systemone"),
+    );
+    eq(
+      "端到端 discriminator：待提交 2 轮、兜底阈值 2 → 直接提交，不发 /v1/systemone",
+      [
+        maxDisc.report.committed,
+        Boolean(maxDiscCommit),
+        maxDiscSystemone.length,
+        maxDiscAsks,
+      ],
+      [true, true, 0, 0],
+    );
+  }
+
+  // ---- 8.3 端到端：全新建会话先立基线，之后「之前」有内容；半轮时悬空 user 作引子 ----
+  {
+    const baselineLines = [
+      record({ id: "b1", role: "user", content: "第一次问" }),
+      record({ id: "b2", role: "assistant", content: "第一次答" }),
+    ];
+    const freshPending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const llmValues = {
+      captureCommitMode: "llm",
+      captureModel: "acme/model",
+      captureMinTurns: "1",
+    };
+    const commitCallOf = (run) =>
+      run.calls.find(
+        (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+      );
+
+    // 零值游标 = 全新建会话；「之前」为空，第一轮就立基线，模型一次都不调。
+    const baselineModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    });
+    const baseline = await runCapture({
+      token: "baseline-llm",
+      lines: baselineLines,
+      values: llmValues,
+      models: baselineModel.models,
+      server: freshPending,
+    });
+    eq(
+      "端到端 baseline：零值游标 + llm 档，第一轮不调模型直接提交，游标推到提交点",
+      [
+        baseline.report.committed,
+        Boolean(commitCallOf(baseline)),
+        baseline.cursor.lastCommitCount,
+        baseline.cursor.lastCommitMessageCount,
+        baselineModel.calls.stream.length,
+      ],
+      [true, true, 1, 2, 0],
+    );
+
+    const discBaseline = await runCapture({
+      token: "baseline-disc",
+      lines: baselineLines,
+      values: {
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+        captureMinTurns: "1",
+      },
+      server: freshPending,
+      judge: () => ({ answers: { q: { choice: "no", confidence: 0.9 } } }),
+    });
+    const discJudgeCall = discBaseline.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    eq(
+      "端到端 baseline：discriminator 档也不发 /v1/systemone、照样提交",
+      [
+        discBaseline.report.committed,
+        Boolean(discJudgeCall),
+        discBaseline.cursor.lastCommitCount,
+      ],
+      [true, false, 1],
+    );
+
+    // 空「之前」但不够最少轮数：仍然不提交，也不问模型（baseline 不抢闸）。
+    const tooFewModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    });
+    const tooFew = await runCapture({
+      token: "baseline-too-few",
+      lines: baselineLines,
+      values: { ...llmValues, captureMinTurns: "2" },
+      models: tooFewModel.models,
+      server: freshPending,
+    });
+    eq(
+      "端到端：零值游标但待提交 1 轮、captureMinTurns=2 → 不提交、不调模型",
+      [
+        tooFew.report.committed,
+        Boolean(commitCallOf(tooFew)),
+        tooFewModel.calls.stream.length,
+        tooFew.cursor.lastCommitCount,
+      ],
+      [false, false, 0, 0],
+    );
+
+    // 基线之后「之前」有内容：拿上一次落盘的游标再跑一次，题面里该有上一段。
+    const followModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    const follow = await runCapture({
+      token: "baseline-follow",
+      lines: [
+        ...baselineLines,
+        record({ id: "b3", role: "user", content: "第二次问" }),
+        record({ id: "b4", role: "assistant", content: "第二次答" }),
+      ],
+      cursor: baseline.cursor,
+      values: llmValues,
+      models: followModel.models,
+      server: { commit_count: 1, message_count: 2, pending_tokens: 10 },
+    });
+    const followPrompt = String(followModel.calls.stream[0]?.messages?.[0]?.content || "");
+    check(
+      "端到端 baseline 之后：模型题面的「之前」是上次提交那段，「现在」也有",
+      followModel.calls.stream.length === 1 &&
+        follow.cursor.lastCommitCount === 1 &&
+        followPrompt.includes("之前：") &&
+        followPrompt.includes("现在：") &&
+        followPrompt.includes("[用户] 第一次问") &&
+        followPrompt.includes("[助手] 第一次答") &&
+        followPrompt.includes("[用户] 第二次问"),
+      followPrompt,
+    );
+
+    // 半轮：提交点落在 q1 之后、assistant 还没来。悬空 q1 作引子进「之前」，
+    // 「现在」从 q1 之后的第一条 assistant 起。
+    const halfModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    const half = await runCapture({
+      token: "half-turn",
+      lines: [
+        record({ id: "p1", role: "user", content: "p1问" }),
+        record({ id: "p2", role: "assistant", content: "p2答" }),
+        record({ id: "p3", role: "user", content: "p3问" }),
+        record({ id: "p4", role: "assistant", content: "p4答" }),
+        record({ id: "q1", role: "user", content: "q1正文" }),
+        record({ id: "r1", role: "assistant", content: "r1答" }),
+        record({ id: "q2", role: "user", content: "q2问" }),
+        record({ id: "r2", role: "assistant", content: "r2答" }),
+      ],
+      cursor: {
+        lastEntryId: "q1",
+        lastMessageCount: 5,
+        lastCommitCount: 0,
+        lastCommitMessageCount: 5,
+        pendingTurns: 0,
+        serverPolicy: { enabled: false, idleSeconds: null },
+      },
+      values: llmValues,
+      models: halfModel.models,
+      server: { commit_count: 0, message_count: 5, pending_tokens: 10 },
+    });
+    const halfPrompt = String(halfModel.calls.stream[0]?.messages?.[0]?.content || "");
+    const [halfPrevious, halfCurrent] = halfPrompt.split("\n\n现在：\n");
+    check(
+      "半轮引子：悬空 user 在「之前」的最后一行，「现在」以它之后的 assistant 开头",
+      halfModel.calls.stream.length === 1 &&
+        String(halfPrevious || "")
+          .trimEnd()
+          .split("\n")
+          .at(-1) === "[用户] q1正文" &&
+        String(halfCurrent || "").startsWith("[助手] r1答") &&
+        String(halfPrevious || "").includes("[用户] p1问") &&
+        half.report.committed === false,
+      halfPrompt,
+    );
+  }
+
   // ---- 9. 缺配置回落 fixed（存值不改） ----
   {
     eq(
@@ -8027,6 +8536,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [
         [12, 12, 12, 12, 1, 1, 100, 100, 7],
         ["12", "1", "100", "7"],
+      ],
+    );
+    eq(
+      "captureContextTurns：空 / 非数字回 3，四舍五入后夹到 1–20，写库存数字串",
+      [
+        [undefined, "", "abc", null, 0, -5, 2.6, 20.4, 999, "7"].map(normalizeCaptureContextTurns),
+        [undefined, 0, 999, "7"].map(serializeCaptureContextTurns),
+      ],
+      [
+        [3, 3, 3, 3, 1, 1, 3, 20, 20, 7],
+        ["3", "1", "20", "7"],
+      ],
+    );
+    eq(
+      "captureMinTurns：空 / 非数字回 2，四舍五入后夹到 1–50，写库存数字串",
+      [
+        [undefined, "", "abc", null, 0, -5, 2.6, 49.6, 999, "7"].map(normalizeCaptureMinTurns),
+        [undefined, 0, 999, "7"].map(serializeCaptureMinTurns),
+      ],
+      [
+        [2, 2, 2, 2, 1, 1, 3, 50, 50, 7],
+        ["2", "1", "50", "7"],
       ],
     );
     eq(
@@ -8111,6 +8642,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         CAPTURE_COMMIT_MODES,
       ],
       [1, 100, 1, 60, 86400, ["fixed", "llm", "discriminator"]],
+    );
+    eq(
+      "判据上下文 / 最少触发轮数的默认值与边界：3 与 2，范围 1–20 / 1–50，步长 1",
+      [
+        DEFAULTS.captureContextTurns,
+        DEFAULTS.captureMinTurns,
+        CAPTURE_CONTEXT_TURNS_DEFAULT,
+        CAPTURE_CONTEXT_TURNS_MIN,
+        CAPTURE_CONTEXT_TURNS_MAX,
+        CAPTURE_CONTEXT_TURNS_STEP,
+        CAPTURE_MIN_TURNS_DEFAULT,
+        CAPTURE_MIN_TURNS_MIN,
+        CAPTURE_MIN_TURNS_MAX,
+        CAPTURE_MIN_TURNS_STEP,
+      ],
+      [3, 2, 3, 1, 20, 1, 2, 1, 50, 1],
     );
   }
 
@@ -8242,14 +8789,85 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ),
       ["different", "same", "different", "different", "same", "same", null],
     );
-    const rendered = renderTopicPrompt("旧内容", "新内容");
+    const rendered = renderTopicPrompt(
+      [
+        { role: "user", content: "旧内容" },
+        { role: "assistant", content: "旧回答" },
+      ],
+      [
+        { role: "user", content: "新内容" },
+        { role: "assistant", content: "新回答" },
+      ],
+    );
+    eq(
+      "renderTopicPrompt：固定抬头「之前 / 现在」，逐条带 [用户] / [助手]，顺序与输入一致；空的一侧只出抬头",
+      [
+        rendered,
+        renderTopicPrompt([], []),
+        renderTopicPrompt([{ role: "tool", content: "跳过我" }], []),
+      ],
+      [
+        "之前：\n[用户] 旧内容\n[助手] 旧回答\n\n现在：\n[用户] 新内容\n[助手] 新回答",
+        "之前：\n\n现在：",
+        "之前：\n\n现在：",
+      ],
+    );
+
+    const longText = "甲".repeat(3000);
+    const clippedRendered = renderTopicPrompt(
+      [
+        { role: "user", content: longText },
+        { role: "assistant", content: "后面第二条" },
+        { role: "user", content: "后面第三条" },
+      ],
+      [],
+    );
+    const firstLine = clippedRendered.split("\n")[1] || "";
     check(
-      "renderTopicPrompt 带「上一段 / 这一段」两个抬头与两段正文",
-      rendered.includes("上一段：") &&
-        rendered.includes("旧内容") &&
-        rendered.includes("这一段：") &&
-        rendered.includes("新内容"),
-      rendered,
+      "renderTopicPrompt 单条截到 1200 字：第一条被截，后两条仍然在结果里",
+      Array.from(firstLine.replace("[用户] ", "")).length === CAPTURE_SAMPLE_CHARS &&
+        clippedRendered.includes("后面第二条") &&
+        clippedRendered.includes("后面第三条") &&
+        clippedRendered.includes("甲".repeat(CAPTURE_SAMPLE_CHARS)) &&
+        !clippedRendered.includes("甲".repeat(CAPTURE_SAMPLE_CHARS + 1)),
+      `first=${Array.from(firstLine).length} body=${clippedRendered.length}`,
+    );
+
+    const turnMessages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "悬空 u3" },
+    ];
+    eq(
+      "tailTurns：完整轮 / 悬空 user 不计轮但作引子追加在末尾 / 不足 n 有多少取多少 / n 大于总轮数",
+      [
+        tailTurns(turnMessages, 2).map((message) => message.content),
+        tailTurns(turnMessages, 1).map((message) => message.content),
+        tailTurns(turnMessages.slice(0, 2), 5).map((message) => message.content),
+        tailTurns(turnMessages, 99).map((message) => message.content),
+      ],
+      [
+        ["u1", "a1", "u2", "a2", "悬空 u3"],
+        ["u2", "a2", "悬空 u3"],
+        ["u1", "a1"],
+        ["u1", "a1", "u2", "a2", "悬空 u3"],
+      ],
+    );
+    const fullTurns = turnMessages.slice(0, 4);
+    eq(
+      "tailTurns 半轮：悬空 user 追加在末尾且不计轮数；没有悬空 user 时结果不变",
+      [
+        tailTurns(turnMessages, 2).map((message) => message.content),
+        countTurns(tailTurns(turnMessages, 2)),
+        tailTurns(fullTurns, 2).map((message) => message.content),
+      ],
+      [
+        ["u1", "a1", "u2", "a2", "悬空 u3"],
+        2,
+        ["u1", "a1", "u2", "a2"],
+      ],
     );
     eq(
       "captureDecision：空欠账不提交 / fixed 够轮数提交 / 不认识的档不提交",
@@ -8263,6 +8881,214 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         { commit: true, reason: "turns" },
         { commit: false, reason: "unknown-mode" },
       ],
+    );
+
+    let llmAsked = 0;
+    let discAsked = 0;
+    const tooFewLlmDecision = await captureDecision({
+      mode: "llm",
+      pendingTurns: 1,
+      turnsLimit: 1,
+      minTurns: 2,
+      ask: async () => {
+        llmAsked += 1;
+        return "different";
+      },
+    });
+    const tooFewDiscDecision = await captureDecision({
+      mode: "discriminator",
+      pendingTurns: 1,
+      turnsLimit: 1,
+      minTurns: 2,
+      ask: async () => {
+        discAsked += 1;
+        return "different";
+      },
+    });
+    eq(
+      "captureDecision 两档不足最少触发轮数 → too-few-turns 且 ask 一次都不调",
+      [
+        tooFewLlmDecision,
+        llmAsked,
+        tooFewDiscDecision,
+        discAsked,
+      ],
+      [
+        { commit: false, reason: "too-few-turns" },
+        0,
+        { commit: false, reason: "too-few-turns" },
+        0,
+      ],
+    );
+
+    // 「之前」为空：过了最少轮数就直接立基线，不调模型；不够轮数仍然不提交。
+    let baselineLlmAsked = 0;
+    let baselineDiscAsked = 0;
+    const baselineLlmDecision = await captureDecision({
+      mode: "llm",
+      pendingTurns: 2,
+      minTurns: 2,
+      previousEmpty: true,
+      ask: async () => {
+        baselineLlmAsked += 1;
+        return "same";
+      },
+    });
+    const baselineDiscDecision = await captureDecision({
+      mode: "discriminator",
+      pendingTurns: 2,
+      minTurns: 2,
+      previousEmpty: true,
+      ask: async () => {
+        baselineDiscAsked += 1;
+        return "same";
+      },
+    });
+    eq(
+      "captureDecision：「之前」为空且够最少轮数 → baseline 提交，两档都一次不问模型",
+      [
+        baselineLlmDecision,
+        baselineLlmAsked,
+        baselineDiscDecision,
+        baselineDiscAsked,
+      ],
+      [
+        { commit: true, reason: "baseline" },
+        0,
+        { commit: true, reason: "baseline" },
+        0,
+      ],
+    );
+    let emptyFewAsked = 0;
+    const emptyFewDecision = await captureDecision({
+      mode: "llm",
+      pendingTurns: 1,
+      minTurns: 2,
+      previousEmpty: true,
+      ask: async () => {
+        emptyFewAsked += 1;
+        return "different";
+      },
+    });
+    eq(
+      "captureDecision：「之前」为空但不够最少轮数 → too-few-turns，baseline 在它之后",
+      [emptyFewDecision, emptyFewAsked],
+      [{ commit: false, reason: "too-few-turns" }, 0],
+    );
+
+    // 兜底轮数：攒够就提交，不问模型；不够照旧问。
+    let maxLlmAsked = 0;
+    let maxDiscAsked = 0;
+    const maxLlmDecision = await captureDecision({
+      mode: "llm",
+      pendingTurns: 3,
+      turnsLimit: 3,
+      minTurns: 2,
+      ask: async () => {
+        maxLlmAsked += 1;
+        return "same";
+      },
+    });
+    const maxDiscDecision = await captureDecision({
+      mode: "discriminator",
+      pendingTurns: 3,
+      turnsLimit: 3,
+      minTurns: 2,
+      ask: async () => {
+        maxDiscAsked += 1;
+        return "same";
+      },
+    });
+    eq(
+      "captureDecision 两档攒够兜底轮数 → max-turns，ask 一次都不调",
+      [maxLlmDecision, maxLlmAsked, maxDiscDecision, maxDiscAsked],
+      [
+        { commit: true, reason: "max-turns" },
+        0,
+        { commit: true, reason: "max-turns" },
+        0,
+      ],
+    );
+
+    let belowLlmAsked = 0;
+    const belowSameDecision = await captureDecision({
+      mode: "llm",
+      pendingTurns: 2,
+      turnsLimit: 3,
+      minTurns: 2,
+      ask: async () => {
+        belowLlmAsked += 1;
+        return "same";
+      },
+    });
+    let belowDiscAsked = 0;
+    const belowDifferentDecision = await captureDecision({
+      mode: "discriminator",
+      pendingTurns: 2,
+      turnsLimit: 3,
+      minTurns: 2,
+      ask: async () => {
+        belowDiscAsked += 1;
+        return "different";
+      },
+    });
+    eq(
+      "captureDecision 没到兜底轮数照旧问模型：same → same-topic / different → topic",
+      [belowSameDecision, belowLlmAsked, belowDifferentDecision, belowDiscAsked],
+      [
+        { commit: false, reason: "same-topic" },
+        1,
+        { commit: true, reason: "topic" },
+        1,
+      ],
+    );
+
+    eq(
+      "captureDecision fixed 档不受兜底闸影响：够阈值 → turns / 不够 → below-limit",
+      [
+        await captureDecision({ mode: "fixed", pendingTurns: 3, turnsLimit: 3 }),
+        await captureDecision({ mode: "fixed", pendingTurns: 3, turnsLimit: 4 }),
+      ],
+      [
+        { commit: true, reason: "turns" },
+        { commit: false, reason: "below-limit" },
+      ],
+    );
+
+    let orderAsked = 0;
+    const baselineBeforeMax = await captureDecision({
+      mode: "llm",
+      pendingTurns: 3,
+      turnsLimit: 3,
+      minTurns: 2,
+      previousEmpty: true,
+      ask: async () => {
+        orderAsked += 1;
+        return "different";
+      },
+    });
+    eq(
+      "captureDecision 兜底在基线之后：previousEmpty 且已到阈值 → baseline，ask 不调",
+      [baselineBeforeMax, orderAsked],
+      [{ commit: true, reason: "baseline" }, 0],
+    );
+
+    // 游标里不再保留提交样本：键集合与源码都不该出现那个字段。
+    const sampleKey = ["lastCommit", "Sample"].join("");
+    const cursorCode = fs.readFileSync(
+      new URL("../src/memory/cursor.js", import.meta.url),
+      "utf8",
+    );
+    const smokeCode = fs.readFileSync(new URL(import.meta.url), "utf8");
+    eq(
+      "游标不再有提交样本字段：emptyCursor / normalizeCursor 的键集合里没有，cursor.js 与本文件源码里也搜不到",
+      [
+        Object.keys(emptyCursor()).includes(sampleKey),
+        Object.keys(normalizeCursor({ [sampleKey]: "x" })).includes(sampleKey),
+        cursorCode.includes(sampleKey),
+        smokeCode.includes(sampleKey),
+      ],
+      [false, false, false, false],
     );
     eq(
       "写回常量：题面 / 样本字数 / 判断超时 / maxTokens",
@@ -10052,6 +10878,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       effectiveMode: "fixed",
       missing: [],
       turns: "12",
+      contextTurns: "3",
+      minTurns: "2",
       serverFallback: false,
       idleSeconds: "600",
       model: "",
@@ -10059,6 +10887,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       prompt: "",
       modes: ["fixed", "llm", "discriminator"],
       turnsRange: [1, 100],
+      contextTurnsRange: [1, 20],
+      minTurnsRange: [1, 50],
       idleRange: [60, 86400],
     },
   );
@@ -10129,6 +10959,40 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         "http://judge:1",
         false,
       ],
+    );
+  }
+
+  // ---- 2.05 判据上下文 / 最少触发轮数：整单校验 + 合法写入读回 ----
+  {
+    const before = writes.length;
+    const invalidContext = await postConfig({ captureContextTurns: 0 });
+    eq(
+      "POST /capture-config 整单校验：captureContextTurns=0 → 400 且 config.set 一次都没调",
+      [invalidContext.status, invalidContext.body.ok, writes.length],
+      [400, false, before],
+    );
+    const invalidMin = await postConfig({ captureMinTurns: 99 });
+    eq(
+      "POST /capture-config 整单校验：captureMinTurns=99 → 400 且仍不写",
+      [invalidMin.status, invalidMin.body.ok, writes.length],
+      [400, false, before],
+    );
+
+    const valid = await postConfig({
+      captureContextTurns: "5",
+      captureMinTurns: 3,
+    });
+    const readBack = (await getConfig()).body;
+    eq(
+      "合法写入 captureContextTurns / captureMinTurns 后读回来一致（数字串）",
+      [
+        valid.status,
+        valid.body.ok,
+        valid.body.applied,
+        readBack.contextTurns,
+        readBack.minTurns,
+      ],
+      [200, true, ["captureContextTurns", "captureMinTurns"], "5", "3"],
     );
   }
 
@@ -10241,8 +11105,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           lastCommitCount: 2,
           lastCommitAt: "2026-11-11T02:00:00.000Z",
           lastCommitMessageCount: 9,
-          lastCommitSample: "上一段",
-          pendingTurns: 3,
+            pendingTurns: 3,
           serverPolicy: null,
         },
       },

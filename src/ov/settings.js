@@ -128,6 +128,19 @@ export const CAPTURE_COMMIT_TURNS_MIN = 1;
 export const CAPTURE_COMMIT_TURNS_MAX = 100;
 export const CAPTURE_COMMIT_TURNS_STEP = 1;
 
+/**
+ * 两档判断题的回看轮数与最少触发轮数。只对 llm / discriminator 有意义：
+ * fixed 档仍用 captureCommitTurns，不受 captureMinTurns 影响。
+ */
+export const CAPTURE_CONTEXT_TURNS_DEFAULT = 3;
+export const CAPTURE_CONTEXT_TURNS_MIN = 1;
+export const CAPTURE_CONTEXT_TURNS_MAX = 20;
+export const CAPTURE_CONTEXT_TURNS_STEP = 1;
+export const CAPTURE_MIN_TURNS_DEFAULT = 2;
+export const CAPTURE_MIN_TURNS_MIN = 1;
+export const CAPTURE_MIN_TURNS_MAX = 50;
+export const CAPTURE_MIN_TURNS_STEP = 1;
+
 /** 服务端兜底空闲秒数的默认值、边界与面板步长。 */
 export const CAPTURE_IDLE_SECONDS_DEFAULT = 600;
 export const CAPTURE_IDLE_SECONDS_MIN = 60;
@@ -144,6 +157,8 @@ export const DEFAULTS = {
   // 写回：提交策略、固定轮次、服务端兜底与两档判断各自要的配置。
   captureCommitMode: "fixed",
   captureCommitTurns: CAPTURE_COMMIT_TURNS_DEFAULT,
+  captureContextTurns: CAPTURE_CONTEXT_TURNS_DEFAULT,
+  captureMinTurns: CAPTURE_MIN_TURNS_DEFAULT,
   captureServerFallback: false,
   captureServerIdleSeconds: CAPTURE_IDLE_SECONDS_DEFAULT,
   captureModel: "",
@@ -414,6 +429,38 @@ export function normalizeCaptureCommitTurns(raw) {
 /** 写进配置的形状：数字串（与门槛 / 保留条数同一口径）。 */
 export function serializeCaptureCommitTurns(raw) {
   return String(normalizeCaptureCommitTurns(raw));
+}
+
+/** 判据回看的轮数：数字或数字串 → 1–20 的整数（四舍五入后夹边界）。 */
+export function normalizeCaptureContextTurns(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return CAPTURE_CONTEXT_TURNS_DEFAULT;
+  if (!Number.isFinite(value)) return CAPTURE_CONTEXT_TURNS_DEFAULT;
+  const rounded = Math.round(value);
+  return Math.min(CAPTURE_CONTEXT_TURNS_MAX, Math.max(CAPTURE_CONTEXT_TURNS_MIN, rounded));
+}
+
+/** 写进配置的形状：数字串。 */
+export function serializeCaptureContextTurns(raw) {
+  return String(normalizeCaptureContextTurns(raw));
+}
+
+/** 两档判断的最少触发轮数：数字或数字串 → 1–50 的整数（四舍五入后夹边界）。 */
+export function normalizeCaptureMinTurns(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return CAPTURE_MIN_TURNS_DEFAULT;
+  if (!Number.isFinite(value)) return CAPTURE_MIN_TURNS_DEFAULT;
+  const rounded = Math.round(value);
+  return Math.min(CAPTURE_MIN_TURNS_MAX, Math.max(CAPTURE_MIN_TURNS_MIN, rounded));
+}
+
+/** 写进配置的形状：数字串。 */
+export function serializeCaptureMinTurns(raw) {
+  return String(normalizeCaptureMinTurns(raw));
 }
 
 /** 兜底空闲秒数归一化：数字或数字串 → 60–86400 的整数（四舍五入后夹边界）。 */
@@ -1049,6 +1096,8 @@ export async function readSwitches(sdk) {
     captureCommitMode,
     captureEffectiveMode: captureCommitModeOf({ ...captureChoice, captureCommitMode }),
     captureCommitTurns: normalizeCaptureCommitTurns(await read(sdk, "captureCommitTurns")),
+    captureContextTurns: normalizeCaptureContextTurns(await read(sdk, "captureContextTurns")),
+    captureMinTurns: normalizeCaptureMinTurns(await read(sdk, "captureMinTurns")),
     captureServerFallback: (await read(sdk, "captureServerFallback")) === true,
     captureServerIdleSeconds: normalizeCaptureIdleSeconds(
       await read(sdk, "captureServerIdleSeconds"),

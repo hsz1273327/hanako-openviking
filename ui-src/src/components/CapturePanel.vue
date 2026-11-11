@@ -22,7 +22,9 @@ import {
 import { useConfig } from "../composables/useConfig.js";
 import { useModels } from "../composables/useModels.js";
 import {
+  CAPTURE_CONTEXT_RANGE,
   CAPTURE_IDLE_RANGE,
+  CAPTURE_MIN_RANGE,
   CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
@@ -49,6 +51,15 @@ const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
 // 判断题面只在两档判断里出现：固定轮次那一档不看题面。
 const promptOpen = computed(() => ["llm", "discriminator"].includes(state.form.captureCommitMode));
 const promptStatusText = computed(() => capturePromptStatusOf());
+
+// 同一个数字，两处语义：固定轮次档它是唯一判据，主题两档它是「模型一直说没换话题」
+// 时的兜底。标签与说明跟着档位走，不然「固定轮次」这个名字会把兜底用途藏起来。
+const commitTurnsLabel = computed(() => (promptOpen.value ? "兜底轮次" : "固定轮次"));
+const commitTurnsHint = computed(() =>
+  promptOpen.value
+    ? "模型一直判没有换话题时，攒够这么多轮强制提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。"
+    : "攒够这么多轮就提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。",
+);
 
 function onPromptInput(value) {
   touchCapturePrompt(value ?? "");
@@ -131,8 +142,9 @@ function onEnter(event) {
           <span class="field-hint">语言模型判断与判别模型判断共用这一句；留空 = 内置那句默认问法；判别模型的 yes/no 两条判定描述是内置的，这一格只决定怎么问。</span>
         </div>
 
-        <div v-if="state.form.captureCommitMode === 'fixed'" class="field">
-          <label for="captureCommitTurns">固定轮次</label>
+        <!-- 轮数格三档都在：固定轮次档是唯一判据，主题两档是兜底。 -->
+        <div class="field">
+          <label for="captureCommitTurns">{{ commitTurnsLabel }}</label>
           <NInputNumber
             size="small"
             style="width: 100%"
@@ -142,14 +154,56 @@ function onEnter(event) {
             :max="CAPTURE_TURNS_RANGE[1]"
             :step="1"
             placeholder="默认 12"
-            aria-label="固定轮次"
+            :aria-label="commitTurnsLabel"
             :input-props="{ id: 'captureCommitTurns' }"
             :value="typeof state.form.captureCommitTurns === 'number' ? state.form.captureCommitTurns : null"
             @focus="setFocus('captureCommitTurns')"
             @blur="setFocus('')"
             @update:value="(value) => setCaptureNumber('captureCommitTurns', value)"
           />
-          <span class="field-hint">一轮 = 一条用户消息加至少一条助手消息。范围 1–100。</span>
+          <span class="field-hint">{{ commitTurnsHint }}</span>
+        </div>
+
+        <div v-if="promptOpen" class="field">
+          <label for="captureContextTurns">上下文轮数</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="CAPTURE_CONTEXT_RANGE[0]"
+            :max="CAPTURE_CONTEXT_RANGE[1]"
+            :step="1"
+            placeholder="默认 3"
+            aria-label="上下文轮数"
+            :input-props="{ id: 'captureContextTurns' }"
+            :value="typeof state.form.captureContextTurns === 'number' ? state.form.captureContextTurns : null"
+            @focus="setFocus('captureContextTurns')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureNumber('captureContextTurns', value)"
+          />
+          <span class="field-hint">判断时回看几轮之前的对话，默认 3。范围 1–20。</span>
+        </div>
+
+        <div v-if="promptOpen" class="field">
+          <label for="captureMinTurns">最少触发轮数</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="CAPTURE_MIN_RANGE[0]"
+            :max="CAPTURE_MIN_RANGE[1]"
+            :step="1"
+            placeholder="默认 2"
+            aria-label="最少触发轮数"
+            :input-props="{ id: 'captureMinTurns' }"
+            :value="typeof state.form.captureMinTurns === 'number' ? state.form.captureMinTurns : null"
+            @focus="setFocus('captureMinTurns')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureNumber('captureMinTurns', value)"
+          />
+          <span class="field-hint">攒够这么多轮之前不判断、不提交，默认 2。范围 1–50。</span>
         </div>
 
         <div v-if="state.form.captureCommitMode === 'llm'" class="field">

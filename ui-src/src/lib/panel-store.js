@@ -74,7 +74,9 @@ import {
 } from "./recall-layers.js";
 import { summarizeChecks } from "./check-summary.js";
 import {
+  CAPTURE_CONTEXT_RANGE,
   CAPTURE_IDLE_RANGE,
+  CAPTURE_MIN_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   capturePromptDraft,
@@ -243,6 +245,8 @@ export function createPanelStore(deps = {}) {
       // 写回：机器级设置。轮次 / 秒数在界面上是数字，提交时服务端收数字或数字串。
       captureCommitMode: "fixed",
       captureCommitTurns: 12,
+      captureContextTurns: 3,
+      captureMinTurns: 2,
       captureServerFallback: false,
       captureServerIdleSeconds: 600,
       captureModel: "",
@@ -287,6 +291,8 @@ export function createPanelStore(deps = {}) {
   const CAPTURE_FORM_KEYS = [
     "captureCommitMode",
     "captureCommitTurns",
+    "captureContextTurns",
+    "captureMinTurns",
     "captureServerFallback",
     "captureServerIdleSeconds",
     "captureModel",
@@ -297,6 +303,8 @@ export function createPanelStore(deps = {}) {
   const captureDefaults = () => ({
     captureCommitMode: "fixed",
     captureCommitTurns: 12,
+    captureContextTurns: 3,
+    captureMinTurns: 2,
     captureServerFallback: false,
     captureServerIdleSeconds: 600,
     captureModel: "",
@@ -351,10 +359,14 @@ export function createPanelStore(deps = {}) {
     state.captureConfig = { mode, effectiveMode, missing };
 
     const turns = Number(out.turns);
+    const contextTurns = Number(out.contextTurns);
+    const minTurns = Number(out.minTurns);
     const idle = Number(out.idleSeconds);
     captureConfirmed = {
       captureCommitMode: mode,
       captureCommitTurns: Number.isFinite(turns) ? turns : 12,
+      captureContextTurns: Number.isFinite(contextTurns) ? contextTurns : 3,
+      captureMinTurns: Number.isFinite(minTurns) ? minTurns : 2,
       captureServerFallback: out.serverFallback === true,
       captureServerIdleSeconds: Number.isFinite(idle) ? idle : 600,
       captureModel: typeof out.model === "string" ? out.model : "",
@@ -752,6 +764,14 @@ export function createPanelStore(deps = {}) {
         state.form.captureCommitTurns === ""
           ? captureConfirmed.captureCommitTurns
           : state.form.captureCommitTurns,
+      captureContextTurns:
+        state.form.captureContextTurns === ""
+          ? captureConfirmed.captureContextTurns
+          : state.form.captureContextTurns,
+      captureMinTurns:
+        state.form.captureMinTurns === ""
+          ? captureConfirmed.captureMinTurns
+          : state.form.captureMinTurns,
       captureServerFallback: state.form.captureServerFallback === true,
       captureServerIdleSeconds:
         state.form.captureServerIdleSeconds === ""
@@ -772,7 +792,7 @@ export function createPanelStore(deps = {}) {
    * 整单提交 /capture-config。
    *
    * 乐观：setCaptureForm / setCaptureNumber 先把控件改掉，再发这一单。
-   * 成功用回包重新落值；失败退回上一次确认过的六项，并写进提示位。
+   * 成功用回包重新落值；失败退回上一次确认过的值，并写进提示位。
    * 一次只飞一单：飞行期间又改了，就等上一单收笔后再发。
    */
   let capturePending = false;
@@ -845,7 +865,14 @@ export function createPanelStore(deps = {}) {
     }
     const value = Number(text);
     if (!Number.isFinite(value)) return undefined;
-    const [min, max] = key === "captureServerIdleSeconds" ? CAPTURE_IDLE_RANGE : CAPTURE_TURNS_RANGE;
+    const [min, max] =
+      key === "captureServerIdleSeconds"
+        ? CAPTURE_IDLE_RANGE
+        : key === "captureContextTurns"
+          ? CAPTURE_CONTEXT_RANGE
+          : key === "captureMinTurns"
+            ? CAPTURE_MIN_RANGE
+            : CAPTURE_TURNS_RANGE;
     state.form[key] = Math.min(max, Math.max(min, Math.round(value)));
     return saveCapture();
   }

@@ -328,9 +328,21 @@
           },
           "captureCommitTurns": {
             "type": "string",
-            "title": "固定提交轮次",
-            "description": "固定轮次策略下攒够多少完整轮就提交，默认 12，范围 1 到 100。一轮 = 一条用户消息加至少一条助手消息。存数字串。",
+            "title": "提交轮次（固定 / 兜底）",
+            "description": "固定轮次策略下攒够多少完整轮就提交；语言模型判断 / 判别模型判断两档下，模型一直判没有换话题时攒够这么多轮强制提交。默认 12，范围 1 到 100。一轮 = 一条用户消息加至少一条助手消息。存数字串。",
             "default": "12"
+          },
+          "captureContextTurns": {
+            "type": "string",
+            "title": "上下文轮数",
+            "description": "语言模型判断 / 判别模型判断时，判据回看之前多少完整轮，默认 3，范围 1 到 20。固定轮次策略不使用这一项。存数字串。",
+            "default": "3"
+          },
+          "captureMinTurns": {
+            "type": "string",
+            "title": "最少触发轮数",
+            "description": "语言模型判断 / 判别模型判断时，待提交不足这么多完整轮就不调模型、不提交，默认 2，范围 1 到 50。固定轮次策略不使用这一项。存数字串。",
+            "default": "2"
           },
           "captureServerFallback": {
             "type": "boolean",

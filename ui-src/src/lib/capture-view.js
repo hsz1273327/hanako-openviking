@@ -47,8 +47,10 @@ export function capturePromptStatus(text) {
   return "已修改";
 }
 
-/** 固定轮次与空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
+/** 固定轮次 / 判据上下文 / 最少触发轮数与空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
 export const CAPTURE_TURNS_RANGE = Object.freeze([1, 100]);
+export const CAPTURE_CONTEXT_RANGE = Object.freeze([1, 20]);
+export const CAPTURE_MIN_RANGE = Object.freeze([1, 50]);
 export const CAPTURE_IDLE_RANGE = Object.freeze([60, 86400]);
 
 /** 三档标签与 manifest 的 ui.enumLabels 逐字一致。 */

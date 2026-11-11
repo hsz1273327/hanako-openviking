@@ -38,7 +38,6 @@ export function emptyCursor() {
     lastCommitCount: 0,
     lastCommitAt: null,
     lastCommitMessageCount: 0,
-    lastCommitSample: "",
     pendingTurns: 0,
     serverPolicy: null,
   };
@@ -64,7 +63,6 @@ export function normalizeCursor(value) {
     lastCommitCount: nonNegativeInt(raw.lastCommitCount),
     lastCommitAt: typeof raw.lastCommitAt === "string" && raw.lastCommitAt ? raw.lastCommitAt : null,
     lastCommitMessageCount: nonNegativeInt(raw.lastCommitMessageCount),
-    lastCommitSample: typeof raw.lastCommitSample === "string" ? raw.lastCommitSample : "",
     pendingTurns: nonNegativeInt(raw.pendingTurns),
     serverPolicy: normalizeServerPolicy(raw.serverPolicy),
   };
@@ -175,6 +173,40 @@ export function countTurns(messages) {
 }
 
 /**
+ * 取末尾最近 n 个完整轮。只在完整轮的起点处切，不从半轮中间切：
+ * 不足 n 轮时有多少取多少。
+ *
+ * 紧贴最后一条选中消息之后的悬空 user（user 写完、assistant 还没来）会作为「引子」
+ * 追加在结果末尾：提交点可能正好落在半轮，没有它「现在」就成了半截对话。
+ * 它本身不算一轮，countTurns 的轮数口径不受影响。
+ */
+export function tailTurns(messages, n) {
+  const list = Array.isArray(messages) ? messages : [];
+  const want = Math.floor(Number(n));
+  if (!Number.isFinite(want) || want <= 0) return [];
+
+  const spans = [];
+  let start = -1;
+  for (let index = 0; index < list.length; index += 1) {
+    const role = list[index]?.role;
+    if (role === "user") {
+      if (start < 0) start = index;
+    } else if (role === "assistant" && start >= 0) {
+      spans.push([start, index]);
+      start = -1;
+    }
+  }
+
+  const chosen = spans.slice(-want);
+  if (!chosen.length) return [];
+  const end = chosen[chosen.length - 1][1];
+  const out = list.slice(chosen[0][0], end + 1);
+  // 引子按时间顺序追加在末尾，紧接「现在」，不重排到前面。
+  if (list[end + 1]?.role === "user") out.push(list[end + 1]);
+  return out;
+}
+
+/**
  * 对账：把服务端会话状态与本地游标对成「这一轮该做什么」。
  *
  * 判据顺序不能换。commit 已经前进时先认回执，否则会把同一段再提交一次；
@@ -262,12 +294,11 @@ export function advanceCursor(cursor, { messages, lastEntryId } = {}) {
 }
 
 /** 提交成功之后的游标。 */
-export function markCommitted(cursor, { at, commitCount, sample } = {}) {
+export function markCommitted(cursor, { at, commitCount } = {}) {
   const next = normalizeCursor(cursor);
   next.lastCommitCount = nonNegativeInt(commitCount);
   next.lastCommitAt = typeof at === "string" && at ? at : null;
   next.lastCommitMessageCount = next.lastMessageCount;
-  next.lastCommitSample = typeof sample === "string" ? sample : "";
   next.pendingTurns = 0;
   return next;
 }

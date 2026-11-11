@@ -15,6 +15,7 @@ import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
   CAPTURE_COMMIT_TURNS_DEFAULT,
+  CAPTURE_MIN_TURNS_DEFAULT,
   readConnection,
   readSwitches,
 } from "../ov/settings.js";
@@ -29,6 +30,7 @@ import {
   normalizeCursor,
   parseSessionLines,
   reconcileCapture,
+  tailTurns,
 } from "./cursor.js";
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
 
@@ -43,19 +45,33 @@ function clipChars(text, max) {
   return chars.length <= max ? chars.join("") : chars.slice(0, max).join("");
 }
 
-function tailChars(text, max) {
-  const chars = Array.from(typeof text === "string" ? text : "");
-  return chars.length <= max ? chars.join("") : chars.slice(chars.length - max).join("");
+const ROLE_LABELS = Object.freeze({ user: "[用户]", assistant: "[助手]" });
+
+function renderMessages(messages) {
+  const out = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const label = ROLE_LABELS[message?.role];
+    if (!label) continue;
+    const text = typeof message?.content === "string" ? message.content : "";
+    out.push(`${label} ${clipChars(text, CAPTURE_SAMPLE_CHARS)}`);
+  }
+  return out;
 }
 
-/** 两段各自截断后拼成判据。题面（CAPTURE_TOPIC_QUESTION）由调用方另给。 */
-export function renderTopicPrompt(previous, current) {
+/**
+ * 按轮渲染判据：之前 / 现在各是一组带角色标记的消息行。
+ *
+ * 每条消息各自截到 CAPTURE_SAMPLE_CHARS，不做整段截断：前一条被截了，
+ * 后面的消息仍然要在题面里。判据不再整体截断，长度靠 captureMinTurns
+ * 与提交频率控制。
+ */
+export function renderTopicPrompt(previousMessages, currentMessages) {
   return [
-    "上一段：",
-    clipChars(previous, CAPTURE_SAMPLE_CHARS),
+    "之前：",
+    ...renderMessages(previousMessages),
     "",
-    "这一段：",
-    clipChars(current, CAPTURE_SAMPLE_CHARS),
+    "现在：",
+    ...renderMessages(currentMessages),
   ].join("\n");
 }
 
@@ -82,7 +98,14 @@ export function parseTopicAnswer(text) {
  *
  * 失败（ask 抛错 / 答案不认识）不算提交：宁可等下一轮，也不在语义边界之外切开。
  */
-export async function captureDecision({ mode, pendingTurns, turnsLimit, ask } = {}) {
+export async function captureDecision({
+  mode,
+  pendingTurns,
+  turnsLimit,
+  minTurns,
+  previousEmpty,
+  ask,
+} = {}) {
   const turns = Number(pendingTurns);
   if (!Number.isFinite(turns) || turns <= 0) return { commit: false, reason: "empty" };
 
@@ -96,6 +119,23 @@ export async function captureDecision({ mode, pendingTurns, turnsLimit, ask } = 
   }
 
   if (mode === "llm" || mode === "discriminator") {
+    // 两档判断先过最少轮数这道闸：不够就不问模型，也不提交。
+    // fixed 档完全不吃这一项，只看 turnsLimit。
+    const min = Number.isFinite(Number(minTurns))
+      ? Number(minTurns)
+      : CAPTURE_MIN_TURNS_DEFAULT;
+    if (turns < min) return { commit: false, reason: "too-few-turns" };
+    // 「之前」还是空的（全新建会话 / 刚从零开始）：没有可比的一段，直接立基线。
+    // baseline 是一次纯 POST /commit，不需要模型，所以放在 no-asker 之前。
+    // previousEmpty 缺省当 false，保持默认行为。
+    if (previousEmpty === true) return { commit: true, reason: "baseline" };
+    // 兜底：攒够轮数就无条件提交。模型一直说「没换话题」时不能无限拖下去，
+    // 也不该为了这一轮再花一次判断。放在 baseline 之后：先立基线，再兜底。
+    // turnsLimit 非有限数时与 fixed 档同一写法。
+    const commitLimit = Number.isFinite(Number(turnsLimit))
+      ? Number(turnsLimit)
+      : CAPTURE_COMMIT_TURNS_DEFAULT;
+    if (turns >= commitLimit) return { commit: true, reason: "max-turns" };
     if (typeof ask !== "function") return { commit: false, reason: "no-asker" };
     // ask 抛错直接往上抛：由 handler 记日志并当作「本轮不提交」。
     const answer = await ask();
@@ -143,12 +183,6 @@ function warnFailed(sdk, error) {
   }
 }
 
-function segmentText(messages) {
-  return (Array.isArray(messages) ? messages : [])
-    .map((message) => (typeof message?.content === "string" ? message.content : ""))
-    .join("\n");
-}
-
 function samePolicy(recorded, desired) {
   if (!recorded || typeof recorded !== "object") return false;
   return recorded.enabled === desired.enabled && recorded.idleSeconds === desired.idleSeconds;
@@ -166,12 +200,12 @@ function desiredPolicyOf(switches) {
  *   llm          宿主模型，题面 + 两段
  *   discriminator  判别模型 /v1/systemone，choice + criteria
  *
- * 还没提交过（lastCommitSample 为空）时直接给 null：没有「上一段」可比，
- * 这一轮不提交，等下一段有了参照再判断。ask 只有 verdict.mayCommit 为真时才会被调。
+ * 「之前」解析出 0 条消息时 ask 直接给 null（防身）：生产路径上这一步已经由
+ * captureDecision 的 baseline 分支接走，不会再走到这里。
+ * ask 只有 verdict.mayCommit 为真时才会被调。
  */
-function buildAsker({ mode, sdk, switches, cursor, segment }) {
-  const previous = cursor.lastCommitSample;
-  const current = segmentText(segment);
+function buildAsker({ mode, sdk, switches, previous, segment }) {
+  const current = Array.isArray(segment) ? segment : [];
   // 两档共用同一句题面：配置非空就用用户写的那句，否则用内置默认。
   // trim 只用来判空，不把用户那句本身 trim 掉。
   const question = String(switches.capturePrompt ?? "").trim()
@@ -180,7 +214,7 @@ function buildAsker({ mode, sdk, switches, cursor, segment }) {
 
   if (mode === "llm") {
     return async () => {
-      if (!previous) return null;
+      if (!previous.length) return null;
       const answer = await askModelChannel(sdk, {
         modelRef: switches.captureModel,
         prompt: `${question}\n\n${renderTopicPrompt(previous, current)}`,
@@ -193,7 +227,7 @@ function buildAsker({ mode, sdk, switches, cursor, segment }) {
 
   if (mode === "discriminator") {
     return async () => {
-      if (!previous) return null;
+      if (!previous.length) return null;
       const endpoint = `${String(switches.captureServiceUrl || "").replace(/\/+$/, "")}/v1/systemone`;
       const data = await postJson(
         sdk,
@@ -408,14 +442,29 @@ export function createCaptureHandler(sdk, deps = {}) {
         // 12. commit 判断。判据范围 = 上次提交之后的所有消息。
         const segment = messages.slice(cursor.lastCommitMessageCount, cursor.lastMessageCount);
         const pendingTurns = countTurns(segment);
+        // 「之前」= 上次提交之前、最近 captureContextTurns 个完整轮；悬空 user 作引子。
+        // 只算一次：既喂给 buildAsker，也用来判断「之前」是不是空的。
+        const previous = tailTurns(
+          messages.slice(0, cursor.lastCommitMessageCount),
+          switches.captureContextTurns,
+        );
+        const previousEmpty = previous.length === 0;
         let decision = { commit: false, reason: "empty" };
         if (verdict.mayCommit) {
-          const ask = buildAsker({ mode, sdk, switches, cursor, segment });
+          const ask = buildAsker({
+            mode,
+            sdk,
+            switches,
+            previous,
+            segment,
+          });
           try {
             decision = await captureDecision({
               mode,
               pendingTurns,
               turnsLimit: switches.captureCommitTurns,
+              minTurns: switches.captureMinTurns,
+              previousEmpty,
               ask,
             });
           } catch (error) {
@@ -432,7 +481,6 @@ export function createCaptureHandler(sdk, deps = {}) {
             cursor = markCommitted(cursor, {
               at: now(),
               commitCount: cursor.lastCommitCount + 1,
-              sample: tailChars(segmentText(segment), CAPTURE_SAMPLE_CHARS),
             });
             committed = true;
           } catch (error) {
