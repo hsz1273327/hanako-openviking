@@ -9,8 +9,17 @@
 //   --ok      #5d7d56                                     ui/assets/panel.css .pill.ok
 //   --bad     #b8564d                                     ui/assets/panel.css .pill.down
 //
-// 组件级覆盖只留两条：卡片圆角统一 6px；标签字号沿用原来的 12px（naive-ui
-// small 档默认 14px，放大字号等于破版）。
+// 组件级覆盖只留三条：卡片圆角统一 6px；标签字号沿用原来的 12px（naive-ui
+// small 档默认 14px，放大字号等于破版）；卡片标题字号从 naive 的 16px 降到 13px，
+// 字重 600。
+//
+// 为什么卡片标题要降：面板的层级是 tab 12px（一级，既有约定，字号不放大）/
+// 卡片标题（二级）/ 分组标题 12px（三级）/ 字段标签 11.5px / 提示字 10.5px。
+// 卡片标题吃 naive 默认值时是 16px，比 tab 高出四个像素——一跳两档，看着像另一个控件。
+// 降到 13px：只比 tab 高一级（字重 600 拉开分量），往下到分组标题 12px 再到 11.5 / 10.5
+// 逐级递减，整条链每一档都差一点点，不再有断崖。
+// 这一降是全局的：面板里所有卡片都是 size="small"，所以只改 titleFontSizeSmall，
+// 不在 panel.css 里给某一张卡再钉一套（两套会互相盖，改一处漏一处）。
 // 其余输入框、按钮、卡片、阴影一律用 naive-ui 自己的亮色默认值。
 //
 // 不引用宿主主题变量：App 的 iframe 里没有 --text / --accent 这类变量，
@@ -42,6 +51,9 @@ export const lightThemeOverrides = {
   Card: {
     borderRadius: "6px",
     colorEmbedded: "rgba(0, 0, 0, 0.035)",
+    // 卡片标题：层级倒挂的修正点，值写在一处（详见文件头的说明）。
+    titleFontSizeSmall: "13px",
+    titleFontWeight: "600",
   },
   // 标签栏是页头顶层导航，字号沿用原来手写版的 12px（small 档默认 14px）。
   Tabs: {

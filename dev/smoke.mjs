@@ -464,6 +464,15 @@ import {
   nextMemoryTab,
   normalizeMemoryTab,
 } from "../ui-src/src/lib/memory-tabs.js";
+// 记忆共享页三个子页签：纯逻辑 + 组件挂载方式。
+import {
+  CAPTURE_TAB_LABELS,
+  CAPTURE_TABS,
+  DEFAULT_CAPTURE_TAB,
+  capturePaneVisible,
+  nextCaptureTab,
+  normalizeCaptureTab,
+} from "../ui-src/src/lib/capture-tabs.js";
 // checks 归一化的唯一实现：路由与工具共用，这里直接验同一份输入过两处。
 import { normalizeChecks, normalizeReady } from "../src/ov/ready.js";
 // check 状态 -> 颜色档位，前端与详情行共用。
@@ -3513,6 +3522,157 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       uiCode(name).match(/重排/)?.[0],
     );
   }
+}
+// ================= 记忆共享页：三个子页签 =================
+{
+  eq(
+    "记忆共享页子页签的名字逐字是 写回 / 存量会话 / 话题",
+    CAPTURE_TABS.map((name) => CAPTURE_TAB_LABELS[name]),
+    ["写回", "存量会话", "话题"],
+  );
+  eq(
+    "记忆共享页默认停在写回；非法页名回落到写回",
+    [DEFAULT_CAPTURE_TAB, normalizeCaptureTab("bogus"), normalizeCaptureTab("topics")],
+    ["writeback", "writeback", "topics"],
+  );
+  eq(
+    "任一时刻只有一个子页可见（剩下两块只靠 hidden 隐藏，不卸载）",
+    CAPTURE_TABS.map((active) => CAPTURE_TABS.filter((name) => capturePaneVisible(active, name))),
+    [["writeback"], ["backfill"], ["topics"]],
+  );
+  eq(
+    "子页签键盘换页：左右循环 / Home / End / 其它键不接管",
+    [
+      nextCaptureTab("writeback", "ArrowRight"),
+      nextCaptureTab("topics", "ArrowRight"),
+      nextCaptureTab("writeback", "ArrowLeft"),
+      nextCaptureTab("backfill", "Home"),
+      nextCaptureTab("backfill", "End"),
+      nextCaptureTab("writeback", "Enter"),
+    ],
+    ["backfill", "writeback", "topics", "writeback", "topics", null],
+  );
+
+  const capturePanel = uiCode("components/CapturePanel.vue");
+  const capturePanes = [...capturePanel.matchAll(/<div\b[^>]*class="capture-pane"[^>]*>/g)].map(
+    (match) => match[0],
+  );
+  eq("记忆共享页里三个子页容器都在 DOM 里（不靠 v-if 重建组件）", capturePanes.length, 3);
+  check(
+    "三个子页容器都不用 v-if / v-show / 动态 :key 重建",
+    capturePanes.every((tag) => !/v-if|v-show|:key/.test(tag)),
+    capturePanes.join("\n"),
+  );
+  for (const [name, label] of [
+    ["writeback", "写回"],
+    ["backfill", "存量会话"],
+    ["topics", "话题"],
+  ]) {
+    check(
+      `子页签「${label}」始终挂载、只靠 hidden 切显隐`,
+      capturePanes.some(
+        (tag) =>
+          tag.includes(`id="capture-panel-${name}"`) &&
+          tag.includes(`:hidden="!capturePaneVisible(activeTab, '${name}')"`),
+      ),
+      capturePanel.slice(capturePanel.indexOf("capture-tabs-body"), capturePanel.indexOf("capture-tabs-body") + 1200),
+    );
+  }
+
+  // 三块内容分别挂在对应页签下：按 pane 的先后切段，看每一段里有谁。
+  const paneStarts = CAPTURE_TABS.map((name) =>
+    capturePanel.indexOf(`id="capture-panel-${name}"`),
+  );
+  const paneSlice = (name) => {
+    const index = CAPTURE_TABS.indexOf(name);
+    const from = paneStarts[index];
+    const to = index + 1 < paneStarts.length ? paneStarts[index + 1] : capturePanel.length;
+    return from < 0 ? "" : capturePanel.slice(from, to);
+  };
+  eq(
+    "三个子页容器按写回 → 存量会话 → 话题的顺序出现",
+    paneStarts.every((index) => index >= 0) &&
+      (paneStarts[0] < paneStarts[1] && paneStarts[1] < paneStarts[2]),
+    true,
+  );
+  check(
+    "写回页签下是写回卡（开关 / 强制轮数 / 提前提交那一组都在）",
+    [
+      'class="capture-card"',
+      'title="写回"',
+      'aria-label="写回"',
+      "captureCommitTurns",
+      "captureEarlyCommit",
+      "captureServerFallback",
+    ].every((needle) => paneSlice("writeback").includes(needle)),
+    paneSlice("writeback").slice(0, 400),
+  );
+  check(
+    "存量会话页签下只有 BackfillBlock，话题不在这一块里",
+    paneSlice("backfill").includes("<BackfillBlock") &&
+      !paneSlice("backfill").includes("<TopicBlock"),
+    paneSlice("backfill"),
+  );
+  check(
+    "话题页签下只有 TopicBlock，存量会话不在这一块里",
+    paneSlice("topics").includes("<TopicBlock") &&
+      !paneSlice("topics").includes("<BackfillBlock"),
+    paneSlice("topics"),
+  );
+  eq(
+    "两个子块各挂一次（BackfillBlock / TopicBlock 都不在条件分支里）",
+    ["BackfillBlock", "TopicBlock"].map(
+      (name) => (capturePanel.match(new RegExp(`<${name}\\b`, "g")) || []).length,
+    ),
+    [1, 1],
+  );
+  check(
+    "子页签栏是 NTabs line + small，样式走共用的 .sub-tabs，标记类能区分是哪一页",
+    capturePanel.includes('class="sub-tabs capture-tabs"') &&
+      capturePanel.includes('type="line"') &&
+      capturePanel.includes('size="small"') &&
+      capturePanel.includes('type="card"') === false,
+    capturePanel.slice(capturePanel.indexOf("<NTabs"), capturePanel.indexOf("<NTabs") + 300),
+  );
+  check(
+    "页签栏在页体之前、带 aria-label 与可区分的 data-capture-tab，标签文案来自 CAPTURE_TAB_LABELS",
+    capturePanel.indexOf("<NTabs") >= 0 &&
+      capturePanel.indexOf("<NTabs") < capturePanel.indexOf('class="capture-tabs-body"') &&
+      capturePanel.includes('aria-label="记忆共享分区"') &&
+      capturePanel.includes(':data-capture-tab="name"') &&
+      capturePanel.includes("CAPTURE_TAB_LABELS[name]"),
+    capturePanel.slice(capturePanel.indexOf("<NTabs"), capturePanel.indexOf("capture-tabs-body")),
+  );
+  check(
+    "默认页由 DEFAULT_CAPTURE_TAB 初始化，切页只改本地 activeTab",
+    capturePanel.includes("ref(DEFAULT_CAPTURE_TAB)") &&
+      capturePanel.includes('@update:value="selectTab"'),
+    capturePanel.slice(0, 1200),
+  );
+  const captureSelectTab = capturePanel.match(/function selectTab\(name\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  check(
+    "切子页签不触发任何读 / 写 / 重算",
+    captureSelectTab !== "" &&
+      ["refresh", "setCaptureForm", "setCaptureNumber", "flip", "patchControls", "post("].every(
+        (name) => captureSelectTab.includes(name) === false,
+      ),
+    captureSelectTab,
+  );
+}
+// ================= 卡片标题字号：全局只有那一处 13px =================
+{
+  // 这是一条数值约定（不是审美）：tab 12px → 卡片标题 13px → 分组标题 12px。
+  // 卡片标题吃 naive 默认值时是 16px，比上一级的 tab 还大，层级倒挂。
+  const cardTheme = lightThemeOverrides?.Card ?? {};
+  check(
+    "卡片标题字号规则：13px / 600，且面板样式里不再单独钉一套卡片标题字号",
+    cardTheme.titleFontSizeSmall === "13px" &&
+      cardTheme.titleFontWeight === "600" &&
+      [...panelCss().matchAll(/[^{}]*\.n-card-header__main[^{}]*\{[^}]*\}/g)].every(
+        (match) => !/font-size/.test(match[0]),
+      ),
+    `${JSON.stringify(cardTheme)} | ${[...panelCss().matchAll(/[^{}]*\.n-card-header__main[^{}]*\{[^}]*\}/g)].map((match) => match[0]).join(" ")}`,
+  );
 }
 // ================= 组装：精排之后把候选拼成一段上下文 =================
 {

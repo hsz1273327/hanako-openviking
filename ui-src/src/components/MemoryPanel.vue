@@ -89,9 +89,10 @@ function onTabKeydown(event, name) {
     记忆召回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改；写回在「记忆共享」页里改。
   </p>
 
-  <!-- 五个子页签：line + small，不叠第三层容器；aria 由这里补（n-tabs 不输出语义）。 -->
+  <!-- 五个子页签：line + small，不叠第三层容器；aria 由这里补（n-tabs 不输出语义）。
+       栏的样式是两页子页签共用的 .sub-tabs，memory-tabs 是这个栏自己的标记。 -->
   <NTabs
-    class="memory-tabs"
+    class="sub-tabs memory-tabs"
     type="line"
     size="small"
     role="tablist"

@@ -215,9 +215,8 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .service-card { flex: none; }
 
 /* naive 的卡片头部字号默认 16px（titleFontSizeSmall），比面板正文 12px 大两档。
-   字号不许放大：这里钉回 12px，字重沿用标题档的 600。
-   服务名本身没有单独样式，标题位（#header）的 span 就吃这一条。 */
-.service-card .n-card-header__main { font-size: 12px; font-weight: 600; }
+   字号不许放大：卡片标题统一在 theme.js 里降到 13px / 600（全局一份），
+   这里不再单独钉服务卡的卡头——两套字号会互相盖，改一处就漏一处。 */
 
 /* 卡片内字段的竖向节奏：字段之间 8px；网格内部交给 NGrid 的 y-gap（8px），
    不再叠一层。模型:超时 = 2:1 完全由 NGridItem 的 span 表达，
@@ -319,16 +318,17 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .rerank-card,
 .assemble-card { flex: 0 0 auto; }
 
-/* 子页签栏与主标签栏同一档：不参与纵向伸缩，字号 12px，焦点环自己画
-   （n-tabs 不输出键盘焦点样式，与 .tabs 那组规则保持一致）。 */
-.memory-tabs { flex: none; }
-.memory-tabs .n-tabs-nav { line-height: 1.2; }
-.memory-tabs .n-tabs-tab {
+/* 子页签栏（记忆搜索页 / 记忆共享页共用）：与主标签栏同一档，不参与纵向伸缩，
+   字号 12px，焦点环自己画（n-tabs 不输出键盘焦点样式，与 .tabs 那组规则保持一致）。
+   两页各带一个自己的标记类（memory-tabs / capture-tabs），样式只有这一套。 */
+.sub-tabs { flex: none; }
+.sub-tabs .n-tabs-nav { line-height: 1.2; }
+.sub-tabs .n-tabs-tab {
   font-size: 12px;
   line-height: 1.2;
   padding: 4px 0 6px;
 }
-.memory-tabs .n-tabs-tab:focus-visible {
+.sub-tabs .n-tabs-tab:focus-visible {
   outline: 2px solid rgba(128, 128, 128, 0.45);
   outline-offset: -2px;
 }
@@ -570,8 +570,27 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* ---------- 记忆共享页 ---------- */
 
+/* 子页签栏吃的是上面那套共用的 .sub-tabs（写回 / 存量会话 / 话题），这里只排页体：
+   body 与每个 pane 都要能收缩（min-height: 0），否则内容一长就把整页顶回去；
+   长表由 pane 自己滚，页签栏始终在头顶。与记忆页的 .memory-tabs-body / .memory-pane
+   同一种写法，只是名字不同（别让两个页的滚动点混成一个）。 */
+.capture-tabs-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.capture-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 /* 写回卡按内容定高，不吃余量。 */
-#panel-capture > .capture-card { flex: none; }
+.capture-pane > .capture-card { flex: none; }
 /* 上下单列：设置项一件一件往下看，两组之间用一道细线分开。 */
 .capture-card .capture-group + .capture-group {
   margin-top: 14px;
@@ -630,9 +649,9 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* ---------- 记忆共享页：存量会话 / 话题 ---------- */
 
-/* 两张卡都按内容定高，不吃余量（与写回卡同一条）；页面自己滚。 */
-#panel-capture > .backfill-card,
-#panel-capture > .topic-card { flex: none; }
+/* 两张卡都按内容定高，不吃余量（与写回卡同一条）；滚动交给各自的子页。 */
+.capture-pane > .backfill-card,
+.capture-pane > .topic-card { flex: none; }
 
 .backfill-progress {
   margin: 0 0 8px;
@@ -765,6 +784,10 @@ body { background-color: rgba(0, 0, 0, 0.02); }
      flex:1 拿不到确定高度，召回 / 精排的区内滚动会变成 0 高。 */
   .memory-tabs-body,
   .memory-pane { flex: 0 0 auto; min-height: 0; }
+  /* 记忆共享页同理：栏在、三块按内容定高、整页自己滚。 */
+  .capture-tabs-body,
+  .capture-pane { flex: 0 0 auto; min-height: 0; }
+  .capture-pane { overflow: visible; }
   #memory-panel-recall,
   #memory-panel-rerank { overflow: visible; }
   .peers-card,

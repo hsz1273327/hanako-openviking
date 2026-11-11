@@ -280,7 +280,21 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 
 ## 九、面板
 
-「记忆共享 → 写回」页：
+「记忆共享」页有三块内容（写回设置 / 存量会话 / 话题），竖排一页太长，拆成三个子页签。
+栏与「记忆搜索」页同一套（`NTabs` line + small，样式是 `panel.css` 的 `.sub-tabs`）：
+
+| 子页签 | 挂什么 |
+| --- | --- |
+| 写回（默认停在第一个） | 写回开关与下面这串提交策略 |
+| 存量会话 | 补交清单（见十二），`BackfillBlock` |
+| 话题 | 话题表（见十三），`TopicBlock` |
+
+三块**始终挂载**，切页签只切 `hidden`：补交进度、话题的编辑态与两块的提示位
+切走再切回来都还在。子页签是本页视图状态（`ui-src/src/lib/capture-tabs.js`），
+不进 store、不落 localStorage；页签的 `data-capture-tab` 与 `id` 前缀 `capture-`
+和记忆页的 `memory-` 分得开。
+
+写回页签下：
 
 - 写回开关（`autoCapture`）
 - 强制提交轮数（`captureCommitTurns`，默认 12，范围 1–100）：所有情况共用
@@ -458,7 +472,7 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 
 ## 十三、话题列表
 
-记忆共享页最下面的「话题」块读的是本机 `<dataDir>/topics.json`，与 OpenViking 服务端无关。
+记忆共享页「话题」子页签读的是本机 `<dataDir>/topics.json`，与 OpenViking 服务端无关。
 实时写回每提交一段、存量补交每补一段，都会在这张表上记一段；两条链路共用同一张表，
 所以补交不会给同一件事另开话题。折叠默认收起，展开只切显隐，不会重复读文件。
 
