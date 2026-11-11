@@ -24,6 +24,7 @@ import { transportFor } from "../ov/transport.js";
 import { effective, patchSession, readSession, sessionKeyOf } from "../state/session.js";
 import {
   advanceCursor,
+  batchMessagesByTurn,
   captureMessages,
   collectDelta,
   countTurns,
@@ -678,22 +679,28 @@ export function createCaptureHandler(sdk, deps = {}) {
             created_at: message.timestamp,
             ...(peer ? { peer_id: peer } : {}),
           }));
-          try {
-            await client.addMessages(sessionId, batch);
-            cursor = advanceCursor(cursor, delta);
-            wrote = batch.length;
-          } catch (error) {
-            warn(sdk, `write messages failed: ${errorText(error)}`);
-            return reportOf({
-              reconcile: verdict.state,
-              mode,
-              created,
-              patched,
-              written: cursor.lastMessageCount,
-              pendingTurns: cursor.pendingTurns,
-              error: errorText(error),
-            });
+          // messages/batch 一次最多 100 条；按轮切批，同一轮不跨批。
+          const batches = batchMessagesByTurn(batch);
+          for (const [index, part] of batches.entries()) {
+            try {
+              await client.addMessages(sessionId, part);
+            } catch (error) {
+              // 停在这一批：前面的批已经发出去了，游标不推进，下一轮按对账补。
+              const detail = `batch ${index + 1}/${batches.length}: ${errorText(error)}`;
+              warn(sdk, `write messages failed: ${detail}`);
+              return reportOf({
+                reconcile: verdict.state,
+                mode,
+                created,
+                patched,
+                written: cursor.lastMessageCount,
+                pendingTurns: cursor.pendingTurns,
+                error: detail,
+              });
+            }
           }
+          cursor = advanceCursor(cursor, delta);
+          wrote = batch.length;
         }
 
         // 11. 上次 commit 的回执：只更新本地计数，不许再提交一次。

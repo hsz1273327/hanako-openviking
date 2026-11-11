@@ -302,3 +302,44 @@ export function markCommitted(cursor, { at, commitCount } = {}) {
   next.pendingTurns = 0;
   return next;
 }
+
+/** 一批消息的上限：OpenViking 的 messages/batch 校验是「最多 100 条」。 */
+export const MESSAGE_BATCH_LIMIT = 100;
+
+/**
+ * 把要写回的消息切成 ≤limit 的批，且尽量不把同一轮劈成两批。
+ *
+ * 轮的边界按「role === user 开启新一轮」认；一个 user + 它后面的 assistant 消息算一轮。
+ * 单轮本身就超过 limit 时没有两全的办法，只能按 limit 硬切——否则整段发不出去。
+ */
+export function batchMessagesByTurn(messages, limit = MESSAGE_BATCH_LIMIT) {
+  const max = Number.isInteger(limit) && limit > 0 ? limit : MESSAGE_BATCH_LIMIT;
+  const list = (Array.isArray(messages) ? messages : []).filter(Boolean);
+  if (!list.length) return [];
+
+  const turns = [];
+  for (const message of list) {
+    if (!turns.length || message.role === "user") turns.push([message]);
+    else turns[turns.length - 1].push(message);
+  }
+
+  const batches = [];
+  let current = [];
+  const flush = () => {
+    if (current.length) batches.push(current);
+    current = [];
+  };
+  for (const turn of turns) {
+    if (turn.length > max) {
+      flush();
+      for (let index = 0; index < turn.length; index += max) {
+        batches.push(turn.slice(index, index + max));
+      }
+      continue;
+    }
+    if (current.length + turn.length > max) flush();
+    current.push(...turn);
+  }
+  flush();
+  return batches;
+}

@@ -363,6 +363,7 @@ import {
   tailTurns,
   reconcileCapture,
   captureCounts,
+  batchMessagesByTurn,
 } from "../src/memory/cursor.js";
 import {
   CAPTURE_TOPIC_QUESTION,
@@ -7724,6 +7725,34 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       normalizeCursor({ lastEntryId: "a4", lastMessageCount: 4 }),
     );
     eq("没有新消息时游标不动", [stale.messages.length, stale.lastEntryId], [0, "a4"]);
+    const many = [];
+    for (let index = 0; index < 60; index += 1) {
+      many.push({ id: `u${index}`, role: "user", content: "q" });
+      many.push({ id: `a${index}`, role: "assistant", content: "a" });
+      many.push({ id: `b${index}`, role: "assistant", content: "b" });
+    }
+    const parts = batchMessagesByTurn(many);
+    eq(
+      "分批：每批 ≤100、按轮边界切（第二批起都以 user 开头）、一条不少",
+      [
+        parts.length,
+        parts.every((part) => part.length <= 100),
+        parts.slice(1).every((part) => part[0].role === "user"),
+        parts.reduce((sum, part) => sum + part.length, 0),
+        parts.map((part) => part.length),
+      ],
+      [2, true, true, 180, [99, 81]],
+    );
+    const bigTurn = [{ role: "user", content: "q" }];
+    for (let index = 0; index < 150; index += 1) {
+      bigTurn.push({ role: "assistant", content: `a${index}` });
+    }
+    const bigParts = batchMessagesByTurn(bigTurn);
+    eq(
+      "单轮超过上限：按上限硬切，不丢消息、不发出空批",
+      [bigParts.length, bigParts.map((part) => part.length), bigParts.flat().length, batchMessagesByTurn([])],
+      [2, [100, 51], 151, []],
+    );
     eq(
       "countTurns：user 后面至少有一条 assistant 才算一轮",
       [

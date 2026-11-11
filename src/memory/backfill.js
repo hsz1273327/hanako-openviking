@@ -21,6 +21,7 @@ import { patchSession, readSession, sessionKeyOf } from "../state/session.js";
 import { commitSegment } from "./capture.js";
 import { forEachSessionLine, listSessionFiles } from "./session-reader.js";
 import {
+  batchMessagesByTurn,
   countTurns,
   isCaptureMessage,
   messageTextOf,
@@ -629,13 +630,18 @@ export function createBackfillController(ctx, deps = {}) {
       });
     }
     if (batch.length) {
-      try {
-        await client.addMessages(entry.sessionId, batch);
-      } catch (error) {
-        // 写入失败：游标一步都不动，下次重试这一段。
-        warnLine(logger, `write messages failed: ${errorText(error)}`);
-        status.error = errorText(error);
-        return;
+      // 与实时写回同一条上限：每批 ≤100 条，按轮切，同一轮不跨批。
+      const batches = batchMessagesByTurn(batch);
+      for (const [index, part] of batches.entries()) {
+        try {
+          await client.addMessages(entry.sessionId, part);
+        } catch (error) {
+          // 写入失败：游标一步都不动，下次重试这一段。
+          const detail = `batch ${index + 1}/${batches.length}: ${errorText(error)}`;
+          warnLine(logger, `write messages failed: ${detail}`);
+          status.error = detail;
+          return;
+        }
       }
     }
 
