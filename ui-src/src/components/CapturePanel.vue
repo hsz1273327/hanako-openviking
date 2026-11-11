@@ -41,6 +41,7 @@ import {
   CAPTURE_IDLE_RANGE,
   CAPTURE_MIN_RANGE,
   CAPTURE_PROMPT_MAX,
+  CAPTURE_TEMPLATE_MAX,
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
 } from "../lib/capture-view.js";
@@ -57,6 +58,10 @@ const {
   setCapturePrompt,
   resetCapturePrompt,
   capturePromptStatusOf,
+  touchCaptureTemplate,
+  setCaptureTemplate,
+  resetCaptureTemplate,
+  captureTemplateStatusOf,
 } = useConfig();
 const { options } = useModels();
 
@@ -91,6 +96,7 @@ const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
 // 提前提交打开后，判断方式与它的上下文才有意义。
 const earlyOpen = computed(() => state.form.captureEarlyCommit === true);
 const promptStatusText = computed(() => capturePromptStatusOf());
+const templateStatusText = computed(() => captureTemplateStatusOf());
 
 function onPromptInput(value) {
   touchCapturePrompt(value ?? "");
@@ -98,6 +104,14 @@ function onPromptInput(value) {
 
 function onPromptChange(value) {
   setCapturePrompt(value ?? "");
+}
+
+function onTemplateInput(value) {
+  touchCaptureTemplate(value ?? "");
+}
+
+function onTemplateChange(value) {
+  setCaptureTemplate(value ?? "");
 }
 
 function onServiceUrlInput(value) {
@@ -296,6 +310,28 @@ function onEnter(event) {
                 @change="onPromptChange"
               />
               <span class="field-hint">提前提交时共用这一句，留空 = 内置那句默认问法。判别模型的选项由话题表自动生成，这一格只决定怎么问。</span>
+            </div>
+
+            <!-- 题面骨架：五个占位符；缺 {{current}} 会被判无效并回退内置模板。 -->
+            <div v-if="earlyOpen" class="field">
+              <div class="prompt-head">
+                <label for="captureTemplate">题面骨架</label>
+                <span id="captureTemplateStatus" class="prompt-status">{{ templateStatusText }}</span>
+                <NButton id="captureResetTemplate" size="small" quaternary @click="resetCaptureTemplate()">恢复默认</NButton>
+              </div>
+              <NInput
+                type="textarea"
+                size="small"
+                :autosize="{ minRows: 6, maxRows: 12 }"
+                :maxlength="CAPTURE_TEMPLATE_MAX"
+                :input-props="{ id: 'captureTemplate', spellcheck: 'false' }"
+                :value="state.form.captureTemplate"
+                @focus="setFocus('captureTemplate')"
+                @blur="setFocus('')"
+                @update:value="onTemplateInput"
+                @change="onTemplateChange"
+              />
+              <span class="field-hint" v-pre>占位符：{{question}} 题面、{{candidates}} 已有话题、{{previous}} 之前对话、{{current}} 当前对话、{{format}} 答案格式。必须包含 {{current}}，否则回退内置模板并记一条警告。</span>
             </div>
 
             <div v-if="earlyOpen && state.form.captureEarlyJudge === 'llm'" class="field">

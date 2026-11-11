@@ -304,17 +304,24 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
   - 上下文轮数（`captureContextTurns`，默认 3，范围 1–20）
   - 最少触发轮数（`captureMinTurns`，默认 2，范围 1–50）
   - 判断题面（`capturePrompt`，留空 = 内置那句默认问法）
+  - 题面骨架（`captureTemplate`，留空 = 内置五段式模板）
   - 判断模型（`captureModel`，仅语言模型）或判别服务地址（`captureServiceUrl`，仅判别模型）
 - 服务端兜底：开关与空闲秒数
 
-默认值不落库（`capturePrompt` / `gatePrompt` / `gateContextPrompt` / `rerankPrompt` /
-`gateDecisionPrompt` / `rerankSystemonePrompt` 六个键同一规则）：写入时，值等于内置默认
+默认值不落库（`capturePrompt` / `captureTemplate` / `gatePrompt` / `gateContextPrompt` /
+`rerankPrompt` / `gateDecisionPrompt` / `rerankSystemonePrompt` 七个键同一规则）：写入时，值等于内置默认
 （含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由 App 在 `agent/before-start`
 与 `provider/before-request` 两处无状态扫描，命中的改写成空串。没有标记文件、没有版本号：
 同一份配置重复跑是幂等的，第二次零写入；值不是非空字符串时一律不动，单个键失败只记日志，
 下次再试。旧版留下的 `<dataDir>/prompt-defaults.json` 会被顺手删掉。空串在运行时表示用内置默认；
 `gateDecisionPrompt` 也一样（空 = 用默认，不再是「没有判据」），要关掉判断请切 `recallGate`，
 不要靠清空提示词。
+
+`captureTemplate` 是题面骨架，五个占位符：`{{question}}` 题面、`{{candidates}}` 已有话题
+（为空渲染成「（无）」）、`{{previous}}` 之前的对话、`{{current}}` 当前对话、`{{format}}` 答案
+格式（为空时整行连同前面的空行一起去掉）。`{{previous}}` / `{{current}}` 为空时那一行不留空行。
+模板里没有 `{{current}}` 判无效：回退内置模板并记一条 warn（只记一次，不每轮刷）。替换是单次
+展开，占位符的值里再写 `{{xxx}}` 不会被二次替换。
 
 老配置里存着的 `captureCommitMode` 不再参与读取，读不到就是没有；提前提交一律只看上面两个键。
 

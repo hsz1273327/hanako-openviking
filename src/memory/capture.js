@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
-import { CAPTURE_TOPIC_QUESTION } from "../ov/prompt-defaults.js";
+import { CAPTURE_TOPIC_QUESTION, DEFAULT_CAPTURE_TEMPLATE } from "../ov/prompt-defaults.js";
 import {
   CAPTURE_COMMIT_TURNS_DEFAULT,
   CAPTURE_MIN_TURNS_DEFAULT,
@@ -79,8 +79,9 @@ function renderMessages(messages) {
 /**
  * 候选题面：先问属于哪个，再列已有话题，最后给「之前 / 现在」两段上下文。
  *
- * 每条消息各自截到 CAPTURE_SAMPLE_CHARS，不做整段截断：前一条被截了，
- * 后面的消息仍然要在题面里。
+ * 骨架由 captureTemplate 决定（默认见 DEFAULT_CAPTURE_TEMPLATE），五个占位符单次替换：
+ * 值里再出现 {{xxx}} 不会被二次展开。format 为空时，{{format}} 那一行连同前面的空行一起去掉。
+ * 每条消息各自截到 CAPTURE_SAMPLE_CHARS，不做整段截断。
  */
 export function renderTopicPrompt(
   previousMessages,
@@ -88,25 +89,55 @@ export function renderTopicPrompt(
   candidates = [],
   question = CAPTURE_TOPIC_QUESTION,
   format = CAPTURE_TOPIC_FORMAT,
+  template = DEFAULT_CAPTURE_TEMPLATE,
 ) {
   const list = Array.isArray(candidates) ? candidates : [];
-  const lines = [
-    String(question || CAPTURE_TOPIC_QUESTION),
-    "",
-    "已有话题：",
-    ...(list.length
-      ? list.map((topic, index) => `[${index + 1}] ${topic.label} —— ${topic.summary}`)
-      : ["（无）"]),
-    "",
-    "之前（供参考）：",
-    ...renderMessages(previousMessages),
-    "",
-    "对话：",
-    ...renderMessages(currentMessages),
-  ];
-  // 答案格式是给生成式模型的；choice 题的答案形状由 questions 决定，传空串就不追加。
-  if (format) lines.push("", String(format));
-  return lines.join("\n");
+  const values = {
+    question: String(question || CAPTURE_TOPIC_QUESTION),
+    candidates: list.length
+      ? list.map((topic, index) => `[${index + 1}] ${topic.label} —— ${topic.summary}`).join("\n")
+      : "（无）",
+    previous: renderMessages(previousMessages).join("\n"),
+    current: renderMessages(currentMessages).join("\n"),
+    format: format ? String(format) : "",
+  };
+  let tpl = String(template || DEFAULT_CAPTURE_TEMPLATE);
+  // 空段落不留一行空行：占位符独占一行且值为空时，连它前面那个换行一起去掉。
+  for (const key of ["previous", "current"]) {
+    if (!values[key]) tpl = tpl.split(`\n{{${key}}}`).join("");
+  }
+  if (!values.format) {
+    // 跟旧的 if (format) 一致：没有格式说明就不留那一段和它前面的空行。
+    tpl = tpl.replace(/\n\n\{\{format\}\}(?=\n|$)/g, "").replace(/\{\{format\}\}\n?/g, "");
+  }
+  return tpl.replace(/\{\{(\w+)\}\}/g, (match, key) =>
+    Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match,
+  );
+}
+
+// 模板缺 {{current}} 时只在第一次回退时警告，不每轮刷屏。
+let templateFallbackWarned = false;
+
+/** 测试用：让「只警告一次」重新生效。 */
+export function resetCaptureTemplateWarning() {
+  templateFallbackWarned = false;
+}
+
+/**
+ * 取这一轮该用的骨架。空串 = 内置默认；缺 {{current}} 的模板判无效，回退内置并警告一次。
+ * 模板写坏了、模型只看到一堆空话，判断会悄悄失效——所以这里不能静默。
+ */
+export function resolveCaptureTemplate(switches, sdk) {
+  const raw = typeof switches?.captureTemplate === "string" ? switches.captureTemplate : "";
+  if (!raw) return DEFAULT_CAPTURE_TEMPLATE;
+  if (!raw.includes("{{current}}")) {
+    if (!templateFallbackWarned) {
+      templateFallbackWarned = true;
+      warn(sdk, "captureTemplate 缺少 {{current}}，已回退内置模板");
+    }
+    return DEFAULT_CAPTURE_TEMPLATE;
+  }
+  return raw;
 }
 
 /** 去掉 markdown 装饰（加粗 / 斜体 / 代码 / 引用），保留正文。 */
@@ -353,7 +384,8 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
   const question = String(switches.capturePrompt ?? "").trim()
     ? switches.capturePrompt
     : CAPTURE_TOPIC_QUESTION;
-  const rendered = renderTopicPrompt(previous, current, pool, question);
+  const template = resolveCaptureTemplate(switches, sdk);
+  const rendered = renderTopicPrompt(previous, current, pool, question, undefined, template);
 
   if (!pool.length) return async () => fallback();
 
@@ -388,7 +420,7 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
         {
           model: switches.systemoneServiceModel,
           // choice 题的答案形状由 questions.q 决定，题面末尾不能带「只输出这两行」那类格式说明。
-          state: { type: "text", content: renderTopicPrompt(previous, current, pool, question, "") },
+          state: { type: "text", content: renderTopicPrompt(previous, current, pool, question, "", template) },
           questions: {
             q: {
               type: "choice",

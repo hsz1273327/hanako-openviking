@@ -20,6 +20,7 @@ import {
   CAPTURE_MIN_TURNS_MAX,
   CAPTURE_MIN_TURNS_MIN,
   CAPTURE_PROMPT_MAX,
+  CAPTURE_TEMPLATE_MAX,
   CAPTURE_TOPIC_CANDIDATES_MAX,
   CAPTURE_TOPIC_CANDIDATES_MIN,
   CAPTURE_TOPIC_SCOPES,
@@ -68,6 +69,7 @@ async function project(ctx) {
     model: switches.captureModel,
     serviceUrl: switches.captureServiceUrl,
     prompt: switches.capturePrompt,
+    template: switches.captureTemplate,
     judges: [...CAPTURE_EARLY_JUDGES],
     scopes: [...CAPTURE_TOPIC_SCOPES],
     turnsRange: [CAPTURE_COMMIT_TURNS_MIN, CAPTURE_COMMIT_TURNS_MAX],
@@ -254,6 +256,20 @@ export default function registerCaptureRoutes(app, ctx) {
         );
       }
       changes.push(["capturePrompt", promptForStorage("capturePrompt", body.capturePrompt)]);
+    }
+
+    // 题面骨架模板：同样的规则（非字符串拒、按字符限长、写时归一）。
+    if (has(body, "captureTemplate")) {
+      if (typeof body.captureTemplate !== "string") {
+        return c.json({ ok: false, error: "captureTemplate 必须是字符串" }, 400);
+      }
+      if (Array.from(body.captureTemplate).length > CAPTURE_TEMPLATE_MAX) {
+        return c.json(
+          { ok: false, error: `captureTemplate 最多 ${CAPTURE_TEMPLATE_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["captureTemplate", promptForStorage("captureTemplate", body.captureTemplate)]);
     }
 
     // 认不出的键一律忽略：前端半新半旧不该整单失败。

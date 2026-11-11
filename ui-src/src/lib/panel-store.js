@@ -80,9 +80,13 @@ import {
   CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
+  DEFAULT_CAPTURE_TEMPLATE,
   capturePromptDraft,
   capturePromptStatus,
+  captureTemplateDraft,
+  captureTemplateStatus,
   normalizeCapturePrompt,
+  normalizeCaptureTemplate,
 } from "./capture-view.js";
 import {
   PEER_EMPTY,
@@ -257,6 +261,7 @@ export function createPanelStore(deps = {}) {
       captureServiceUrl: "",
       // 写回判断题面：初始坐默认那段的草稿，首次 refresh 后以服务端投影为准。
       capturePrompt: "",
+      captureTemplate: "",
     },
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
@@ -290,6 +295,8 @@ export function createPanelStore(deps = {}) {
     focus: "",
     // 用户动过判断题面之后，刷新不再拿默认文本去盖他（包括他故意清空的那次）。
     capturePromptTouched: false,
+    // 题面模板同一个道理：用户动过之后，刷新不再拿默认盖他。
+    captureTemplateTouched: false,
   };
 
   const CAPTURE_FORM_KEYS = [
@@ -305,6 +312,7 @@ export function createPanelStore(deps = {}) {
     "captureModel",
     "captureServiceUrl",
     "capturePrompt",
+    "captureTemplate",
   ];
 
   const captureDefaults = () => ({
@@ -320,6 +328,7 @@ export function createPanelStore(deps = {}) {
     captureModel: "",
     captureServiceUrl: "",
     capturePrompt: "",
+    captureTemplate: "",
   });
   // 上一次服务端确认过的 form（回滚目标）。与 state.captureConfig 互补：
   // 后者只留回落提示需要的三项，这里留七个控件的值。
@@ -386,6 +395,7 @@ export function createPanelStore(deps = {}) {
       captureModel: typeof out.model === "string" ? out.model : "",
       captureServiceUrl: typeof out.serviceUrl === "string" ? out.serviceUrl : "",
       capturePrompt: normalizeCapturePrompt(out.prompt),
+      captureTemplate: normalizeCaptureTemplate(out.template),
     };
 
     for (const key of CAPTURE_FORM_KEYS) {
@@ -396,6 +406,13 @@ export function createPanelStore(deps = {}) {
         state.form.capturePrompt = capturePromptDraft(
           captureConfirmed.capturePrompt,
           state.capturePromptTouched,
+        );
+        continue;
+      }
+      if (key === "captureTemplate") {
+        state.form.captureTemplate = captureTemplateDraft(
+          captureConfirmed.captureTemplate,
+          state.captureTemplateTouched,
         );
         continue;
       }
@@ -801,6 +818,7 @@ export function createPanelStore(deps = {}) {
       captureServiceUrl: state.form.captureServiceUrl,
       // 空串要原样发：空 = 用内置默认，是有意义的值，不能像数字那样替换成已确认值。
       capturePrompt: state.form.capturePrompt,
+      captureTemplate: state.form.captureTemplate,
     };
   }
 
@@ -874,6 +892,26 @@ export function createPanelStore(deps = {}) {
 
   function capturePromptStatusOf() {
     return capturePromptStatus(state.form.capturePrompt);
+  }
+
+  /** 题面模板：与判断题面同一套收笔方式（输入只改草稿，失焦 / 回车才提交）。 */
+  function touchCaptureTemplate(value) {
+    state.captureTemplateTouched = true;
+    state.form.captureTemplate = value;
+  }
+
+  function setCaptureTemplate(value) {
+    state.form.captureTemplate = value;
+    return saveCapture();
+  }
+
+  function resetCaptureTemplate() {
+    touchCaptureTemplate(DEFAULT_CAPTURE_TEMPLATE);
+    return saveCapture();
+  }
+
+  function captureTemplateStatusOf() {
+    return captureTemplateStatus(state.form.captureTemplate);
   }
 
   /** 数字格：null / 空 → 空串且不提交；其余收敛到该键的范围后再整单提交。 */
@@ -1397,6 +1435,10 @@ export function createPanelStore(deps = {}) {
     setCapturePrompt,
     resetCapturePrompt,
     capturePromptStatusOf,
+    touchCaptureTemplate,
+    setCaptureTemplate,
+    resetCaptureTemplate,
+    captureTemplateStatusOf,
     saveCapture,
     setDecisionThreshold,
     setGateContextTurns,

@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_TEMPLATE,
   CAPTURE_TOPIC_QUESTION,
   DEFAULT_GATE_PROMPT,
   DEFAULT_RERANK_PROMPT,
@@ -185,6 +186,7 @@ export const DEFAULTS = {
   captureServiceUrl: "",
   // 写回判断题面：空串 = 用内置那句默认问法（见 src/memory/capture.js）。
   capturePrompt: "",
+  captureTemplate: "",
   // 记忆搜索总开关：只停读这一半，写回不受影响。
   recallEnabled: true,
   readOnly: false,
@@ -237,6 +239,7 @@ export const DEFAULTS = {
 /** 六个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
 const PROMPT_DEFAULT_VALUES = Object.freeze({
   capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
+  captureTemplate: Object.freeze([DEFAULT_CAPTURE_TEMPLATE]),
   gatePrompt: Object.freeze([DEFAULT_GATE_PROMPT, ...GATE_PROMPT_RETIRED_DEFAULTS]),
   gateContextPrompt: Object.freeze([DEFAULT_GATE_CONTEXT_PROMPT]),
   rerankPrompt: Object.freeze([DEFAULT_RERANK_PROMPT]),
@@ -462,6 +465,9 @@ export const RERANK_PROMPT_MAX = 2000;
  */
 export const CAPTURE_PROMPT_MAX = GATE_PROMPT_MAX;
 
+/** 题面骨架模板的字符上限：比题面宽一些，够写完整的五段式。 */
+export const CAPTURE_TEMPLATE_MAX = 4000;
+
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
 function oneOf(raw, allowed, fallback) {
   return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
@@ -502,6 +508,11 @@ export function normalizeQueryChars(raw) {
  * 与 normalizeGatePrompt 同一口径，只是上限常量换成写回那一份；不 trim——
  * 用户那句原样留着，判空是运行时（buildClassifier）的事。
  */
+export function normalizeCaptureTemplate(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, CAPTURE_TEMPLATE_MAX).join("");
+}
+
 export function normalizeCapturePrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, CAPTURE_PROMPT_MAX).join("");
@@ -1259,6 +1270,8 @@ export async function readSwitches(sdk) {
     // 写回判断题面：提前提交时共用这一句，空串 = 运行时不变量那句默认问法。
     // 读取路径不做转换：盘上是什么就读什么；默认值不落库由写入端与启动迁移负责。
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
+    // 题面骨架：空串 = 内置默认模板；少了 {{current}} 由运行时判无效并回退。
+    captureTemplate: normalizeCaptureTemplate(await read(sdk, "captureTemplate")),
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,
     readOnly: await read(sdk, "readOnly"),

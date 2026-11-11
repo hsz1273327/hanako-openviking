@@ -70,3 +70,22 @@ export const CAPTURE_TOPIC_QUESTION =
 export const CAPTURE_PROMPT_RETIRED_DEFAULTS = Object.freeze([
   "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。",
 ]);
+
+/**
+ * 话题判断题的骨架模板。占位符：{{question}} / {{candidates}} / {{previous}} / {{current}} / {{format}}。
+ * 空串 = 用这一份；{{current}} 缺失的模板在运行时会被判无效并回退到这里。
+ */
+export const DEFAULT_CAPTURE_TEMPLATE = [
+  "{{question}}",
+  "",
+  "已有话题：",
+  "{{candidates}}",
+  "",
+  "之前（供参考）：",
+  "{{previous}}",
+  "",
+  "对话：",
+  "{{current}}",
+  "",
+  "{{format}}",
+].join("\n");

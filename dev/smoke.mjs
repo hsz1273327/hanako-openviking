@@ -166,6 +166,7 @@ import {
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_PROMPT_MAX,
+  CAPTURE_TEMPLATE_MAX,
   normalizeCaptureEarlyCommit,
   normalizeCaptureEarlyJudge,
   normalizeCaptureTopicScope,
@@ -372,6 +373,8 @@ import {
   CAPTURE_ASK_TIMEOUT_MS,
   CAPTURE_ASK_MAX_TOKENS,
   renderTopicPrompt,
+  resetCaptureTemplateWarning,
+  resolveCaptureTemplate,
   parseTopicAnswer,
   deriveTopicTitle,
   captureTags,
@@ -408,6 +411,7 @@ import readline from "node:readline";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_TEMPLATE,
   GATE_PROMPT_RETIRED_DEFAULTS,
 } from "../src/ov/prompt-defaults.js";
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
@@ -443,6 +447,8 @@ import {
   CAPTURE_CONTEXT_RANGE,
   CAPTURE_MIN_RANGE,
   CAPTURE_PROMPT_MAX as UI_CAPTURE_PROMPT_MAX,
+  CAPTURE_TEMPLATE_MAX as UI_CAPTURE_TEMPLATE_MAX,
+  DEFAULT_CAPTURE_TEMPLATE as UI_DEFAULT_CAPTURE_TEMPLATE,
   CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
@@ -5708,6 +5714,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "captureServerFallback",
           "captureServerIdleSeconds",
           "captureServiceUrl",
+          "captureTemplate",
           "captureTopicCandidates",
           "captureTopicScope",
         ],
@@ -9392,6 +9399,102 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       `line=${Array.from(clippedLine).length} body=${clippedRendered.length}`,
     );
 
+    // ---- 题面骨架模板：默认逐字一致、六个占位符、无效回退、单次替换、归一 ----
+    const tplPrev = [{ role: "user", content: "p" }];
+    const tplCur = [{ role: "assistant", content: "c" }];
+    const tplCands = [{ label: "L", summary: "S" }];
+    const legacyRendered = [
+      CAPTURE_TOPIC_QUESTION,
+      "",
+      "已有话题：",
+      "[1] L —— S",
+      "",
+      "之前（供参考）：",
+      "[用户] p",
+      "",
+      "对话：",
+      "[助手] c",
+      "",
+      CAPTURE_TOPIC_FORMAT,
+    ].join("\n");
+    eq(
+      "默认模板渲染与旧硬编码逐字一致",
+      renderTopicPrompt(
+        tplPrev,
+        tplCur,
+        tplCands,
+        CAPTURE_TOPIC_QUESTION,
+        CAPTURE_TOPIC_FORMAT,
+        DEFAULT_CAPTURE_TEMPLATE,
+      ),
+      legacyRendered,
+    );
+    const noFormat = renderTopicPrompt(
+      tplPrev,
+      tplCur,
+      tplCands,
+      CAPTURE_TOPIC_QUESTION,
+      "",
+      DEFAULT_CAPTURE_TEMPLATE,
+    );
+    eq(
+      "format 为空：{{format}} 整行连同前面的空行一起去掉",
+      [noFormat.endsWith("对话：\n[助手] c"), noFormat.includes("{{format}}"), noFormat.endsWith("\n\n")],
+      [true, false, false],
+    );
+    const custom = renderTopicPrompt(
+      tplPrev,
+      tplCur,
+      tplCands,
+      "问",
+      "格式",
+      "Q={{question}}|C={{candidates}}|P={{previous}}|N={{current}}|F={{format}}",
+    );
+    eq(
+      "自定义模板：五个占位符都替对",
+      custom,
+      "Q=问|C=[1] L —— S|P=[用户] p|N=[助手] c|F=格式",
+    );
+    const singlePass = renderTopicPrompt(
+      [{ role: "user", content: "{{question}}" }],
+      [{ role: "assistant", content: "{{current}}" }],
+      [],
+      "问",
+      "",
+      "{{previous}} :: {{current}}",
+    );
+    eq(
+      "单次替换：值里的 {{xxx}} 不会被二次展开",
+      singlePass,
+      "[用户] {{question}} :: [助手] {{current}}",
+    );
+    const templateWarns = [];
+    resetCaptureTemplateWarning();
+    eq(
+      "缺 {{current}}：回退内置模板并警告一次",
+      [
+        resolveCaptureTemplate({ captureTemplate: "只有 {{question}}" }, {
+          logger: { warn: (message) => templateWarns.push(message) },
+        }),
+        resolveCaptureTemplate({ captureTemplate: "仍然缺" }, {
+          logger: { warn: (message) => templateWarns.push(message) },
+        }),
+        templateWarns.length,
+        templateWarns[0]?.includes("{{current}}"),
+      ],
+      [DEFAULT_CAPTURE_TEMPLATE, DEFAULT_CAPTURE_TEMPLATE, 1, true],
+    );
+    eq(
+      "空串：写入归一成空、读取即内置默认",
+      [
+        promptForStorage("captureTemplate", DEFAULT_CAPTURE_TEMPLATE),
+        promptForStorage("captureTemplate", "自定义 {{current}}"),
+        UI_DEFAULT_CAPTURE_TEMPLATE === DEFAULT_CAPTURE_TEMPLATE,
+        UI_CAPTURE_TEMPLATE_MAX === CAPTURE_TEMPLATE_MAX,
+      ],
+      ["", "自定义 {{current}}", true, true],
+    );
+
     const turnMessages = [
       { role: "user", content: "u1" },
       { role: "assistant", content: "a1" },
@@ -11412,6 +11515,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       model: "",
       serviceUrl: "",
       prompt: "",
+      template: "",
       judges: ["llm", "discriminator"],
       scopes: ["session", "global"],
       turnsRange: [1, 100],
@@ -11522,6 +11626,39 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         "2",
         false,
       ],
+    );
+  }
+
+  // ---- 2.04 题面骨架：非字符串 / 超长拒；等于默认写空串 ----
+  {
+    const beforeTemplate = writes.length;
+    const badTemplate = await postConfig({ captureTemplate: 42 });
+    eq(
+      "captureTemplate 非字符串 → 400 且不写",
+      [badTemplate.status, badTemplate.body.ok, writes.length],
+      [400, false, beforeTemplate],
+    );
+    const longTemplate = await postConfig({
+      captureTemplate: "字".repeat(CAPTURE_TEMPLATE_MAX + 1),
+    });
+    eq(
+      "captureTemplate 超长 → 400 且不写",
+      [longTemplate.status, longTemplate.body.ok, writes.length],
+      [400, false, beforeTemplate],
+    );
+    const defaultTemplate = await postConfig({ captureTemplate: DEFAULT_CAPTURE_TEMPLATE });
+    eq(
+      "captureTemplate 等于默认 → 写空串，读回空（运行时用内置模板）",
+      [defaultTemplate.status, defaultTemplate.body.ok, values.captureTemplate, (await getConfig()).body.template],
+      [200, true, "", ""],
+    );
+    const customTemplate = await postConfig({
+      captureTemplate: "问题：{{question}}\n现在：{{current}}",
+    });
+    eq(
+      "captureTemplate 自定义 → 原样落库并读回",
+      [customTemplate.status, values.captureTemplate, (await getConfig()).body.template],
+      [200, "问题：{{question}}\n现在：{{current}}", "问题：{{question}}\n现在：{{current}}"],
     );
   }
 

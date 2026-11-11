@@ -14,6 +14,9 @@ export const CAPTURE_EMPTY = "暂无";
  */
 export const CAPTURE_PROMPT_MAX = 2000;
 
+/** 题面骨架模板的字符上限：与后端 src/ov/settings.js 的 CAPTURE_TEMPLATE_MAX 同值。 */
+export const CAPTURE_TEMPLATE_MAX = 4000;
+
 /**
  * 内置默认题面。与 src/memory/capture.js 的 CAPTURE_TOPIC_QUESTION 逐字一致
  * （冒烟比对两边）。配置 capturePrompt 为空时就是它。
@@ -45,6 +48,46 @@ export function capturePromptStatus(text) {
   const value = normalizeCapturePrompt(text);
   if (value === DEFAULT_CAPTURE_PROMPT) return "当前为默认题面";
   if (!value.trim()) return "已修改 · 题面为空时使用内置默认";
+  return "已修改";
+}
+
+/**
+ * 内置默认骨架。与 src/ov/prompt-defaults.js 的 DEFAULT_CAPTURE_TEMPLATE 逐字一致
+ * （冒烟比对两边）。配置 captureTemplate 为空时就是它。
+ */
+export const DEFAULT_CAPTURE_TEMPLATE = [
+  "{{question}}",
+  "",
+  "已有话题：",
+  "{{candidates}}",
+  "",
+  "之前（供参考）：",
+  "{{previous}}",
+  "",
+  "对话：",
+  "{{current}}",
+  "",
+  "{{format}}",
+].join("\n");
+
+/** 与后端 normalizeCaptureTemplate 同一口径：非字符串 / 空 → 空串，否则按字符截断。 */
+export function normalizeCaptureTemplate(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, CAPTURE_TEMPLATE_MAX).join("");
+}
+
+/** textarea 里该显示什么：空配置坐默认模板当草稿，touched 之后不再盖。 */
+export function captureTemplateDraft(configValue, touched = false) {
+  const value = normalizeCaptureTemplate(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_CAPTURE_TEMPLATE;
+}
+
+/** 模板旁边那行小字：默认 / 已修改 / 空（回内置默认）。 */
+export function captureTemplateStatus(text) {
+  const value = normalizeCaptureTemplate(text);
+  if (value === DEFAULT_CAPTURE_TEMPLATE) return "当前为默认模板";
+  if (!value.trim()) return "已修改 · 模板为空时使用内置默认";
   return "已修改";
 }
 
