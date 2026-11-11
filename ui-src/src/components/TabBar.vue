@@ -1,5 +1,5 @@
 <script setup>
-// 四页标签：点一下切页并记住；左右方向键 / Home / End 也能换，焦点跟着走。
+// 五页标签：点一下切页并记住；左右方向键 / Home / End 也能换，焦点跟着走。
 //
 // 纯逻辑（键名、默认页、非法值回退、键盘换页、读写 storage 的容错）在 lib/tabs.js，
 // 这里只管绑定按键与 aria。切页不触发任何读 / 写 / 重算（见行为清单第 10 条）。
@@ -22,7 +22,8 @@ import { TABS, nextTab } from "../lib/tabs.js";
 
 const LABELS = Object.freeze({
   global: "全局配置",
-  memory: "记忆配置",
+  memory: "记忆搜索",
+  capture: "记忆共享",
   skill: "共享技能",
   logs: "日志",
 });
@@ -49,7 +50,7 @@ function onKeydown(event, tab) {
 </script>
 
 <template>
-  <!-- 一个 tablist 里四个 role=tab。n-tabs 不生成这些语义，所以挂在这里。 -->
+  <!-- 一个 tablist 里五个 role=tab。n-tabs 不生成这些语义，所以挂在这里。 -->
   <NTabs
     class="tabs"
     type="line"

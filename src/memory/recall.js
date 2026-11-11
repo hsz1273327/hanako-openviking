@@ -1,5 +1,7 @@
 // 记忆召回：把 OpenViking 拼好的记忆块放进"即将发给 provider 的请求"。
 //
+// recallEnabled 是读这一半的总开关：关掉后不再检索与注入，但写回不受影响。
+//
 // 这个文件只在 provider/before-request 里跑。该接缝按**模型步**触发（DESIGN 五.C），
 // 一个用户轮可能调用十几次，所以这里有一条硬纪律：同一个 (sessionId, 用户文本指纹)
 // 在一次进程里只召回一次。去重键建立在 stripInjected 之后的干净文本上，
@@ -2248,6 +2250,12 @@ export function createRecallHandler(sdk, options = {}) {
     const switches = await readSwitches(sdk);
     if (!switches.enabled) {
       log(sdk, "info", `skip: disabled (session=${sessionId})`);
+      return undefined;
+    }
+
+    // 记忆搜索总开关：只停读这一半。写回是另一条路，不受它影响。
+    if (!switches.recallEnabled) {
+      log(sdk, "info", `skip: recall disabled (session=${sessionId})`);
       return undefined;
     }
 

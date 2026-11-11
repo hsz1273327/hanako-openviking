@@ -183,11 +183,15 @@ export function createPanelStore(deps = {}) {
       readError: "",
       checksSummary: summarizeChecks([]),
     },
-    // GET /controls 的镜像。enabled 是三页置灰的唯一依据。
+    // GET /controls 的镜像。enabled 是三页置灰的唯一依据；记忆搜索页还看 recallEnabled。
     controls: {
       enabled: false,
       probe: true,
       skillRouting: false,
+      // 写回开关：记忆共享页用，搜索页不管。
+      autoCapture: true,
+      // 记忆搜索总开关：只停读这一半，写回不受影响。
+      recallEnabled: true,
       requestTimeoutMs: null,
       // 召回请求自己那一档超时（默 5000，与上面的通用超时分开）。
       recallTimeoutMs: null,
@@ -290,6 +294,8 @@ export function createPanelStore(deps = {}) {
     if (typeof out.enabled === "boolean") state.controls.enabled = out.enabled;
     if (typeof out.probe === "boolean") state.controls.probe = out.probe;
     if (typeof out.skillRouting === "boolean") state.controls.skillRouting = out.skillRouting;
+    if (typeof out.autoCapture === "boolean") state.controls.autoCapture = out.autoCapture;
+    if (typeof out.recallEnabled === "boolean") state.controls.recallEnabled = out.recallEnabled;
     if (out.requestTimeoutMs != null) state.controls.requestTimeoutMs = out.requestTimeoutMs;
     if (out.recallTimeoutMs != null) state.controls.recallTimeoutMs = out.recallTimeoutMs;
     if (out.injectBudgetTokens != null) state.controls.injectBudgetTokens = out.injectBudgetTokens;

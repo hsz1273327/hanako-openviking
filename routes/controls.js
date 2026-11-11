@@ -6,7 +6,7 @@
 // 每条都在写入前校验，不认识的字一律忽略而不是报错——前端一次提交一组时，
 // 半新半旧的客户端不该因为多带一个键就整组失败。
 
-const BOOLS = ["enabled", "autoRecall", "autoCapture", "readOnly", "skillRouting", "probe"];
+const BOOLS = ["enabled", "autoRecall", "autoCapture", "readOnly", "skillRouting", "probe", "recallEnabled"];
 const SCOPES = new Set(["all", "actor"]);
 
 /** 数值调参：键 / 下限 / 上限 / 缺项时的默认值。与面板上那几个数字格一一对应。 */
@@ -38,7 +38,14 @@ function readBool(value) {
 
 async function readControls(ctx) {
   const out = {};
-  for (const key of BOOLS) out[key] = (await ctx.config.get(key)) === true;
+  for (const key of BOOLS) {
+    if (key === "recallEnabled") {
+      // 记忆搜索总开关：缺项时默认 true（与 DEFAULTS 一致）。
+      out[key] = (await ctx.config.get(key)) !== false;
+      continue;
+    }
+    out[key] = (await ctx.config.get(key)) === true;
+  }
   out.recallPeerScope = (await ctx.config.get("recallPeerScope")) || "all";
   for (const [key, min, max, fallback] of NUMBERS) {
     out[key] = readNumber(await ctx.config.get(key), min, max, fallback);

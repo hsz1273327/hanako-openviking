@@ -1,5 +1,8 @@
 <script setup>
-// 记忆配置页：按会话说明 → [召回 / 去重 / 精排 / 组装 / 候选池] 五个子页签 → 页面级提示位。
+// 记忆搜索页：按会话说明 → [召回 / 去重 / 精排 / 组装 / 候选池] 五个子页签 → 页面级提示位。
+//
+// 页首的 recallEnabled 是读这一半的总开关：关掉后整页内容置灰、不可交互，
+// 但写回不受影响（写回是另一条路，在「记忆共享」页里管）。
 //
 // 这一页没有按会话的开关：召回判断 / 查询 / 去重 / 精排 / 组装跟上面两个开关一样按整台机器算，
 // 改了即时生效；按会话的那几项（召回范围等）在对话右侧的 OpenViking 卡片里。
@@ -16,8 +19,8 @@
 //
 // 高度：子页容器吃满剩余高度。召回 / 去重 / 精排 / 组装的内容比一屏高时由子页自己滚，
 // 候选池卡的滚动交给卡内的 PeerList（见 panel.css 的 .memory-pane 那组规则）。
-import { nextTick, ref } from "vue";
-import { NCard, NTab, NTabs } from "naive-ui";
+import { computed, nextTick, ref } from "vue";
+import { NCard, NSpace, NSwitch, NTab, NTabs, NText } from "naive-ui";
 import { usePeers } from "../composables/usePeers.js";
 import { useConfig } from "../composables/useConfig.js";
 import {
@@ -34,8 +37,10 @@ import RerankCard from "./RerankCard.vue";
 import AssembleCard from "./AssembleCard.vue";
 import PeerList from "./PeerList.vue";
 
-const { state } = useConfig();
+const { state, flip } = useConfig();
 const { count: peerCountText } = usePeers();
+
+const recallOn = computed(() => state.controls.recallEnabled !== false);
 
 // 子页签只是本页视图状态，不进 store、不触发任何读 / 写 / 重算。
 const activeTab = ref(DEFAULT_MEMORY_TAB);
@@ -57,6 +62,29 @@ function onTabKeydown(event, name) {
 </script>
 
 <template>
+  <NCard
+    id="recallMaster"
+    class="recall-master"
+    size="small"
+    :bordered="false"
+    header-style="padding: 4px 16px"
+    :data-off="recallOn ? 'false' : 'true'"
+  >
+    <template #header>
+      <NSpace align="baseline" :size="8" :wrap="false">
+        <NText strong class="hint-body recall-master-title">记忆搜索</NText>
+        <NText class="hint-body" depth="3">关闭后不再检索与注入，但写回不受影响</NText>
+      </NSpace>
+    </template>
+    <template #header-extra>
+      <NSwitch
+        aria-label="记忆搜索"
+        :value="recallOn"
+        @update:value="(next) => flip('recallEnabled', next)"
+      />
+    </template>
+  </NCard>
+
   <p class="scoped-note">
     记忆召回、写回、只读、召回范围是<b>按会话</b>算的，在这段对话右侧的 OpenViking 卡片里改。
   </p>
@@ -67,7 +95,7 @@ function onTabKeydown(event, name) {
     type="line"
     size="small"
     role="tablist"
-    aria-label="记忆配置分区"
+    aria-label="记忆搜索分区"
     :value="activeTab"
     justify-content="space-evenly"
     @update:value="selectTab"
@@ -89,7 +117,11 @@ function onTabKeydown(event, name) {
   </NTabs>
 
   <!-- 五块始终挂载：切页签只切 hidden，草稿与提示位不会因为重建而丢。 -->
-  <div class="memory-tabs-body">
+  <div
+    class="memory-tabs-body"
+    :class="{ dim: !recallOn }"
+    :inert="!recallOn"
+  >
     <div
       id="memory-panel-recall"
       class="memory-pane"

@@ -2,10 +2,10 @@
 // 纯逻辑、无依赖：浏览器里由 panel.js 用，node 里冒烟直接 import。
 
 export const TAB_KEY = "hanako-openviking:tab";
-export const TABS = ["global", "memory", "skill", "logs"];
+export const TABS = ["global", "memory", "capture", "skill", "logs"];
 export const DEFAULT_TAB = "global";
 
-/** 只认四个已知页名，其余（空、旧值、大小写变体）一律回默认页。 */
+/** 只认五个已知页名，其余（空、旧值、大小写变体）一律回默认页。 */
 export function normalizeTab(value) {
   return TABS.includes(value) ? value : DEFAULT_TAB;
 }

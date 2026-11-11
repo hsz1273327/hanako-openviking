@@ -1,9 +1,9 @@
 <script setup>
-// 面板根组件：主题 + 顶部身份条 + 标签栏 + 四页 + 页脚。
+// 面板根组件：主题 + 顶部身份条 + 标签栏 + 五页 + 页脚。
 //
 // 结构对应手写的 ui/panel.html，一屏布局的契约没变：
 //   .page（定高、不自滚）→ .top / .tabs / .tab-panel / .foot
-// 四页**始终挂载**，只用 hidden 切显隐：切页不重算、不重读、不丢输入中的内容。
+// 五页**始终挂载**，只用 hidden 切显隐：切页不重算、不重读、不丢输入中的内容。
 // 这也意味着隐藏页里的节点照旧存在（peer 名单 / 通道行都在内存里）。
 //
 // 主题：宿主是亮色，用 theme.js 的 lightThemeOverrides，不引 darkTheme（见该文件注释）。
@@ -12,6 +12,7 @@
 // 布局 / 配色一律留在 ui/assets/panel.css，SFC 里不写 <style>。
 import { computed, onMounted, ref } from "vue";
 import { NButton, NConfigProvider, NTag, zhCN } from "naive-ui";
+import CapturePanel from "./components/CapturePanel.vue";
 import GlobalPanel from "./components/GlobalPanel.vue";
 import LogsPanel from "./components/LogsPanel.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
@@ -124,7 +125,7 @@ onMounted(() => {
 
       <TabBar :active="tab" @select="selectTab" />
 
-      <!-- 四页共用顶部身份条与页脚；标签只决定中间哪一块可见，不引入路由。 -->
+      <!-- 五页共用顶部身份条与页脚；标签只决定中间哪一块可见，不引入路由。 -->
       <div
         id="panel-global"
         class="tab-panel"
@@ -142,6 +143,15 @@ onMounted(() => {
         :hidden="tab !== 'memory'"
       >
         <MemoryPanel />
+      </div>
+      <div
+        id="panel-capture"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-capture"
+        :hidden="tab !== 'capture'"
+      >
+        <CapturePanel />
       </div>
       <div
         id="panel-skill"

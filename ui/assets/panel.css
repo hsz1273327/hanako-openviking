@@ -160,6 +160,13 @@ body { background-color: rgba(0, 0, 0, 0.02); }
    所以档位落在标题自己的 .master-title 上，说明的颜色交回 NText 的 type / depth。 */
 .master[data-off="true"] .master-title { opacity: 0.6; }
 
+/* 记忆搜索页的总开关：与总闸同一个形态，按内容定高、不吃余量。 */
+.recall-master { flex: none; }
+/* naive 的卡头标题默认是 600，这一格与总闸一样回到正文档。 */
+#recallMaster .n-card-header__main { font-weight: 400; }
+/* 关着的时候只压标题，说明那句照旧可读。 */
+.recall-master[data-off="true"] .recall-master-title { opacity: 0.6; }
+
 /* ---------- 字段：只剩 naive 管不到的三个尺寸 ---------- */
 
 /* 字段本体已经交给 NFormItem（label / 间距 / for 关联都它管），这里只补三件事：
@@ -267,6 +274,8 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 }
 /* 一项 = 标签 + 值，两个都是 inline 内容，不能各自换行（否则数字和标签分家）。 */
 .fact { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+/* 标签比正文低一档，与全局页信息行同档。 */
+.facts-row .fact-label { font-size: 10.5px; line-height: 1.3; }
 /* 项与项之间的分隔点。写在 CSS 里而不是模板里：它是排版符，不是内容，
    拷走文案时不该带出一串 ·。 */
 .fact + .fact::before { content: "·"; opacity: 0.45; }
@@ -558,6 +567,18 @@ body { background-color: rgba(0, 0, 0, 0.02); }
    裸 <p> 的默认上下边距在 flex 列里会多出一截空档，这里收掉。 */
 #panel-memory > .save-hint { flex: none; margin: 0 2px; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
 #panel-memory > .save-hint.bad { color: #c2554b; opacity: 0.9; }
+
+/* ---------- 记忆共享页 ---------- */
+
+/* 写回卡按内容定高，不吃余量。 */
+#panel-capture > .capture-card { flex: none; }
+/* 卡内说明段改成 NText block，避免 p 的默认外边距撑出空白。 */
+.capture-card .hint-line { display: block; }
+.capture-card .hint-line + .hint-line { margin-top: 6px; }
+/* 状态行在记忆共享页里独占一行，与全局页信息行同款。 */
+#panel-capture > .facts-row { flex: none; margin: 0 2px; }
+/* 说明段跟页面提示位同款。 */
+#panel-capture > .hint-line { flex: none; margin: 0 2px; opacity: 0.5; }
 
 /* ---------- 全局页：只有前置卡可以让步 ---------- */
 /* 中枢 / 身份现在是同一块 .hub-stack（上下两张卡），按内容定高、不吃余量；

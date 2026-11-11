@@ -77,6 +77,12 @@
             "description": "每轮从 OpenViking 召回相关记忆并注入。",
             "default": true
           },
+          "recallEnabled": {
+            "type": "boolean",
+            "title": "记忆搜索",
+            "description": "关闭后不再检索与注入，但写回不受影响。",
+            "default": true
+          },
           "recallGate": {
             "type": "string",
             "title": "召回判断",

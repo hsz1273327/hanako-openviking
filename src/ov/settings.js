@@ -119,6 +119,8 @@ export const DEFAULTS = {
   mergeMemory: false,
   autoRecall: true,
   autoCapture: true,
+  // 记忆搜索总开关：只停读这一半，写回不受影响。
+  recallEnabled: true,
   readOnly: false,
   recallPeerScope: "all",
   requestTimeoutMs: 1500,
@@ -912,6 +914,8 @@ export async function readSwitches(sdk) {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
     autoCapture: await read(sdk, "autoCapture"),
+    // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
+    recallEnabled: (await read(sdk, "recallEnabled")) !== false,
     readOnly: await read(sdk, "readOnly"),
     skillRouting: await read(sdk, "skillRouting"),
     probe: await read(sdk, "probe"),

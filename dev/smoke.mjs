@@ -303,7 +303,7 @@ import {
   statsText as cardStatsText,
   withOverride as cardWithOverride,
 } from "../ui-src/src/lib/card-view.js";
-// 面板四页标签与记忆键：纯逻辑，node 直接验。
+// 面板五页标签与记忆键：纯逻辑，node 直接验。
 import {
   DEFAULT_TAB,
   TAB_KEY,
@@ -313,6 +313,11 @@ import {
   readTab,
   writeTab,
 } from "../ui-src/src/lib/tabs.js";
+// 记忆共享页状态行：纯函数，node 直接验。
+import {
+  CAPTURE_STATUS_EMPTY,
+  captureStatusView,
+} from "../ui-src/src/lib/capture-view.js";
 // 记忆页三个子页签：纯逻辑 + 组件挂载方式。
 import {
   DEFAULT_MEMORY_TAB,
@@ -1518,12 +1523,20 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [defaults.body.queryChars, defaults.body.recallTimeoutMs],
     [600, 5000],
   );
+  eq("没配过时 /controls 回记忆搜索开关默认值 true", defaults.body.recallEnabled, true);
 
   const written = await write({ queryChars: 1200, recallTimeoutMs: 9000 });
   eq(
     "写入后原样回显，applied 里两个键都算上了",
     [written.body.queryChars, written.body.recallTimeoutMs, written.body.applied.sort()],
     [1200, 9000, ["queryChars", "recallTimeoutMs"]],
+  );
+
+  const recallOff = await write({ recallEnabled: false });
+  eq(
+    "POST 记忆搜索开关 false 后回显 false 且 applied 里有这个键",
+    [recallOff.body.recallEnabled, recallOff.body.applied.includes("recallEnabled")],
+    [false, true],
   );
 
   const bounded = await write({ queryChars: 5, recallTimeoutMs: 999999 });
@@ -2869,8 +2882,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     TAB_KEY,
   );
   eq(
-    "四个页名（顺序即标签顺序） / 非法页名一律回默认页（大小写 / 空格 / 近义词都不认） / 四个合法页名原样返回 / 键盘换页（左右成圈 / Home / End / 别的键不动） / 读上次停的页（读不到 / 非法值回默认页，合法值原样，第四页 logs 也能读回） / storage 读抛错不崩、回默认页",
-    [TABS, [null, undefined, "", "nope", "Global", "MEMORY", " memory ", "log", "Logs", "LOGS"].map(normalizeTab), TABS.map((value) => normalizeTab(value)), [
+    "五个页名（顺序即标签顺序） / 非法页名一律回默认页（大小写 / 空格 / 近义词都不认） / 五个合法页名原样返回 / 键盘换页（左右成圈 / Home / End / 别的键不动） / 读上次停的页（读不到 / 非法值回默认页，合法值原样，第五页 logs 也能读回） / storage 读抛错不崩、回默认页",
+    [TABS, [null, undefined, "", "nope", "Global", "MEMORY", " memory ", "log", "Logs", "LOGS", "capture2", "Capture"].map(normalizeTab), TABS.map((value) => normalizeTab(value)), [
       nextTab("logs", "ArrowRight"),
       nextTab("skill", "ArrowRight"),
       nextTab("logs", "ArrowLeft"),
@@ -2890,7 +2903,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         throw new Error("denied");
       },
     })],
-    [["global", "memory", "skill", "logs"], Array(10).fill("global"), TABS, ["global", "logs", "skill", "logs", "global", "logs", "logs", null], ["global", "global", "memory", "logs", "global"], "global"],
+    [["global", "memory", "capture", "skill", "logs"], Array(12).fill("global"), TABS, ["global", "logs", "skill", "logs", "global", "logs", "logs", null], ["global", "global", "memory", "logs", "global"], "global"],
   );
   {
     const store = new Map();
@@ -3047,6 +3060,83 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ),
     selectTabBody,
   );
+  {
+    const memory = uiCode("components/MemoryPanel.vue");
+    check(
+      "MemoryPanel 有记忆搜索分区的 aria-label、recallEnabled 开关、以及 dim/inert 绑定",
+      memory.includes('aria-label="记忆搜索分区"') &&
+        memory.includes("recallEnabled") &&
+        memory.includes('class="memory-tabs-body"') &&
+        memory.includes(":class=\"{ dim: !recallOn }\"") &&
+        memory.includes(":inert=\"!recallOn\""),
+      memory.slice(0, 800),
+    );
+    check(
+      "MemoryPanel 没有出现「重排」字样",
+      !memory.includes("重排"),
+      memory.match(/重排/)?.[0],
+    );
+  }
+}
+// ================= 记忆共享页：状态行与面板源码 =================
+{
+  eq(
+    "captureStatusView 缺项 / 缺字段 / 非数字时返回空态",
+    [
+      captureStatusView(null),
+      captureStatusView({}),
+      captureStatusView({ written: -1, lastCommitAt: "invalid", pendingTurns: "abc" }),
+      captureStatusView({ written: 3, lastCommitAt: 1704067200000, pendingTurns: 1 }),
+    ],
+    [
+      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
+      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
+      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
+      { written: "3 条", lastCommit: new Date(1704067200000).toLocaleString("zh-CN"), pending: "1 轮" },
+    ],
+  );
+
+  const capture = uiCode("components/CapturePanel.vue");
+  check(
+    "CapturePanel 有写回 aria-label、拨的是 autoCapture、出现 captureStatusView",
+    capture.includes('aria-label="写回"') &&
+      capture.includes("autoCapture") &&
+      capture.includes("captureStatusView"),
+    capture.slice(0, 600),
+  );
+  check(
+    "CapturePanel 不含还没实现的东西（补录 / 兜底 / commit）",
+    !["补录", "兜底", "commit"].some((word) => capture.includes(word)),
+    capture,
+  );
+  check(
+    "CapturePanel 没有出现「重排」字样",
+    !capture.includes("重排"),
+    capture.match(/重排/)?.[0],
+  );
+
+  const tabBar = uiCode("components/TabBar.vue");
+  check(
+    "TabBar 的 LABELS：memory 是「记忆搜索」、capture 是「记忆共享」",
+    tabBar.includes('memory: "记忆搜索"') && tabBar.includes('capture: "记忆共享"'),
+    tabBar.slice(tabBar.indexOf("LABELS"), tabBar.indexOf("LABELS") + 200),
+  );
+
+  for (const name of ["components/HubIdentity.vue", "components/MasterCard.vue", "components/PreludeCard.vue", "components/GlobalPanel.vue"]) {
+    check(
+      `${name} 不含 autoCapture（全局配置页不出现写回开关）`,
+      !uiCode(name).includes("autoCapture"),
+      name,
+    );
+  }
+
+  for (const name of ["App.vue", "components/TabBar.vue"]) {
+    check(
+      `${name} 没有出现「重排」字样`,
+      !uiCode(name).includes("重排"),
+      uiCode(name).match(/重排/)?.[0],
+    );
+  }
 }
 // ================= 组装：精排之后把候选拼成一段上下文 =================
 {
@@ -3839,6 +3929,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       enabled: true,
       probe: true,
       skillRouting: false,
+      autoCapture: true,
+      recallEnabled: true,
       requestTimeoutMs: 1500,
       injectBudgetTokens: 2500,
       queryChars: 600,
@@ -3965,7 +4057,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   eq(
     "药丸跟着 /status 走 / 检查项摘要（只说比例 / 灰档 / 明细只列问题项） / /controls 与 /status、/conn 读回的值（开关 / 超时预算 / 召回超时与查询上限 / 地址 / key 占位 / 门牌前缀 / 三个下拉） / 提示词框里坐的是默认全文（值是 value 不是 placeholder） / 打分服务读回：地址 / 模型 / 超时留空仍是空 / 密钥框坐掩码（GET 不回明文）/ 没配的为空 / 通道草稿按服务端投影 / 模型目录进来了",
     [[state.status.view.pillText, state.status.view.pillTone], [state.status.checksSummary.text, state.status.checksSummary.tone, state.status.checksSummary.problems], [
-      [state.controls.enabled, state.controls.probe, state.controls.skillRouting],
+      [state.controls.enabled, state.controls.probe, state.controls.skillRouting, state.controls.autoCapture, state.controls.recallEnabled],
       [state.controls.requestTimeoutMs, state.controls.injectBudgetTokens],
       [state.controls.queryChars, state.controls.recallTimeoutMs],
       state.conn.serverUrl,
@@ -3981,7 +4073,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       state.draft.systemoneServiceKey,
     ], state.channels.map((channel) => channel.name), ui.store.modelChoices(state.form.gateModel).map((option) => option.value)],
     [["已连接", "ok"], ["服务端 1/2 就绪", "muted", [{ name: "ollama", status: "not_configured", label: "未配置" }]], [
-      [true, true, false],
+      [true, true, false, true, true],
       [1500, 2500],
       [600, 5000],
       "http://127.0.0.1:8000",
@@ -4712,6 +4804,22 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [state.controls.probe, state.note.text, state.note.bad], [false, "已保存", false]);
     await ui.flip("probe", true);
     eq("再点回来", state.controls.probe, true);
+  }
+
+  // ---- 记忆搜索总开关：乐观 + 回滚 ----
+  {
+    eq("首屏记忆搜索开关开着", state.controls.recallEnabled, true);
+    await ui.flip("recallEnabled", false);
+    const recallBody = calls.filter((call) => call.method === "POST" && call.path === "/controls").at(-1).body;
+    eq("关掉记忆搜索只发一个键",
+      [recallBody.recallEnabled, Object.keys(recallBody)], [false, ["recallEnabled"]]);
+    eq("状态同步变 false", state.controls.recallEnabled, false);
+    await ui.flip("recallEnabled", true);
+    eq("再点回来", state.controls.recallEnabled, true);
+    rejectNextPost = "写入失败";
+    await ui.flip("recallEnabled", false);
+    eq("记忆搜索开关写失败后回滚",
+      [state.controls.recallEnabled, state.note.text, state.note.bad], [true, "写入失败", true]);
   }
 
   // ---- 连接三字段 ----
@@ -14931,6 +15039,48 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("只读模式不影响召回，会话可以覆盖召回范围",
     Boolean(scopedResult?.payload) && JSON.parse(scoped.calls[0].init.body).peer_scope === "all",
     JSON.stringify(JSON.parse(scoped.calls[0].init.body).peer_scope));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  // ---- 记忆搜索总开关：只停读这一半 ----
+  const dir = path.join(import.meta.dirname, ".tmp-recall-enabled");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const payload = { messages: [{ role: "user", content: "关掉搜索后不该召回" }] };
+
+  const recallOff = mockFetch({ body: { status: "ok", result: { rendered: withBody("不该出现") } } });
+  const offHandler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, recallEnabled: false, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: recallOff.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  eq(
+    "记忆搜索总开关关闭时返回 undefined 且不发请求",
+    [await offHandler({ payload, session: { sessionId: "recall-off" } }), recallOff.calls.length],
+    [undefined, 0],
+  );
+
+  const recallOn = mockFetch({ body: { status: "ok", result: { rendered: withBody("正常召回") } } });
+  const onHandler = createRecallHandler(
+    recallSdk({
+      values: { enabled: true, apiKey: "k", serverUrl: "http://h:1" },
+      fetchImpl: recallOn.fetchImpl,
+      dataDir: dir,
+    }),
+  );
+  const onResult = await onHandler({ payload, session: { sessionId: "recall-on" } });
+  eq(
+    "没配过 recallEnabled 时默认 true，照常召回并发一次请求",
+    [Boolean(onResult?.payload), recallOn.calls.length],
+    [true, 1],
+  );
+
+  eq("DEFAULTS 里记忆搜索开关默认 true", DEFAULTS.recallEnabled, true);
+  const emptySwitches = await readSwitches(sdkWith({}));
+  eq("没配过时 readSwitches 读到 recallEnabled 为 true", emptySwitches.recallEnabled, true);
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
