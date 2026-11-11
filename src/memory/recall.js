@@ -616,7 +616,7 @@ function raceTimeout(promise, timeoutMs, label = "channel") {
  * 带换行的 key 一律当没配：拼进头会让 fetch 抛 TypeError，而那个异常发生在
  * 召回路径上，用户只会看到一轮静默弃权。写入侧与读取侧都拦过一遍，这里是最后一道。
  */
-function serviceAuthHeaders(key) {
+export function serviceAuthHeaders(key) {
   const value = typeof key === "string" ? key.trim() : "";
   if (!value || /[\r\n]/.test(value)) return {};
   return { Authorization: `Bearer ${value}` };
@@ -632,7 +632,7 @@ function serviceAuthHeaders(key) {
  * headers 是可选的服务级鉴权头：content-type 先写、额外头后写，覆盖不了 content-type
  * （也没有任何调用方需要覆盖它）。两条出口都并进各自的 headers，不复制第二个请求函数。
  */
-async function postJson(sdk, url, payload, timeoutMs, headers = {}) {
+export async function postJson(sdk, url, payload, timeoutMs, headers = {}) {
   const transport = transportFor(sdk);
   const body = JSON.stringify(payload);
   const extra = headers && typeof headers === "object" ? headers : {};
@@ -972,7 +972,10 @@ export function decisionGateSkips(answer, threshold = DECISION_GATE_THRESHOLD) {
 /**
  * 宿主模型通道的通用调用。提示词由 scoreModelChannel 渲染好，模型标识与超时也由它给。
  */
-async function askModelChannel(sdk, { modelRef = "", prompt = "", timeoutMs = RERANK_TIMEOUT_MS } = {}) {
+export async function askModelChannel(
+  sdk,
+  { modelRef = "", prompt = "", timeoutMs = RERANK_TIMEOUT_MS, maxTokens = RERANK_MAX_TOKENS } = {},
+) {
   const models = sdk?.models;
   if (!models) throw new Error("宿主没有提供 ctx.models");
 
@@ -989,7 +992,7 @@ async function askModelChannel(sdk, { modelRef = "", prompt = "", timeoutMs = RE
   const base = {
     requestId,
     messages: [{ role: "user", content: prompt }],
-    maxTokens: RERANK_MAX_TOKENS,
+    maxTokens,
     temperature: 0,
   };
 

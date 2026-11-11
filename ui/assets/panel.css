@@ -572,13 +572,13 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* 写回卡按内容定高，不吃余量。 */
 #panel-capture > .capture-card { flex: none; }
-/* 卡内说明段改成 NText block，避免 p 的默认外边距撑出空白。 */
-.capture-card .hint-line { display: block; }
-.capture-card .hint-line + .hint-line { margin-top: 6px; }
-/* 状态行在记忆共享页里独占一行，与全局页信息行同款。 */
-#panel-capture > .facts-row { flex: none; margin: 0 2px; }
-/* 说明段跟页面提示位同款。 */
-#panel-capture > .hint-line { flex: none; margin: 0 2px; opacity: 0.5; }
+/* 字段已经按 NGrid 的 8px 节奏排开，不再叠 .field 自己的下边距。 */
+.capture-card .capture-grid .field { margin-bottom: 0; }
+/* 回落提示：与页面提示位同一档；bad 与 .save-hint.bad 同色。 */
+.capture-card .capture-fallback { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
+.capture-card .capture-fallback.bad { color: #c2554b; opacity: 0.9; }
+/* 卡片底部说明段改成 NText block，避免 p 的默认外边距撑出空白。 */
+.capture-card .hint-line { display: block; margin-top: 8px; }
 
 /* ---------- 全局页：只有前置卡可以让步 ---------- */
 /* 中枢 / 身份现在是同一块 .hub-stack（上下两张卡），按内容定高、不吃余量；

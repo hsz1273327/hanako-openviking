@@ -73,6 +73,7 @@ import {
   systemonePromptStatus,
 } from "./recall-layers.js";
 import { summarizeChecks } from "./check-summary.js";
+import { CAPTURE_IDLE_RANGE, CAPTURE_TURNS_RANGE } from "./capture-view.js";
 import {
   PEER_EMPTY,
   PEER_UNREADABLE,
@@ -211,6 +212,8 @@ export function createPanelStore(deps = {}) {
     },
     // 服务端确认过的召回投影（回滚目标）。
     layers: paintRecallConfig(null),
+    // 服务端确认过的写回投影（只留回落判据需要的那三项）。
+    captureConfig: { mode: "fixed", effectiveMode: "fixed", missing: [] },
     // 控件此刻的值（下拉 / 提示词 / 打分服务草稿）。改了立刻提交。
     form: {
       recallGate: "off",
@@ -230,6 +233,13 @@ export function createPanelStore(deps = {}) {
       // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
       assembleMode: "rules",
       gateModel: "",
+      // 写回：机器级设置。轮次 / 秒数在界面上是数字，提交时服务端收数字或数字串。
+      captureCommitMode: "fixed",
+      captureCommitTurns: 12,
+      captureServerFallback: false,
+      captureServerIdleSeconds: 600,
+      captureModel: "",
+      captureServiceUrl: "",
     },
     prompts: {
       gate: DEFAULT_GATE_PROMPT,
@@ -263,6 +273,27 @@ export function createPanelStore(deps = {}) {
     focus: "",
   };
 
+  const CAPTURE_FORM_KEYS = [
+    "captureCommitMode",
+    "captureCommitTurns",
+    "captureServerFallback",
+    "captureServerIdleSeconds",
+    "captureModel",
+    "captureServiceUrl",
+  ];
+
+  const captureDefaults = () => ({
+    captureCommitMode: "fixed",
+    captureCommitTurns: 12,
+    captureServerFallback: false,
+    captureServerIdleSeconds: 600,
+    captureModel: "",
+    captureServiceUrl: "",
+  });
+  // 上一次服务端确认过的 form（回滚目标）。与 state.captureConfig 互补：
+  // 后者只留回落提示需要的三项，这里留六个控件的值。
+  let captureConfirmed = captureDefaults();
+
   // 首屏给空值，等 applyLayers 落地；初始化一次保证草稿键齐全。
   for (const service of SCORING_SERVICES) {
     for (const key of [service.urlKey, service.modelKey, service.timeoutKey, service.keyKey]) {
@@ -288,6 +319,40 @@ export function createPanelStore(deps = {}) {
   }
 
   /* ---------------- 读 ---------------- */
+
+  /**
+   * /capture-config 投影 → 写回设置。
+   *
+   * 数字串转数字；正在编辑的那一格不抢（键名就是配置键）。
+   * captureConfirmed 永远跟着服务端回包走——即使那一格正在编辑，
+   * 它也是下一次提交失败时该退回的值。
+   */
+  function applyCaptureConfig(out) {
+    if (!out || typeof out !== "object") return;
+    const mode = typeof out.mode === "string" ? out.mode : "fixed";
+    const effectiveMode =
+      typeof out.effectiveMode === "string" ? out.effectiveMode : mode;
+    const missing = Array.isArray(out.missing)
+      ? out.missing.filter((key) => typeof key === "string")
+      : [];
+    state.captureConfig = { mode, effectiveMode, missing };
+
+    const turns = Number(out.turns);
+    const idle = Number(out.idleSeconds);
+    captureConfirmed = {
+      captureCommitMode: mode,
+      captureCommitTurns: Number.isFinite(turns) ? turns : 12,
+      captureServerFallback: out.serverFallback === true,
+      captureServerIdleSeconds: Number.isFinite(idle) ? idle : 600,
+      captureModel: typeof out.model === "string" ? out.model : "",
+      captureServiceUrl: typeof out.serviceUrl === "string" ? out.serviceUrl : "",
+    };
+
+    for (const key of CAPTURE_FORM_KEYS) {
+      if (state.focus === key) continue;
+      state.form[key] = captureConfirmed[key];
+    }
+  }
 
   function applyControls(out) {
     if (!out) return;
@@ -654,6 +719,90 @@ export function createPanelStore(deps = {}) {
     });
   }
 
+  /* ---------------- 写回：机器级设置 ---------------- */
+
+  function readCapture() {
+    return {
+      captureCommitMode: state.form.captureCommitMode,
+      // 数字格被清空时按「还没填完」处理：发已确认的值，不让一次无关改动被空串拖成 400。
+      captureCommitTurns:
+        state.form.captureCommitTurns === ""
+          ? captureConfirmed.captureCommitTurns
+          : state.form.captureCommitTurns,
+      captureServerFallback: state.form.captureServerFallback === true,
+      captureServerIdleSeconds:
+        state.form.captureServerIdleSeconds === ""
+          ? captureConfirmed.captureServerIdleSeconds
+          : state.form.captureServerIdleSeconds,
+      captureModel: state.form.captureModel,
+      captureServiceUrl: state.form.captureServiceUrl,
+    };
+  }
+
+  function sameCapture(a, b) {
+    return CAPTURE_FORM_KEYS.every((key) => a?.[key] === b?.[key]);
+  }
+
+  /**
+   * 整单提交 /capture-config。
+   *
+   * 乐观：setCaptureForm / setCaptureNumber 先把控件改掉，再发这一单。
+   * 成功用回包重新落值；失败退回上一次确认过的六项，并写进提示位。
+   * 一次只飞一单：飞行期间又改了，就等上一单收笔后再发。
+   */
+  let capturePending = false;
+  let captureDirty = false;
+
+  async function saveCapture() {
+    if (capturePending) {
+      captureDirty = true;
+      return;
+    }
+    capturePending = true;
+    try {
+      do {
+        captureDirty = false;
+        const next = readCapture();
+        if (sameCapture(next, captureConfirmed)) break;
+        try {
+          const out = await post("/capture-config", next);
+          if (!out || out.ok === false) throw new Error(out?.error || "写入失败");
+          applyCaptureConfig(out);
+          note("写回设置已保存", false);
+        } catch (error) {
+          const previousConfig = state.captureConfig;
+          const previousForm = { ...captureConfirmed };
+          Object.assign(state.form, previousForm);
+          state.captureConfig = previousConfig;
+          note(String(error?.message || error), true);
+          break;
+        }
+      } while (captureDirty);
+    } finally {
+      capturePending = false;
+      captureDirty = false;
+    }
+  }
+
+  function setCaptureForm(key, value) {
+    state.form[key] = value;
+    return saveCapture();
+  }
+
+  /** 数字格：null / 空 → 空串且不提交；其余收敛到该键的范围后再整单提交。 */
+  function setCaptureNumber(key, rawValue) {
+    const text = rawValue === null || rawValue === undefined ? "" : String(rawValue).trim();
+    if (!text) {
+      state.form[key] = "";
+      return undefined;
+    }
+    const value = Number(text);
+    if (!Number.isFinite(value)) return undefined;
+    const [min, max] = key === "captureServerIdleSeconds" ? CAPTURE_IDLE_RANGE : CAPTURE_TURNS_RANGE;
+    state.form[key] = Math.min(max, Math.max(min, Math.round(value)));
+    return saveCapture();
+  }
+
   async function saveConnection() {
     const body = {};
     const url = state.conn.serverUrl.trim();
@@ -821,13 +970,15 @@ export function createPanelStore(deps = {}) {
       const statusPath = sid ? `/status?session=${encodeURIComponent(sid)}` : "/status";
       // 模型目录单独读、不 await：它慢或失败只影响「自选模型」，不拖住整页。
       loadModels();
-      const [status, probe, ctrl, conn, peers, layerOut] = await Promise.all([
+      const [status, probe, ctrl, conn, peers, layerOut, captureOut] = await Promise.all([
         get(statusPath),
         get("/probe").catch(() => ({ lines: [] })),
         get("/controls").catch(() => null),
         get("/conn").catch(() => null),
         get("/peers").catch(() => null),
         get("/recall-mode").catch(() => null),
+        // 写回设置独立降级：读不到只影响这一块，不把整页拖红。
+        get("/capture-config").catch(() => null),
       ]);
       renderStatus(status, Math.max(0, Math.round(now() - started)));
       renderPeers(peers);
@@ -836,6 +987,7 @@ export function createPanelStore(deps = {}) {
       applyConnection(conn);
       // 读不到就留上一次的值，不把下拉刷成空。
       if (layerOut) applyLayers(layerOut);
+      if (captureOut) applyCaptureConfig(captureOut);
       state.status.readError = "";
       state.foot = readFootText(new Date());
       if (opts.note) note(opts.note, false);
@@ -1138,10 +1290,14 @@ export function createPanelStore(deps = {}) {
     setFocus,
     applyControls,
     applyLayers,
+    applyCaptureConfig,
     refresh,
     flip,
     patchControls,
     setForm,
+    setCaptureForm,
+    setCaptureNumber,
+    saveCapture,
     setDecisionThreshold,
     setGateContextTurns,
     setRerankKeep,

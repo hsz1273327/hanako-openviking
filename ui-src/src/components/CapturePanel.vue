@@ -1,15 +1,53 @@
 <script setup>
-// 记忆共享页：只管写回这一半。
+// 记忆共享页：只放写回的机器级设置。
 //
-// 这一版只放「现在就能生效」的东西：写回开关 + 状态行空态 + 一段说明。
-// commit 策略 / 服务端兜底 / 手动补录 都还没做，所以一张卡、一行状态、一句说明就够用。
+// 会话级进度在侧边栏会话卡里，不在这一页出现：换一个窗口看一眼
+// 就不该串到别人头上。
+//
+// 所有控件都真的绑到 state.form 并走 store 的提交口：
+//   setCaptureForm  —— 下拉 / 开关 / 地址（立即整单提交）
+//   setCaptureNumber —— 数字格（收敛到范围后提交；清空不提交）
+// 失败由 store 回滚到上一次服务端确认的值，并在页面提示位报错。
 // 样式在 ui/assets/panel.css，组件不写 <style>。
-import { NCard, NSwitch, NText } from "naive-ui";
+import { computed } from "vue";
+import {
+  NCard,
+  NGrid,
+  NGridItem,
+  NInput,
+  NInputNumber,
+  NSelect,
+  NSwitch,
+  NText,
+} from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
-import { captureStatusView } from "../lib/capture-view.js";
+import { useModels } from "../composables/useModels.js";
+import {
+  CAPTURE_IDLE_RANGE,
+  CAPTURE_TURNS_RANGE,
+  captureFallbackNote,
+  captureModeOptions,
+} from "../lib/capture-view.js";
 
-const { state, flip } = useConfig();
-const status = captureStatusView(null);
+const { state, flip, setCaptureForm, setCaptureNumber, setFocus } = useConfig();
+const { options } = useModels();
+
+const modeOptions = Object.freeze(captureModeOptions());
+const modelOptions = computed(() => options(state.form.captureModel));
+const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
+
+function onServiceUrlInput(value) {
+  state.form.captureServiceUrl = value ?? "";
+}
+
+function onServiceUrlChange(value) {
+  setCaptureForm("captureServiceUrl", value ?? "");
+}
+
+function onEnter(event) {
+  event.preventDefault();
+  event.target.blur();
+}
 </script>
 
 <template>
@@ -29,25 +67,130 @@ const status = captureStatusView(null);
       />
     </template>
 
+    <NGrid
+      class="capture-grid"
+      cols="1 700:2"
+      responsive="screen"
+      :x-gap="10"
+      :y-gap="8"
+    >
+      <NGridItem>
+        <div class="field">
+          <span class="field-label">提交策略</span>
+          <NSelect
+            size="small"
+            aria-label="提交策略"
+            :options="modeOptions"
+            :input-props="{ id: 'captureCommitMode' }"
+            :value="state.form.captureCommitMode"
+            @focus="setFocus('captureCommitMode')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureForm('captureCommitMode', value)"
+          />
+          <span class="field-hint">固定轮次攒够就交；语言模型 / 判别模型只在换话题时交。</span>
+        </div>
+      </NGridItem>
+
+      <NGridItem v-if="state.form.captureCommitMode === 'fixed'">
+        <div class="field">
+          <label for="captureCommitTurns">固定轮次</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="CAPTURE_TURNS_RANGE[0]"
+            :max="CAPTURE_TURNS_RANGE[1]"
+            :step="1"
+            placeholder="默认 12"
+            aria-label="固定轮次"
+            :input-props="{ id: 'captureCommitTurns' }"
+            :value="typeof state.form.captureCommitTurns === 'number' ? state.form.captureCommitTurns : null"
+            @focus="setFocus('captureCommitTurns')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureNumber('captureCommitTurns', value)"
+          />
+          <span class="field-hint">一轮 = 一条用户消息加至少一条助手消息。范围 1–100。</span>
+        </div>
+      </NGridItem>
+
+      <NGridItem v-if="state.form.captureCommitMode === 'llm'">
+        <div class="field">
+          <span class="field-label">判断模型</span>
+          <NSelect
+            size="small"
+            aria-label="判断模型"
+            :options="modelOptions"
+            :input-props="{ id: 'captureModel' }"
+            :value="state.form.captureModel"
+            @focus="setFocus('captureModel')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureForm('captureModel', value)"
+          />
+          <span class="field-hint">留空 = 用宿主的辅助模型；非空形如 provider/model。</span>
+        </div>
+      </NGridItem>
+
+      <NGridItem v-if="state.form.captureCommitMode === 'discriminator'">
+        <div class="field">
+          <label for="captureServiceUrl">判别服务地址</label>
+          <NInput
+            size="small"
+            type="text"
+            aria-label="判别服务地址"
+            placeholder="http://127.0.0.1:8000"
+            :input-props="{ id: 'captureServiceUrl', spellcheck: 'false' }"
+            :value="state.form.captureServiceUrl"
+            @focus="setFocus('captureServiceUrl')"
+            @blur="setFocus('')"
+            @update:value="onServiceUrlInput"
+            @change="onServiceUrlChange"
+            @keydown.enter="onEnter"
+          />
+          <span class="field-hint">需兼容 /v1/systemone。模型与密钥沿用「决策服务」那组配置（在「记忆搜索 → 精排」页里填）。</span>
+        </div>
+      </NGridItem>
+
+      <NGridItem>
+        <div class="field">
+          <span class="field-label">服务端兜底</span>
+          <NSwitch
+            aria-label="服务端兜底"
+            :value="state.form.captureServerFallback"
+            @update:value="(next) => setCaptureForm('captureServerFallback', next)"
+          />
+          <span class="field-hint">打开后空闲足够久时由服务端自己提交；关着时全程由本地判断。</span>
+        </div>
+      </NGridItem>
+
+      <NGridItem>
+        <div class="field" :class="{ dim: !state.form.captureServerFallback }">
+          <label for="captureServerIdleSeconds">空闲秒数</label>
+          <NInputNumber
+            size="small"
+            style="width: 100%"
+            :show-button="false"
+            :update-value-on-input="false"
+            :min="CAPTURE_IDLE_RANGE[0]"
+            :max="CAPTURE_IDLE_RANGE[1]"
+            :step="60"
+            placeholder="默认 600"
+            aria-label="空闲秒数"
+            :disabled="!state.form.captureServerFallback"
+            :input-props="{ id: 'captureServerIdleSeconds' }"
+            :value="typeof state.form.captureServerIdleSeconds === 'number' ? state.form.captureServerIdleSeconds : null"
+            @focus="setFocus('captureServerIdleSeconds')"
+            @blur="setFocus('')"
+            @update:value="(value) => setCaptureNumber('captureServerIdleSeconds', value)"
+          />
+          <span class="field-hint">服务端多久没有新消息就自己提交。范围 60–86400 秒。</span>
+        </div>
+      </NGridItem>
+    </NGrid>
+
+    <p v-if="fallbackNote" class="capture-fallback bad">{{ fallbackNote }}</p>
+
     <!-- 文案整段写在一行里：模板里的换行会被压成一个空格，中文句子中间会多出空档。 -->
-    <NText class="hint-line" depth="3">打开后，每轮对话的增量会提交到 OpenViking，由服务端抽成可检索的长期记忆。这段记忆写在自己这台机器的门牌（peer）下，不会覆盖其它机器的记忆。</NText>
-    <NText class="hint-line" depth="3">记忆搜索与写回互不影响：关掉记忆搜索只停读、写回照旧；关掉写回只停写、搜索照旧。</NText>
+    <NText class="hint-line" depth="3">打开后每轮增量提交到 OpenViking，由服务端抽成可检索的长期记忆；写在本机门牌（peer）下，不覆盖其它机器的记忆；记忆搜索与写回互不影响。</NText>
   </NCard>
-
-  <div class="facts-row">
-    <span class="fact">
-      <span class="fact-label">本会话已写</span>
-      <b>{{ status.written }}</b>
-    </span>
-    <span class="fact">
-      <span class="fact-label">上次提交</span>
-      <b>{{ status.lastCommit }}</b>
-    </span>
-    <span class="fact">
-      <span class="fact-label">待提交</span>
-      <b>{{ status.pending }}</b>
-    </span>
-  </div>
-
-  <NText class="hint-line" depth="3">这一页暂时只有写回开关。状态行要等后端写回链路做完之后才会有数。</NText>
 </template>

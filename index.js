@@ -2,7 +2,7 @@
 //
 //   agent/before-start       每轮开始（探针 / 未来技能路由）
 //   provider/before-request  每次发往 provider 的请求：探针在前，召回在后
-//   agent/settled            轮次结束（探针 / 未来写回）
+//   agent/settled            轮次结束（探针 / 写回）
 //
 // 任何钩子失败都不得影响本轮对话：探针只写日志，召回失败返回 undefined。
 
@@ -17,6 +17,7 @@ import {
   peerForSession,
   resolvePeer,
 } from "./src/ov/identity.js";
+import { createCaptureHandler } from "./src/memory/capture.js";
 import { createRecallHandler } from "./src/memory/recall.js";
 import { createProbe } from "./src/probe.js";
 import { skillFindTool, skillLoadTool } from "./src/skills/tools.js";
@@ -132,6 +133,8 @@ export default defineApp(async (sdk) => {
   // 一个进程一份去重表：before-request 按模型步触发，同一用户文本只召回一次。
   // 探针随召回处理器传入：只有 gate 跳过时才会用到，是否写由 probe 开关决定。
   const recall = createRecallHandler(sdk, { probe });
+  // 写回处理器只建一次：它自己每轮从配置与状态文件现读，不缓存开关。
+  const capture = createCaptureHandler(sdk);
 
   await sdk.tools.register({
     name: "openviking_status",
@@ -212,6 +215,12 @@ export default defineApp(async (sdk) => {
 
   await sdk.hooks.on("agent/settled", async (invocation) => {
     if (await probeOn()) await probe("agent/settled", invocation);
+    // 写回在 settled 之后跑，不挡对话；失败只落日志（欠账由下一次对账补）。
+    try {
+      await capture(invocation);
+    } catch (error) {
+      sdk.logger.warn(`openviking capture failed: ${error?.message || error}`);
+    }
   });
 
   const sw = await readSwitches(sdk);

@@ -26,7 +26,8 @@
     ],
     "methods": [
       "GET",
-      "POST"
+      "POST",
+      "PATCH"
     ],
     "allowLocalhost": true,
     "defaultTimeoutMs": 1500,
@@ -306,6 +307,54 @@
             "title": "自动写回",
             "description": "每轮结束后把对话写回 OpenViking。",
             "default": true
+          },
+          "captureCommitMode": {
+            "type": "string",
+            "title": "写回提交策略",
+            "description": "fixed 攒够固定轮次后提交（默认 12 轮）；llm 用判断模型比较相邻两段是不是同一件事，不同就提交；discriminator 用 /v1/systemone 兼容的判别服务做同样的二值判断。语言模型判断要有判断模型，判别模型判断要有判别服务地址与决策服务模型；缺了回落到固定轮次，但保存的档位不变。",
+            "default": "fixed",
+            "enum": [
+              "fixed",
+              "llm",
+              "discriminator"
+            ],
+            "ui": {
+              "enumLabels": [
+                "固定轮次",
+                "语言模型判断",
+                "判别模型判断"
+              ]
+            }
+          },
+          "captureCommitTurns": {
+            "type": "string",
+            "title": "固定提交轮次",
+            "description": "固定轮次策略下攒够多少完整轮就提交，默认 12，范围 1 到 100。一轮 = 一条用户消息加至少一条助手消息。存数字串。",
+            "default": "12"
+          },
+          "captureServerFallback": {
+            "type": "boolean",
+            "title": "服务端空闲兜底",
+            "description": "打开后把空闲提交策略同步给服务端：空闲足够久时由服务端自己提交。默认关闭，全程由本地判断；关掉时若之前开过会撤销服务端策略。",
+            "default": false
+          },
+          "captureServerIdleSeconds": {
+            "type": "string",
+            "title": "服务端空闲秒数",
+            "description": "服务端兜底的空闲阈值，默认 600，范围 60 到 86400。只在服务端空闲兜底打开时生效。存数字串。",
+            "default": "600"
+          },
+          "captureModel": {
+            "type": "string",
+            "title": "写回判断模型",
+            "description": "语言模型判断策略使用的模型。留空表示用宿主的辅助模型（utility）；非空必须形如 provider/model，provider 与 model 各自最长 128 字符。",
+            "default": ""
+          },
+          "captureServiceUrl": {
+            "type": "string",
+            "title": "写回判别服务地址",
+            "description": "判别模型判断策略使用的服务地址，需兼容 /v1/systemone。只接受 http:// 或 https://，留空表示未配置。模型与密钥沿用「决策服务」那组配置；缺地址或模型时回落到固定轮次。",
+            "default": ""
           },
           "readOnly": {
             "type": "boolean",

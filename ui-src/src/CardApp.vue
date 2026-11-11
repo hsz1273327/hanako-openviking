@@ -39,6 +39,7 @@ import {
   withOverride,
 } from "./lib/card-view.js";
 import CardRow from "./components/CardRow.vue";
+import { captureStatusRows } from "./lib/capture-view.js";
 
 const REFRESH_MS = 8000;
 
@@ -72,10 +73,22 @@ const state = reactive({
   globalStatus: null,
   hasModel: false,
   writing: false,
+  capture: { active: false, autoCapture: false, data: null },
 });
 
 const controlsDisabled = computed(
   () => !state.sessionKey || !state.hasModel || state.writing,
+);
+
+// 三行状态：没有活动会话 / 写回关着 / 取数失败，都走同一条置灰路径。
+const captureDisabled = computed(
+  () => !state.capture.active || !state.capture.autoCapture,
+);
+const captureRows = computed(() =>
+  captureStatusRows(state.capture.data, {
+    active: state.capture.active,
+    autoCapture: state.capture.autoCapture,
+  }),
 );
 
 const overridden = computed(() => {
@@ -97,6 +110,7 @@ function showNoSession() {
   state.overrides = {};
   state.peerText = "—";
   state.peerTitle = "";
+  state.capture = { active: false, autoCapture: false, data: null };
   state.stats = "—";
   state.pillText = "—";
   state.pillTone = "";
@@ -112,9 +126,17 @@ function applySessionView(active) {
   state.titleTitle = view.titleTitle;
 }
 
-function applyData(data, status) {
+function applyData(data, status, captureOut) {
   // /status 失败时保留上一次的全局状态（与旧卡同一条规则）。
   if (status) state.globalStatus = status;
+  // /capture-status 失败（null）时也保留上一次的值；成功则整块落值。
+  if (captureOut && typeof captureOut === "object") {
+    state.capture = {
+      active: captureOut.active === true,
+      autoCapture: captureOut.autoCapture === true,
+      data: captureOut,
+    };
+  }
   state.hasModel = true;
   state.effective = { ...(data.effective || {}) };
   state.overrides = { ...(data.state?.overrides || {}) };
@@ -159,20 +181,22 @@ async function refresh() {
 
   const key = state.sessionKey;
   try {
-    const [status, data] = await Promise.all([
+    const [status, data, captureOut] = await Promise.all([
       readStatus(key),
       jsonGet(`/session/${encodeURIComponent(key)}`),
+      jsonGet(`/capture-status?sessionId=${encodeURIComponent(key)}`).catch(() => null),
     ]);
 
     // 后端认不出这个 key 时回 ok:false：不画一份不存在的状态，说清为什么。
     if (data?.ok === false) {
       state.hasModel = false;
       state.stats = "—";
+      state.capture = { active: false, autoCapture: false, data: null };
       setHint("这个会话对不上任何状态（unknown session key），先重新选一次会话。", true);
       return;
     }
 
-    applyData(data || {}, status);
+    applyData(data || {}, status, captureOut);
   } catch (error) {
     setHint(String(error?.message || error), true);
   }
@@ -368,6 +392,22 @@ onBeforeUnmount(() => {
             <NRadioButton value="self">只看本机</NRadioButton>
           </NRadioGroup>
         </CardRow>
+      </div>
+
+      <div
+        class="capture"
+        :class="{ off: captureDisabled }"
+        :aria-disabled="captureDisabled ? 'true' : 'false'"
+      >
+        <span
+          v-for="row in captureRows"
+          :key="row.key"
+          class="capture-row"
+          :data-row="row.key"
+        >
+          <span class="capture-label">{{ row.label }}</span>
+          <span class="capture-value">{{ row.value }}</span>
+        </span>
       </div>
 
       <p class="stats">{{ state.stats }}</p>

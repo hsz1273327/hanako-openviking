@@ -111,6 +111,28 @@ export const DEDUPE_THRESHOLD_MAX = 1;
 /** 步长只影响数字框的加减手感，不是归一化要圆整到的格点。 */
 export const DEDUPE_THRESHOLD_STEP = 0.05;
 
+/**
+ * 写回的提交策略：
+ *   fixed         攒够若干完整轮就提交
+ *   llm           用语言模型判断「这一段跟上一段是不是同一件事」
+ *   discriminator 用判别模型（systemone）做同样的二值判断
+ *
+ * 后两档缺配置时回落到 fixed，但**不改存值**：页面仍要能显示用户选过的那一档，
+ * 并告诉他缺什么。判据见 captureModeMissing / captureCommitModeOf。
+ */
+export const CAPTURE_COMMIT_MODES = Object.freeze(["fixed", "llm", "discriminator"]);
+
+/** 固定轮次档的默认值、边界与面板步长。 */
+export const CAPTURE_COMMIT_TURNS_DEFAULT = 12;
+export const CAPTURE_COMMIT_TURNS_MIN = 1;
+export const CAPTURE_COMMIT_TURNS_MAX = 100;
+export const CAPTURE_COMMIT_TURNS_STEP = 1;
+
+/** 服务端兜底空闲秒数的默认值、边界与面板步长。 */
+export const CAPTURE_IDLE_SECONDS_DEFAULT = 600;
+export const CAPTURE_IDLE_SECONDS_MIN = 60;
+export const CAPTURE_IDLE_SECONDS_MAX = 86400;
+
 export const DEFAULTS = {
   enabled: false,
   serverUrl: "http://127.0.0.1:8000",
@@ -119,6 +141,13 @@ export const DEFAULTS = {
   mergeMemory: false,
   autoRecall: true,
   autoCapture: true,
+  // 写回：提交策略、固定轮次、服务端兜底与两档判断各自要的配置。
+  captureCommitMode: "fixed",
+  captureCommitTurns: CAPTURE_COMMIT_TURNS_DEFAULT,
+  captureServerFallback: false,
+  captureServerIdleSeconds: CAPTURE_IDLE_SECONDS_DEFAULT,
+  captureModel: "",
+  captureServiceUrl: "",
   // 记忆搜索总开关：只停读这一半，写回不受影响。
   recallEnabled: true,
   readOnly: false,
@@ -338,6 +367,81 @@ export function normalizeQueryChars(raw) {
   if (!Number.isFinite(value) || !Number.isInteger(value)) return QUERY_CHARS_DEFAULT;
   if (value < QUERY_CHARS_MIN || value > QUERY_CHARS_MAX) return QUERY_CHARS_DEFAULT;
   return value;
+}
+
+/** 写回提交策略：只认三档，其余（缺项、类型不对、脏值）一律回 fixed。 */
+export function normalizeCaptureCommitMode(raw) {
+  return oneOf(raw, CAPTURE_COMMIT_MODES, "fixed");
+}
+
+/**
+ * 固定轮次归一化：数字或数字串 → 1–100 的整数（四舍五入后夹边界）。
+ *
+ * 这一档与别处的「越界回默认」不同：这里存的是一个「多少轮算够」的阈值，
+ * 夹边界至少仍是用户想表达的「更早 / 更晚提交」；留空 / 非数字才回默认 12。
+ */
+export function normalizeCaptureCommitTurns(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return CAPTURE_COMMIT_TURNS_DEFAULT;
+  if (!Number.isFinite(value)) return CAPTURE_COMMIT_TURNS_DEFAULT;
+  const rounded = Math.round(value);
+  return Math.min(CAPTURE_COMMIT_TURNS_MAX, Math.max(CAPTURE_COMMIT_TURNS_MIN, rounded));
+}
+
+/** 写进配置的形状：数字串（与门槛 / 保留条数同一口径）。 */
+export function serializeCaptureCommitTurns(raw) {
+  return String(normalizeCaptureCommitTurns(raw));
+}
+
+/** 兜底空闲秒数归一化：数字或数字串 → 60–86400 的整数（四舍五入后夹边界）。 */
+export function normalizeCaptureIdleSeconds(raw) {
+  let value;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw === "string" && raw.trim()) value = Number(raw.trim());
+  else return CAPTURE_IDLE_SECONDS_DEFAULT;
+  if (!Number.isFinite(value)) return CAPTURE_IDLE_SECONDS_DEFAULT;
+  const rounded = Math.round(value);
+  return Math.min(CAPTURE_IDLE_SECONDS_MAX, Math.max(CAPTURE_IDLE_SECONDS_MIN, rounded));
+}
+
+/** 写进配置的形状：数字串。 */
+export function serializeCaptureIdleSeconds(raw) {
+  return String(normalizeCaptureIdleSeconds(raw));
+}
+
+/**
+ * 某一档现在缺什么配置。返回空数组表示不缺；fixed 永远不缺。
+ *
+ * discriminator 的服务地址用 captureServiceUrl，模型与密钥沿用精排页那组
+ * 「决策服务」配置：/v1/systemone 是这个仓库里唯一接判别模型的地方。
+ */
+export function captureModeMissing(switches, mode) {
+  const value = normalizeCaptureCommitMode(mode);
+  if (value === "llm") {
+    return String(switches?.captureModel ?? "").trim() ? [] : ["captureModel"];
+  }
+  if (value === "discriminator") {
+    const missing = [];
+    if (!String(switches?.captureServiceUrl ?? "").trim()) missing.push("captureServiceUrl");
+    if (!String(switches?.systemoneServiceModel ?? "").trim()) {
+      missing.push("systemoneServiceModel");
+    }
+    return missing;
+  }
+  return [];
+}
+
+/**
+ * 这一轮真正会跑的档：存的档位缺配置时回落到 fixed。
+ *
+ * 只改读出来的判定，不改存值：用户把模型删了，页面仍该显示「语言模型判断」
+ * 并告诉他缺什么，而不是把选择悄悄抹掉。
+ */
+export function captureCommitModeOf(switches) {
+  const stored = normalizeCaptureCommitMode(switches?.captureCommitMode);
+  return captureModeMissing(switches, stored).length ? "fixed" : stored;
 }
 
 /** 召回超时归一化：500–30000 的整数毫秒，其余一律回默认 5000。 */
@@ -910,10 +1014,26 @@ export async function readSwitches(sdk) {
   // 迁移只在这一层做（内存里），落库等下一次整单保存，见 routes/recall-mode.js。
   const rerankLaneSchemaRaw = await read(sdk, "rerankLaneSchema");
   const legacyLanes = rerankLaneSchemaIsLegacy(rerankLaneSchemaRaw);
+  // 写回的存值与原样值分开：captureCommitMode 是用户选的，captureEffectiveMode
+  // 是缺配置回落之后这一轮真正会跑的。两者都读出来，界面才有得显示。
+  const captureCommitMode = normalizeCaptureCommitMode(await read(sdk, "captureCommitMode"));
+  const captureModel = String((await read(sdk, "captureModel")) ?? "").trim();
+  const captureServiceUrl = normalizeServiceUrl(await read(sdk, "captureServiceUrl"));
+  const captureChoice = { captureModel, captureServiceUrl, systemoneServiceModel };
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
     autoCapture: await read(sdk, "autoCapture"),
+    // 写回：存值 / 实际生效档 / 固定轮次 / 服务端兜底。
+    captureCommitMode,
+    captureEffectiveMode: captureCommitModeOf({ ...captureChoice, captureCommitMode }),
+    captureCommitTurns: normalizeCaptureCommitTurns(await read(sdk, "captureCommitTurns")),
+    captureServerFallback: (await read(sdk, "captureServerFallback")) === true,
+    captureServerIdleSeconds: normalizeCaptureIdleSeconds(
+      await read(sdk, "captureServerIdleSeconds"),
+    ),
+    captureModel,
+    captureServiceUrl,
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,
     readOnly: await read(sdk, "readOnly"),

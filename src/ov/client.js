@@ -51,7 +51,11 @@ export function createClient({
     if (!ok || data?.status === "error") {
       const code = data?.error?.code || `HTTP ${status}`;
       const message = data?.error?.message || statusText || "";
-      throw new Error(`OpenViking ${path}: ${code} ${message}`.trim());
+      const error = new Error(`OpenViking ${path}: ${code} ${message}`.trim());
+      // 写回要靠 404 判「服务端没有这个会话」：状态码是结构化信息，
+      // 不能逼调用方去正则 message。message 本身一个字不改。
+      error.status = status;
+      throw error;
     }
     return mode === "raw" ? data : data?.result;
   }
@@ -211,6 +215,13 @@ export function createClient({
           ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
           ...(opts.autoCommitPolicy ? { auto_commit_policy: opts.autoCommitPolicy } : {}),
         }),
+      }),
+    getSession: (sessionId) =>
+      call(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" }),
+    patchSessionConfig: (sessionId, body) =>
+      call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/config`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
       }),
     addMessages: (sessionId, messages) =>
       call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/batch`, {

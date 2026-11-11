@@ -23,6 +23,7 @@ import registerPeersRoutes from "../routes/peers.js";
 import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
 import registerRecallModeRoutes from "../routes/recall-mode.js";
+import registerCaptureRoutes from "../routes/capture.js";
 import registerModelsRoutes from "../routes/models.js";
 import registerControlsRoutes from "../routes/controls.js";
 import {
@@ -124,6 +125,21 @@ import {
   RECALL_TIMEOUT_DEFAULT,
   RECALL_TIMEOUT_MIN,
   RECALL_TIMEOUT_MAX,
+  CAPTURE_COMMIT_MODES,
+  CAPTURE_COMMIT_TURNS_DEFAULT,
+  CAPTURE_COMMIT_TURNS_MIN,
+  CAPTURE_COMMIT_TURNS_MAX,
+  CAPTURE_COMMIT_TURNS_STEP,
+  CAPTURE_IDLE_SECONDS_DEFAULT,
+  CAPTURE_IDLE_SECONDS_MIN,
+  CAPTURE_IDLE_SECONDS_MAX,
+  normalizeCaptureCommitMode,
+  normalizeCaptureCommitTurns,
+  serializeCaptureCommitTurns,
+  normalizeCaptureIdleSeconds,
+  serializeCaptureIdleSeconds,
+  captureModeMissing,
+  captureCommitModeOf,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { maskOf, maskString } from "../src/ov/mask.js";
@@ -287,6 +303,30 @@ import {
   OVERRIDE_KEYS,
   BOOLEAN_KEYS,
 } from "../src/state/session.js";
+// 写回：游标 / 对账是纯函数，capture 是钩子本身（冒烟用假 sdk / 假 fetch / 临时目录）。
+import {
+  CAPTURE_MESSAGE_ROLES,
+  emptyCursor,
+  normalizeCursor,
+  parseSessionLines,
+  messageTextOf,
+  isCaptureMessage,
+  captureMessages,
+  collectDelta,
+  countTurns,
+  reconcileCapture,
+  captureCounts,
+} from "../src/memory/cursor.js";
+import {
+  CAPTURE_TOPIC_QUESTION,
+  CAPTURE_SAMPLE_CHARS,
+  CAPTURE_ASK_TIMEOUT_MS,
+  CAPTURE_ASK_MAX_TOKENS,
+  renderTopicPrompt,
+  parseTopicAnswer,
+  captureDecision,
+  createCaptureHandler,
+} from "../src/memory/capture.js";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
 // 边栏会话卡的数据投影：覆盖提交语义、统计 / 提示 / peer 文案都在这里，纯函数。
@@ -314,9 +354,15 @@ import {
   readTab,
   writeTab,
 } from "../ui-src/src/lib/tabs.js";
-// 记忆共享页状态行：纯函数，node 直接验。
+// 写回两张卡共用的纯函数：设置页投影 + 会话卡三行，node 直接验。
 import {
-  CAPTURE_STATUS_EMPTY,
+  CAPTURE_EMPTY,
+  CAPTURE_IDLE_RANGE,
+  CAPTURE_TURNS_RANGE,
+  captureFallbackNote,
+  captureModeLabels,
+  captureModeOptions,
+  captureStatusRows,
   captureStatusView,
 } from "../ui-src/src/lib/capture-view.js";
 // 记忆页三个子页签：纯逻辑 + 组件挂载方式。
@@ -3081,39 +3127,124 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 }
 // ================= 记忆共享页：状态行与面板源码 =================
 {
+  const emptyRow = { written: CAPTURE_EMPTY, lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: true };
+  const sample = { written: 3, lastCommitAt: 1704067200000, pendingTurns: 1 };
   eq(
-    "captureStatusView 缺项 / 缺字段 / 非数字时返回空态",
+    "captureStatusView：无会话 / 写回关 / 整份数据缺项 → 三行暂无且 disabled",
     [
       captureStatusView(null),
-      captureStatusView({}),
+      captureStatusView(sample, { active: false }),
+      captureStatusView(sample, { autoCapture: false }),
+    ],
+    [emptyRow, emptyRow, emptyRow],
+  );
+  eq(
+    "captureStatusView：正常值给「N 条 / 时间串 / N 轮」，单条字段缺失只让那一行占位",
+    [
+      captureStatusView(sample),
+      captureStatusView({ written: 3 }),
       captureStatusView({ written: -1, lastCommitAt: "invalid", pendingTurns: "abc" }),
-      captureStatusView({ written: 3, lastCommitAt: 1704067200000, pendingTurns: 1 }),
     ],
     [
-      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
-      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
-      { written: CAPTURE_STATUS_EMPTY, lastCommit: CAPTURE_STATUS_EMPTY, pending: CAPTURE_STATUS_EMPTY },
-      { written: "3 条", lastCommit: new Date(1704067200000).toLocaleString("zh-CN"), pending: "1 轮" },
+      {
+        written: "3 条",
+        lastCommit: new Date(1704067200000).toLocaleString("zh-CN"),
+        pending: "1 轮",
+        disabled: false,
+      },
+      { written: "3 条", lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: false },
+      { written: CAPTURE_EMPTY, lastCommit: CAPTURE_EMPTY, pending: CAPTURE_EMPTY, disabled: false },
     ],
+  );
+  eq(
+    "captureStatusRows：三行 label 逐字是 本会话已写 / 上次提交 / 待提交",
+    captureStatusRows(sample, { active: true, autoCapture: true }),
+    [
+      { key: "written", label: "本会话已写", value: "3 条" },
+      {
+        key: "lastCommit",
+        label: "上次提交",
+        value: new Date(1704067200000).toLocaleString("zh-CN"),
+      },
+      { key: "pending", label: "待提交", value: "1 轮" },
+    ],
+  );
+  eq(
+    "captureModeLabels / captureModeOptions 与 manifest enumLabels 逐字一致",
+    [captureModeLabels, captureModeOptions()],
+    [
+      { fixed: "固定轮次", llm: "语言模型判断", discriminator: "判别模型判断" },
+      [
+        { value: "fixed", label: "固定轮次" },
+        { value: "llm", label: "语言模型判断" },
+        { value: "discriminator", label: "判别模型判断" },
+      ],
+    ],
+  );
+  const fallbackMissingModel = captureFallbackNote({
+    mode: "llm",
+    effectiveMode: "fixed",
+    missing: ["captureModel"],
+  });
+  check(
+    "captureFallbackNote：回落时说清「回落」与缺的那个判断模型",
+    fallbackMissingModel.includes("回落") && fallbackMissingModel.includes("判断模型"),
+    fallbackMissingModel,
+  );
+  eq(
+    "captureFallbackNote：两档一致返回空串 / 多个缺项按人话用、号连接",
+    [
+      captureFallbackNote({ mode: "llm", effectiveMode: "llm", missing: [] }),
+      captureFallbackNote({
+        mode: "discriminator",
+        effectiveMode: "fixed",
+        missing: ["captureServiceUrl", "systemoneServiceModel"],
+      }),
+    ],
+    ["", "当前回落到固定轮次：还缺 判别服务地址、决策服务模型"],
   );
 
   const capture = uiCode("components/CapturePanel.vue");
   check(
-    "CapturePanel 有写回 aria-label、拨的是 autoCapture、出现 captureStatusView",
-    capture.includes('aria-label="写回"') &&
-      capture.includes("autoCapture") &&
-      capture.includes("captureStatusView"),
+    "CapturePanel 仍然有写回开关：aria-label=写回、拨的是 autoCapture",
+    capture.includes('aria-label="写回"') && capture.includes("autoCapture"),
     capture.slice(0, 600),
   );
   check(
-    "CapturePanel 不含还没实现的东西（补录 / 兜底 / commit）",
-    !["补录", "兜底", "commit"].some((word) => capture.includes(word)),
+    "CapturePanel 六个机器级字段与 captureModeOptions 都在（不再只有开关）",
+    [
+      "captureCommitMode",
+      "captureCommitTurns",
+      "captureServerFallback",
+      "captureServerIdleSeconds",
+      "captureModel",
+      "captureServiceUrl",
+      "captureModeOptions",
+    ].every((word) => capture.includes(word)),
+    capture.slice(0, 1200),
+  );
+  check(
+    "CapturePanel 不出现任何会话级状态字样（本会话已写 / 上次提交 / 待提交）",
+    !["本会话已写", "上次提交", "待提交"].some((word) => capture.includes(word)),
     capture,
   );
   check(
     "CapturePanel 没有出现「重排」字样",
     !capture.includes("重排"),
     capture.match(/重排/)?.[0],
+  );
+
+  const cardApp = uiCode("CardApp.vue");
+  const captureViewCode = uiCode("lib/capture-view.js");
+  check(
+    "CardApp 取 /capture-status 且三行由 captureStatusRows 投影",
+    cardApp.includes("capture-status") && cardApp.includes("captureStatusRows"),
+    cardApp.slice(0, 1000),
+  );
+  check(
+    "三行 label 三件套都在 capture-view.js 里（不在组件里另写一份）",
+    ["本会话已写", "上次提交", "待提交"].every((word) => captureViewCode.includes(word)),
+    captureViewCode.slice(0, 800),
   );
 
   const tabBar = uiCode("components/TabBar.vue");
@@ -3131,7 +3262,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  const cardApp = uiCode("CardApp.vue");
   check(
     "会话卡上不再有写回开关",
     !cardApp.includes('row-key="autoCapture"') && !cardApp.includes('aria-label="写回"'),
@@ -4044,6 +4174,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         merged: [0.5, 0.25],
         kept: [0],
       };
+    }
+    // 写回设置：回包就是后端此刻的投影，测试用例会先把它改成想要的形状。
+    if (path === "/capture-config") {
+      return { ok: true, ...clone(backend["/capture-config"]) };
     }
     return { ok: true };
   };
@@ -5062,6 +5196,98 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await fresh.refresh();
     eq("正在改地址时刷新不回写那一格，失焦后正常回写",
       [whileEditing, fresh.state.conn.serverUrl], ["http://127.0.0.1:8000", "http://changed:9000"]);
+  }
+
+  // ---- 写回设置：applyCaptureConfig 落值 / 成功走回包 / 失败回滚 ----
+  {
+    backend["/capture-config"] = {
+      mode: "llm",
+      effectiveMode: "fixed",
+      missing: ["captureModel"],
+      turns: "20",
+      serverFallback: true,
+      idleSeconds: "900",
+      model: "",
+      serviceUrl: "",
+    };
+    createConfig({ get, post, sessionKey: async () => "01a1585b-86d2", schedule: () => 0 });
+    const cap = useConfig();
+    await cap.refresh();
+    eq(
+      "applyCaptureConfig：投影落进 captureConfig，数字串转数字进 form",
+      [
+        cap.state.captureConfig,
+        cap.state.form.captureCommitMode,
+        cap.state.form.captureCommitTurns,
+        cap.state.form.captureServerFallback,
+        cap.state.form.captureServerIdleSeconds,
+      ],
+      [
+        { mode: "llm", effectiveMode: "fixed", missing: ["captureModel"] },
+        "llm",
+        20,
+        true,
+        900,
+      ],
+    );
+
+    // 成功：先改后端回包，再拨控件——store 必须停在回包上，而不是它发出去的那份。
+    backend["/capture-config"] = {
+      mode: "fixed",
+      effectiveMode: "fixed",
+      missing: [],
+      turns: "33",
+      serverFallback: false,
+      idleSeconds: "777",
+      model: "p/m",
+      serviceUrl: "http://judge:1",
+    };
+    const beforePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config").length;
+    await cap.setCaptureForm("captureCommitMode", "fixed");
+    const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
+    eq(
+      "saveCapture 成功：整单只发一单，body 是 form 六个键，落地以回包为准",
+      [
+        capturePosts.length - beforePosts,
+        Object.keys(capturePosts.at(-1)?.body || {}).sort(),
+        cap.state.form.captureCommitTurns,
+        cap.state.form.captureServerIdleSeconds,
+        cap.state.form.captureModel,
+        cap.state.form.captureServiceUrl,
+        [cap.state.note.text, cap.state.note.bad],
+      ],
+      [
+        1,
+        [
+          "captureCommitMode",
+          "captureCommitTurns",
+          "captureModel",
+          "captureServerFallback",
+          "captureServerIdleSeconds",
+          "captureServiceUrl",
+        ],
+        33,
+        777,
+        "p/m",
+        "http://judge:1",
+        ["写回设置已保存", false],
+      ],
+    );
+
+    // 失败：改一格之后拒掉这一单，控件退回上一次确认值，错误进提示位。
+    const confirmedTurns = cap.state.form.captureCommitTurns;
+    rejectNextPost = "写回设置写入失败";
+    await cap.setCaptureNumber("captureCommitTurns", 40);
+    eq(
+      "saveCapture 失败：回滚到上一次确认值，note 里带服务端错误",
+      [
+        cap.state.form.captureCommitTurns,
+        cap.state.form.captureCommitMode,
+        cap.state.note.bad,
+        cap.state.note.text.includes("写回设置写入失败"),
+      ],
+      [confirmedTurns, "fixed", true, true],
+    );
   }
 }
 
@@ -6753,6 +6979,1080 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   check("过期会话被清掉", !fs.existsSync(staleFile));
 
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= 写回：游标 / 对账 / 提交 =================
+{
+  const root = path.join(import.meta.dirname, ".tmp-capture");
+  fs.rmSync(root, { recursive: true, force: true });
+
+  const NOW = "2026-01-02T03:04:05.000Z";
+  const ID = "01a1585b-86d2-7c64-b8ac-edbe7099d0a1";
+  const jsonResponse = (payload, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const okResult = (result = {}) => ({ status: 200, body: { status: "ok", result } });
+  const notFound = () => ({
+    status: 404,
+    body: { status: "error", error: { code: "NOT_FOUND", message: "no session" } },
+  });
+  const methodOf = (call) => String(call.init?.method || "GET").toUpperCase();
+  const pathOf = (url) => new URL(url).pathname;
+  const bodyOf = (call) => JSON.parse(call.init?.body || "{}");
+
+  function scriptedFetch(handler) {
+    const calls = [];
+    const fetchImpl = async (url, init = {}) => {
+      calls.push({ url, init });
+      const out = await handler(url, init);
+      if (out instanceof Response) return out;
+      return jsonResponse(out.body, out.status);
+    };
+    return { calls, fetchImpl };
+  }
+
+  /** 一条 JSONL 记录；自定义记录也用同一个出口，避免夹具写出宿主没有的形状。 */
+  function record({ id, type = "message", role, content, timestamp = "2026-01-01T00:00:00.000Z", ...extra }) {
+    const base = { type, id, parentId: null, timestamp, ...extra };
+    if (type === "message") base.message = { role, content };
+    return JSON.stringify(base);
+  }
+
+  function sessionFile(dir, id, lines) {
+    const file = path.join(
+      dir,
+      "agents",
+      "blueflower",
+      "sessions",
+      `2026-01-01T00-00-00-000Z_${id}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, lines.length ? `${lines.join("\n")}\n` : "", "utf8");
+    return file;
+  }
+
+  function prepareState(stateDir, id, { cursor, overrides } = {}) {
+    patchSession(stateDir, id, {
+      capture: { cursor: normalizeCursor(cursor) },
+      ...(overrides ? { overrides } : {}),
+    });
+  }
+
+  function readCursor(stateDir, id) {
+    return normalizeCursor(readSession(stateDir, id).capture?.cursor);
+  }
+
+  function captureFetch({ id, server = null, judge } = {}) {
+    return scriptedFetch((url, init) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      const pathname = pathOf(url);
+      if (method === "GET" && pathname === `/api/v1/sessions/${id}`) {
+        return server === null ? notFound() : okResult(server);
+      }
+      if (method === "POST" && pathname === "/api/v1/sessions") {
+        return okResult({ session_id: id });
+      }
+      if (method === "POST" && pathname === `/api/v1/sessions/${id}/messages/batch`) {
+        return okResult();
+      }
+      if (method === "POST" && pathname === `/api/v1/sessions/${id}/commit`) {
+        return okResult();
+      }
+      if (method === "PATCH" && pathname === `/api/v1/sessions/${id}/config`) {
+        return okResult();
+      }
+      if (method === "POST" && pathname === "/v1/systemone") {
+        return jsonResponse(judge ? judge() : { answers: { q: { choice: "yes", confidence: 0.9 } } });
+      }
+      return okResult();
+    });
+  }
+
+  async function runCapture({
+    token,
+    id = ID,
+    lines = [],
+    cursor,
+    overrides,
+    values = {},
+    models,
+    server = null,
+    judge,
+    logger,
+    fileMissing = false,
+  }) {
+    const dir = path.join(root, token);
+    fs.rmSync(dir, { recursive: true, force: true });
+    const file = sessionFile(dir, id, lines);
+    // 模拟「会话刚建、JSONL 还没落盘」：父目录在，文件本身不存在。
+    if (fileMissing) fs.rmSync(file, { force: true });
+    const stateDir = path.join(dir, "state");
+    prepareState(stateDir, id, { cursor, overrides });
+    const mock = captureFetch({ id, server, judge });
+    const sdk = recallSdk({
+      values: {
+        enabled: true,
+        autoCapture: true,
+        serverUrl: "http://h:1",
+        apiKey: "k",
+        ...values,
+      },
+      fetchImpl: mock.fetchImpl,
+      dataDir: stateDir,
+      models,
+      logger,
+    });
+    const handler = createCaptureHandler(sdk, { dataDir: stateDir, now: () => NOW });
+    const report = await handler({ session: { sessionId: id, sessionPath: file } });
+    return { report, calls: mock.calls, cursor: readCursor(stateDir, id), stateDir, file };
+  }
+
+  // ---- 1 / 2. JSONL 解析与正文提取 ----
+  {
+    const text = [
+      record({ id: "m1", role: "user", content: "你好", timestamp: "t1" }),
+      "{坏行",
+      JSON.stringify([1, 2]),
+      "",
+      record({ id: "c1", type: "custom", timestamp: "t2" }),
+      record({
+        id: "m2",
+        role: "assistant",
+        timestamp: "t3",
+        content: [
+          { type: "text", text: "在" },
+          { type: "image", url: "viking://img" },
+        ],
+      }),
+      record({ id: "m3", role: "tool", content: "不该写", timestamp: "t4" }),
+      record({ id: "m4", role: "assistant", content: "", timestamp: "t5" }),
+    ].join("\n");
+    const records = parseSessionLines(text);
+    eq(
+      "parseSessionLines：坏行 / 数组 / 空行都跳过，只留对象",
+      records.length,
+      5,
+    );
+    eq(
+      "captureMessages：只留 message 且 role 合法且正文非空",
+      captureMessages(records),
+      [
+        { id: "m1", role: "user", content: "你好", timestamp: "t1" },
+        { id: "m2", role: "assistant", content: "在", timestamp: "t3" },
+      ],
+    );
+    eq(
+      "CAPTURE_MESSAGE_ROLES 只含 user / assistant",
+      CAPTURE_MESSAGE_ROLES,
+      ["user", "assistant"],
+    );
+    eq(
+      "messageTextOf：串原样 / 数组只拼 text / image 跳过 / 非串非数组给空串",
+      [
+        messageTextOf("原文"),
+        messageTextOf([
+          { type: "text", text: "甲" },
+          { type: "image", url: "x" },
+          { type: "text", text: "乙" },
+        ]),
+        messageTextOf([{ type: "image", url: "x" }]),
+        messageTextOf({ text: "不是数组" }),
+        messageTextOf(null),
+      ],
+      ["原文", "甲乙", "", "", ""],
+    );
+    eq(
+      "isCaptureMessage：非 message / 非法 role / 空正文都不算",
+      [
+        isCaptureMessage(JSON.parse(record({ id: "x", type: "custom" }))),
+        isCaptureMessage(JSON.parse(record({ id: "y", role: "tool", content: "x" }))),
+        isCaptureMessage(JSON.parse(record({ id: "z", role: "user", content: "" }))),
+        isCaptureMessage(JSON.parse(record({ id: "ok", role: "user", content: "x" }))),
+      ],
+      [false, false, false, true],
+    );
+  }
+
+  // ---- 3. 游标：只取 lastEntryId 之后，认不出来按条数兜底 ----
+  {
+    const messages = captureMessages(
+      [
+        record({ id: "a1", role: "user", content: "一" }),
+        record({ id: "skip", type: "model_change", model: "x" }),
+        record({ id: "a2", role: "assistant", content: "二" }),
+        record({ id: "a3", role: "user", content: "三" }),
+        record({ id: "a4", role: "assistant", content: "四" }),
+      ].map((line) => JSON.parse(line)),
+    );
+    const fromEmpty = collectDelta(messages, emptyCursor());
+    eq(
+      "空游标从头取，非 message 记录不进增量",
+      [fromEmpty.messages.map((message) => message.id), fromEmpty.lastEntryId],
+      [["a1", "a2", "a3", "a4"], "a4"],
+    );
+    const after = collectDelta(messages, normalizeCursor({ lastEntryId: "a2" }));
+    eq(
+      "lastEntryId 之后的才算增量",
+      [after.messages.map((message) => message.id), after.lastEntryId],
+      [["a3", "a4"], "a4"],
+    );
+    const folded = collectDelta(
+      messages,
+      normalizeCursor({ lastEntryId: "不认识", lastMessageCount: 2 }),
+    );
+    eq(
+      "lastEntryId 认不出来时按条数兜底切片（宁可少写不重发）",
+      folded.messages.map((message) => message.id),
+      ["a3", "a4"],
+    );
+    const stale = collectDelta(
+      messages,
+      normalizeCursor({ lastEntryId: "a4", lastMessageCount: 4 }),
+    );
+    eq("没有新消息时游标不动", [stale.messages.length, stale.lastEntryId], [0, "a4"]);
+    eq(
+      "countTurns：user 后面至少有一条 assistant 才算一轮",
+      [
+        countTurns(messages),
+        countTurns([{ role: "user" }]),
+        countTurns([{ role: "assistant" }, { role: "user" }, { role: "assistant" }]),
+      ],
+      [2, 0, 1],
+    );
+  }
+
+  // ---- 4. 对账：commit 前进 / 欠账 / 缺消息 / 404 ----
+  {
+    const cursor = normalizeCursor({ lastCommitCount: 1, lastMessageCount: 4 });
+    const committed = reconcileCapture({
+      cursor,
+      server: {
+        commit_count: "2",
+        message_count: "4",
+        pending_tokens: "9",
+        last_commit_at: "2026-01-02T00:00:00.000Z",
+      },
+    });
+    eq(
+      "对账 commit 前进：只更新本地计数、不再提交，patch 带新 commit_count 与时间",
+      [committed.state, committed.write, committed.mayCommit, committed.patch],
+      [
+        "committed",
+        true,
+        false,
+        { lastCommitCount: 2, lastCommitAt: "2026-01-02T00:00:00.000Z" },
+      ],
+    );
+    const pending = reconcileCapture({
+      cursor,
+      server: { commit_count: 1, message_count: 4, pending_tokens: 42 },
+    });
+    eq(
+      "对账欠账：state pending、允许提交",
+      [pending.state, pending.write, pending.mayCommit, pending.patch],
+      ["pending", true, true, null],
+    );
+    const missing = reconcileCapture({
+      cursor,
+      server: { commit_count: 1, message_count: 2, pending_tokens: 5 },
+    });
+    eq(
+      "对账消息缺失：state missing、不许提交（先补写）",
+      [missing.state, missing.write, missing.mayCommit],
+      ["missing", true, false],
+    );
+    eq(
+      "对账 server:null（404）→ fresh，从头写但不提交",
+      reconcileCapture({ cursor, server: null }),
+      { state: "fresh", write: true, mayCommit: false, patch: null },
+    );
+  }
+
+  // ---- 4b. 端到端：服务端 commit 已前进 = 上次回执丢了，不重复提交 ----
+  {
+    const receiptAt = "2026-11-11T02:00:00.000Z";
+    const run = await runCapture({
+      token: "commit-receipt-lost",
+      lines: [
+        record({ id: "r1", role: "user", content: "回执丢了之前的那一句" }),
+        record({ id: "r2", role: "assistant", content: "嗯，记下了" }),
+      ],
+      cursor: {
+        lastEntryId: "r2",
+        lastMessageCount: 2,
+        lastCommitCount: 1,
+        lastCommitAt: "2026-11-10T00:00:00.000Z",
+        lastCommitMessageCount: 2,
+        lastCommitSample: "上一段",
+        pendingTurns: 0,
+        serverPolicy: { enabled: false, idleSeconds: null },
+      },
+      server: {
+        commit_count: 2,
+        message_count: 2,
+        pending_tokens: 9,
+        last_commit_at: receiptAt,
+      },
+    });
+    const commitCall = run.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "端到端：回执丢了不重复提交——服务端 commit_count 已前进时一次 POST /commit 都不发，游标只按回执推到 2 并跟上服务端时间",
+      [
+        run.report.reconcile,
+        Boolean(commitCall),
+        run.cursor.lastCommitCount,
+        run.cursor.lastCommitAt,
+      ],
+      ["committed", false, 2, receiptAt],
+    );
+  }
+
+  // ---- 5. client 的两个新出口与 404 状态码 ----
+  {
+    const { calls, fetchImpl } = mockFetch({
+      body: { status: "ok", result: { commit_count: 7 } },
+    });
+    const client = createClient({ serverUrl: "http://h:1", apiKey: "k", fetchImpl });
+    const got = await client.getSession(ID);
+    await client.patchSessionConfig(ID, { auto_commit_policy: null });
+    eq(
+      "client.getSession 走 GET 会话端点 / patchSessionConfig 走 PATCH …/config 且请求体原样",
+      [
+        got,
+        calls[0].url,
+        calls[0].init.method,
+        calls[1].url,
+        calls[1].init.method,
+        JSON.parse(calls[1].init.body),
+      ],
+      [
+        { commit_count: 7 },
+        `http://h:1/api/v1/sessions/${ID}`,
+        "GET",
+        `http://h:1/api/v1/sessions/${ID}/config`,
+        "PATCH",
+        { auto_commit_policy: null },
+      ],
+    );
+
+    const missing = mockFetch({
+      status: 404,
+      body: { status: "error", error: { code: "NOT_FOUND", message: "gone" } },
+    });
+    const missingClient = createClient({
+      serverUrl: "http://h:1",
+      apiKey: "k",
+      fetchImpl: missing.fetchImpl,
+    });
+    let caught = null;
+    try {
+      await missingClient.getSession("missing");
+    } catch (error) {
+      caught = error;
+    }
+    eq(
+      "unwrap 抛出的错误带 HTTP 状态码 404，message 一个字不改",
+      [caught?.status, String(caught?.message || "")],
+      [404, "OpenViking /api/v1/sessions/missing: NOT_FOUND gone"],
+    );
+  }
+
+  // ---- 5. 端到端：404 → 建会话 → 批量写消息 → 推进游标 ----
+  {
+    const run = await runCapture({
+      token: "e2e-create-write",
+      lines: [
+        record({ id: "m1", role: "user", content: "早上好", timestamp: "2026-01-01T09:00:00.000Z" }),
+        record({ id: "m2", role: "assistant", content: "早上好呀", timestamp: "2026-01-01T09:00:01.000Z" }),
+      ],
+      values: { captureCommitTurns: "50" },
+      server: null,
+    });
+    const createCall = run.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/api/v1/sessions",
+    );
+    const batchCall = run.calls.find(
+      (call) =>
+        methodOf(call) === "POST" && pathOf(call.url) === `/api/v1/sessions/${ID}/messages/batch`,
+    );
+    eq(
+      "端到端 404：先建会话再批量写消息，报告 created / wrote / reconcile",
+      [run.report.created, run.report.wrote, run.report.skipped, run.report.reconcile, Boolean(batchCall)],
+      [true, 2, null, "fresh", true],
+    );
+    eq(
+      "服务端兜底关着时 createSession 请求体没有 auto_commit_policy 键",
+      Object.hasOwn(bodyOf(createCall), "auto_commit_policy"),
+      false,
+    );
+    const batch = bodyOf(batchCall).messages;
+    eq(
+      "写回消息的条数 / role / content / created_at / peer_id 都对",
+      [
+        batch.length,
+        batch.map((message) => message.role),
+        batch.map((message) => message.content),
+        batch.map((message) => message.created_at),
+        batch.map((message) => message.peer_id),
+      ],
+      [
+        2,
+        ["user", "assistant"],
+        ["早上好", "早上好呀"],
+        ["2026-01-01T09:00:00.000Z", "2026-01-01T09:00:01.000Z"],
+        ["openhanako-blueflower", "openhanako-blueflower"],
+      ],
+    );
+    eq(
+      "写成功之后状态文件里的 lastEntryId / lastMessageCount 推进",
+      [run.cursor.lastEntryId, run.cursor.lastMessageCount],
+      ["m2", 2],
+    );
+    eq("写成功之后 pendingTurns 按这一段的完整轮数记", run.cursor.pendingTurns, 1);
+  }
+
+  // ---- 同一会话不并发写：第一次还挂着时第二次直接 busy ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0b7";
+    const caseDir = path.join(root, "concurrent-guard");
+    fs.rmSync(caseDir, { recursive: true, force: true });
+    const file = sessionFile(caseDir, id, [
+      record({ id: "c1", role: "user", content: "先说一句" }),
+      record({ id: "c2", role: "assistant", content: "收到" }),
+    ]);
+    const stateDir = path.join(caseDir, "state");
+    prepareState(stateDir, id, {
+      cursor: { serverPolicy: { enabled: false, idleSeconds: null } },
+    });
+
+    const calls = [];
+    let releaseBatch;
+    let markBatchSeen;
+    const batchGate = new Promise((resolve) => { releaseBatch = resolve; });
+    const batchSeen = new Promise((resolve) => { markBatchSeen = resolve; });
+    let gated = false;
+    const fetchImpl = async (url, init = {}) => {
+      calls.push({ url, init });
+      const method = String(init.method || "GET").toUpperCase();
+      const pathname = new URL(url).pathname;
+      if (method === "GET" && pathname === `/api/v1/sessions/${id}`) {
+        return jsonResponse({
+          status: "ok",
+          result: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+        });
+      }
+      if (method === "POST" && pathname === `/api/v1/sessions/${id}/messages/batch`) {
+        // 第一次写消息挂住不返回：模拟两轮 settled 挨得太近。
+        if (!gated) {
+          gated = true;
+          markBatchSeen();
+          await batchGate;
+        }
+        return jsonResponse({ status: "ok", result: {} });
+      }
+      if (method === "POST" && pathname === `/api/v1/sessions/${id}/commit`) {
+        return jsonResponse({ status: "ok", result: {} });
+      }
+      return jsonResponse({ status: "ok", result: {} });
+    };
+    const sdk = recallSdk({
+      values: {
+        enabled: true,
+        autoCapture: true,
+        serverUrl: "http://h:1",
+        apiKey: "k",
+        captureCommitMode: "fixed",
+        captureCommitTurns: "50",
+      },
+      fetchImpl,
+      dataDir: stateDir,
+    });
+    const handler = createCaptureHandler(sdk, { dataDir: stateDir, now: () => NOW });
+    const invocation = { session: { sessionId: id, sessionPath: file } };
+    const batchCount = () =>
+      calls.filter(
+        (call) =>
+          String(call.init?.method || "").toUpperCase() === "POST" &&
+          new URL(call.url).pathname.endsWith("/messages/batch"),
+      ).length;
+
+    const firstPromise = handler(invocation);
+    await batchSeen;
+    const batchesBeforeBusy = batchCount();
+    const callsBeforeBusy = calls.length;
+
+    const second = await handler(invocation);
+    eq(
+      "同一会话不并发写，防重复：第一次还挂在 messages/batch 时，第二次必须 skipped:busy 且一个请求都不发、不多写一条",
+      [second.skipped, calls.length - callsBeforeBusy, batchCount() - batchesBeforeBusy],
+      ["busy", 0, 0],
+    );
+
+    releaseBatch();
+    const first = await firstPromise;
+    fs.appendFileSync(
+      file,
+      `${[
+        record({ id: "c3", role: "user", content: "第二次" }),
+        record({ id: "c4", role: "assistant", content: "好" }),
+      ].join("\n")}\n`,
+      "utf8",
+    );
+    const batchesBeforeThird = batchCount();
+    const third = await handler(invocation);
+    eq(
+      "防重入放行后第三次能正常跑：第一次完成、第三次不 busy，新增那段照常写进去",
+      [first.skipped, third.skipped, third.wrote, batchCount() - batchesBeforeThird],
+      [null, null, 2, 1],
+    );
+  }
+
+  // ---- JSONL 文件不存在：空文件处理，不落到 skipped:"error" ----
+  {
+    const missing = await runCapture({
+      token: "missing-jsonl",
+      fileMissing: true,
+      server: null,
+    });
+    const createCall = missing.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/api/v1/sessions",
+    );
+    eq(
+      "JSONL 文件不存在按空文件处理：不报错、仍建会话且游标可落盘",
+      [
+        missing.report.skipped,
+        missing.report.error,
+        missing.report.created,
+        missing.report.wrote,
+        Boolean(createCall),
+      ],
+      [null, null, true, 0, true],
+    );
+    eq(
+      "JSONL 文件不存在时游标仍是零值并被写入状态文件",
+      [missing.cursor.lastEntryId, missing.cursor.lastMessageCount],
+      ["", 0],
+    );
+  }
+
+  // ---- 6. fixed：够轮数才提交 ----
+  {
+    const baseCursor = {
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const lines = [
+      record({ id: "f1", role: "user", content: "第一问" }),
+      record({ id: "f2", role: "assistant", content: "第一答" }),
+    ];
+    const enough = await runCapture({
+      token: "fixed-enough",
+      lines,
+      cursor: baseCursor,
+      values: { captureCommitMode: "fixed", captureCommitTurns: "1" },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+    });
+    const enoughCommit = enough.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "fixed：pendingTurns 够 1 轮就发 POST …/commit",
+      [enough.report.committed, Boolean(enoughCommit)],
+      [true, true],
+    );
+    eq(
+      "fixed 提交后 lastCommitCount / lastCommitAt / lastCommitMessageCount 都动了",
+      [
+        enough.cursor.lastCommitCount,
+        enough.cursor.lastCommitAt,
+        enough.cursor.lastCommitMessageCount,
+        enough.cursor.lastCommitSample,
+      ],
+      [1, NOW, 2, "第一问\n第一答"],
+    );
+
+    const below = await runCapture({
+      token: "fixed-below-limit",
+      lines,
+      cursor: baseCursor,
+      values: { captureCommitMode: "fixed", captureCommitTurns: "2" },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+    });
+    const belowCommit = below.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "fixed：不够 2 轮不发 commit，游标留在 0",
+      [below.report.committed, Boolean(belowCommit), below.cursor.lastCommitCount, below.cursor.pendingTurns],
+      [false, false, 0, 1],
+    );
+
+    // 跨边界的半轮：上一条 user 已经写过，这一轮 delta 只有 assistant。
+    // advanceCursor 只看 delta 会算出 0 轮；落盘必须按 segment 口径补成 1 轮。
+    const bridged = await runCapture({
+      token: "fixed-pending-segment",
+      lines,
+      cursor: {
+        lastEntryId: "f1",
+        lastMessageCount: 1,
+        lastCommitCount: 0,
+        lastCommitMessageCount: 0,
+        pendingTurns: 0,
+        serverPolicy: { enabled: false, idleSeconds: null },
+      },
+      values: { captureCommitMode: "fixed", captureCommitTurns: "50" },
+      server: { commit_count: 0, message_count: 1, pending_tokens: 0 },
+    });
+    eq(
+      "落盘 pendingTurns 用 segment 口径：跨边界那条 assistant 也算一轮（不是 delta 口径）",
+      [bridged.report.pendingTurns, bridged.cursor.pendingTurns],
+      [1, 1],
+    );
+  }
+
+  // ---- 7. llm：no 提交 / yes 不提交 / ask 抛错不提交 ----
+  {
+    const judgeCursor = {
+      lastCommitSample: "上一段：讨论了发布窗口",
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const lines = [
+      record({ id: "l1", role: "user", content: "今天聊部署" }),
+      record({ id: "l2", role: "assistant", content: "好，先看环境" }),
+    ];
+    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const llmValues = { captureCommitMode: "llm", captureModel: "acme/model" };
+
+    const noModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "no" }]),
+    });
+    const no = await runCapture({
+      token: "llm-no",
+      lines,
+      cursor: judgeCursor,
+      values: llmValues,
+      models: noModel.models,
+      server: pending,
+    });
+    const noCommit = no.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "llm：judge 回 no 就提交",
+      [no.report.committed, Boolean(noCommit), no.cursor.lastCommitCount],
+      [true, true, 1],
+    );
+    eq(
+      "llm 提交后 lastCommitCount / lastCommitAt / lastCommitMessageCount 都动了",
+      [no.cursor.lastCommitCount, no.cursor.lastCommitAt, no.cursor.lastCommitMessageCount],
+      [1, NOW, 2],
+    );
+    check(
+      "llm 的题面带「上一段 / 这一段」两个抬头，maxTokens 用写回那一档",
+      String(noModel.calls.stream[0]?.messages?.[0]?.content || "").includes("上一段：") &&
+        String(noModel.calls.stream[0]?.messages?.[0]?.content || "").includes("这一段：") &&
+        noModel.calls.stream[0]?.maxTokens === CAPTURE_ASK_MAX_TOKENS,
+      JSON.stringify(noModel.calls.stream[0] || {}),
+    );
+
+    const yesModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "yes" }]),
+    });
+    const yes = await runCapture({
+      token: "llm-yes",
+      lines,
+      cursor: judgeCursor,
+      values: llmValues,
+      models: yesModel.models,
+      server: pending,
+    });
+    const yesCommit = yes.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "llm：judge 回 yes 不提交，待提交轮数留着",
+      [yes.report.committed, Boolean(yesCommit), yes.cursor.lastCommitCount, yes.cursor.pendingTurns],
+      [false, false, 0, 1],
+    );
+
+    const warnings = [];
+    const throwModel = modelSdk({
+      stream: async () => {
+        throw new Error("judge boom");
+      },
+    });
+    const failed = await runCapture({
+      token: "llm-throw",
+      lines,
+      cursor: judgeCursor,
+      values: llmValues,
+      models: throwModel.models,
+      server: pending,
+      logger: { warn: (message) => warnings.push(String(message)) },
+    });
+    const failedCommit = failed.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "llm：judge 抛错不提交，游标停在原处",
+      [failed.report.committed, Boolean(failedCommit), failed.cursor.lastCommitCount],
+      [false, false, 0],
+    );
+    check(
+      "llm：judge 抛错只记一条 warn（不把异常丢回宿主）",
+      warnings.some((message) => message.includes("topic judge failed")),
+      warnings.join(" | "),
+    );
+  }
+
+  // ---- 8. discriminator：choice=no 提交 / yes 不提交 / 形状不认识不提交 ----
+  {
+    const judgeCursor = {
+      lastCommitSample: "上一段：项目评审",
+      serverPolicy: { enabled: false, idleSeconds: null },
+    };
+    const lines = [
+      record({ id: "d1", role: "user", content: "评审改到周五" }),
+      record({ id: "d2", role: "assistant", content: "我记下了" }),
+    ];
+    const pending = { commit_count: 0, message_count: 0, pending_tokens: 10 };
+    const discValues = {
+      captureCommitMode: "discriminator",
+      captureServiceUrl: "http://judge:1",
+      systemoneServiceModel: "judge-model",
+      systemoneServiceKey: "",
+    };
+
+    const no = await runCapture({
+      token: "disc-no",
+      lines,
+      cursor: judgeCursor,
+      values: discValues,
+      server: pending,
+      judge: () => ({ answers: { q: { choice: "no", confidence: 0.92 } } }),
+    });
+    const noCommit = no.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    const judgeCall = no.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    eq(
+      "discriminator：answers.q.choice=no 就提交",
+      [no.report.committed, Boolean(noCommit), no.cursor.lastCommitCount],
+      [true, true, 1],
+    );
+    check(
+      "discriminator 请求体带 model / state.content / choice 题面与 yes/no criteria",
+      Boolean(judgeCall) &&
+        bodyOf(judgeCall).model === "judge-model" &&
+        String(bodyOf(judgeCall).state?.content || "").includes("上一段：") &&
+        bodyOf(judgeCall).questions?.q?.type === "choice" &&
+        bodyOf(judgeCall).questions?.q?.instructions === CAPTURE_TOPIC_QUESTION &&
+        Boolean(bodyOf(judgeCall).questions?.q?.criteria?.yes) &&
+        Boolean(bodyOf(judgeCall).questions?.q?.criteria?.no),
+      judgeCall ? JSON.stringify(bodyOf(judgeCall)) : "没有发出 systemone 请求",
+    );
+
+    const yes = await runCapture({
+      token: "disc-yes",
+      lines,
+      cursor: judgeCursor,
+      values: discValues,
+      server: pending,
+      judge: () => ({ answers: { q: { choice: "yes", confidence: 0.8 } } }),
+    });
+    const yesCommit = yes.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "discriminator：answers.q.choice=yes 不提交",
+      [yes.report.committed, Boolean(yesCommit), yes.cursor.lastCommitCount],
+      [false, false, 0],
+    );
+
+    const bad = await runCapture({
+      token: "disc-bad-shape",
+      lines,
+      cursor: judgeCursor,
+      values: discValues,
+      server: pending,
+      judge: () => ({ answers: { q: { choice: "maybe", confidence: 0.8 } } }),
+    });
+    const badCommit = bad.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "discriminator：返回结构不认识当判断失败，不提交",
+      [bad.report.committed, Boolean(badCommit), bad.cursor.lastCommitCount],
+      [false, false, 0],
+    );
+  }
+
+  // ---- 9. 缺配置回落 fixed（存值不改） ----
+  {
+    eq(
+      "captureCommitMode 只认三档，脏值一律 fixed",
+      ["fixed", "llm", "discriminator", "bogus", "", null].map(normalizeCaptureCommitMode),
+      ["fixed", "llm", "discriminator", "fixed", "fixed", "fixed"],
+    );
+    eq(
+      "captureCommitTurns：空 / 非数字回 12，四舍五入后夹到 1–100，写库存数字串",
+      [
+        [undefined, "", "abc", null, 0, 1, 100.5, 101, "7"].map(normalizeCaptureCommitTurns),
+        [undefined, 0, 100.5, "7"].map(serializeCaptureCommitTurns),
+      ],
+      [
+        [12, 12, 12, 12, 1, 1, 100, 100, 7],
+        ["12", "1", "100", "7"],
+      ],
+    );
+    eq(
+      "captureServerIdleSeconds：空 / 非数字回 600，四舍五入后夹到 60–86400，写库存数字串",
+      [
+        [undefined, "", "abc", null, 0, 60, 86401, "900"].map(normalizeCaptureIdleSeconds),
+        [undefined, 0, 86401, "900"].map(serializeCaptureIdleSeconds),
+      ],
+      [
+        [600, 600, 600, 600, 60, 60, 86400, 900],
+        ["600", "60", "86400", "900"],
+      ],
+    );
+
+    const llmMissing = await readSwitches(
+      sdkWith({ captureCommitMode: "llm", captureModel: "   " }),
+    );
+    eq(
+      "缺配置回落：llm 缺 captureModel → 存值仍是 llm，实际跑 fixed",
+      [
+        llmMissing.captureCommitMode,
+        llmMissing.captureEffectiveMode,
+        captureModeMissing(llmMissing, "llm"),
+      ],
+      ["llm", "fixed", ["captureModel"]],
+    );
+    const discMissingUrl = await readSwitches(
+      sdkWith({
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "",
+        systemoneServiceModel: "judge-model",
+      }),
+    );
+    eq(
+      "缺配置回落：discriminator 缺 captureServiceUrl → 实际跑 fixed 并报缺项",
+      [
+        discMissingUrl.captureEffectiveMode,
+        captureModeMissing(discMissingUrl, "discriminator"),
+      ],
+      ["fixed", ["captureServiceUrl"]],
+    );
+    const discMissingModel = await readSwitches(
+      sdkWith({
+        captureCommitMode: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "",
+      }),
+    );
+    eq(
+      "缺配置回落：discriminator 缺 systemoneServiceModel → 实际跑 fixed 并报缺项",
+      [
+        discMissingModel.captureEffectiveMode,
+        captureModeMissing(discMissingModel, "discriminator"),
+      ],
+      ["fixed", ["systemoneServiceModel"]],
+    );
+    eq(
+      "fixed 永远不缺配置，captureCommitModeOf 原样返回",
+      [captureModeMissing({}, "fixed"), captureCommitModeOf({ captureCommitMode: "fixed" })],
+      [[], "fixed"],
+    );
+    eq(
+      "写回默认值：fixed / 12 / 兜底关 / 600 / 模型与服务地址为空",
+      [
+        DEFAULTS.captureCommitMode,
+        DEFAULTS.captureCommitTurns,
+        DEFAULTS.captureServerFallback,
+        DEFAULTS.captureServerIdleSeconds,
+        DEFAULTS.captureModel,
+        DEFAULTS.captureServiceUrl,
+      ],
+      ["fixed", CAPTURE_COMMIT_TURNS_DEFAULT, false, CAPTURE_IDLE_SECONDS_DEFAULT, "", ""],
+    );
+    eq(
+      "写回边界常量：轮次 1–100 步长 1，空闲秒数 60–86400，三档枚举固定",
+      [
+        CAPTURE_COMMIT_TURNS_MIN,
+        CAPTURE_COMMIT_TURNS_MAX,
+        CAPTURE_COMMIT_TURNS_STEP,
+        CAPTURE_IDLE_SECONDS_MIN,
+        CAPTURE_IDLE_SECONDS_MAX,
+        CAPTURE_COMMIT_MODES,
+      ],
+      [1, 100, 1, 60, 86400, ["fixed", "llm", "discriminator"]],
+    );
+  }
+
+  // ---- 10. 服务端兜底：createSession 请求体 / PATCH /config ----
+  {
+    const enabled = await runCapture({
+      token: "fallback-create-on",
+      values: { captureServerFallback: true },
+      server: null,
+    });
+    const createCall = enabled.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/api/v1/sessions",
+    );
+    eq(
+      "兜底开着时 createSession 带 { idle_timeout_seconds: 600 }",
+      bodyOf(createCall).auto_commit_policy,
+      { idle_timeout_seconds: 600 },
+    );
+
+    const changed = await runCapture({
+      token: "fallback-patch-changed",
+      cursor: { serverPolicy: { enabled: false, idleSeconds: null } },
+      values: { captureServerFallback: true, captureServerIdleSeconds: "900" },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 0 },
+    });
+    const patchCall = changed.calls.find(
+      (call) => methodOf(call) === "PATCH" && pathOf(call.url).endsWith("/config"),
+    );
+    eq(
+      "会话已存在且兜底策略变了 → 发 PATCH …/config，请求体带新空闲秒数",
+      [changed.report.patched, Boolean(patchCall), patchCall ? bodyOf(patchCall) : null],
+      [true, true, { auto_commit_policy: { idle_timeout_seconds: 900 } }],
+    );
+
+    const same = await runCapture({
+      token: "fallback-patch-same",
+      cursor: { serverPolicy: { enabled: true, idleSeconds: 600 } },
+      values: { captureServerFallback: true },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 0 },
+    });
+    const samePatch = same.calls.find(
+      (call) => methodOf(call) === "PATCH" && pathOf(call.url).endsWith("/config"),
+    );
+    eq(
+      "兜底策略没变 → 不发 PATCH",
+      [same.report.patched, Boolean(samePatch)],
+      [false, false],
+    );
+
+    // 第一次见到已有会话（serverPolicy:null）且兜底关着：从没设过策略，
+    // 没有东西要撤，不该发 PATCH；但本地要记下「现在是关」。
+    const neverSet = await runCapture({
+      token: "fallback-never-set",
+      values: { captureServerFallback: false },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 0 },
+    });
+    const neverSetPatch = neverSet.calls.find(
+      (call) => methodOf(call) === "PATCH" && pathOf(call.url).endsWith("/config"),
+    );
+    eq(
+      "兜底关 + serverPolicy:null（从没设过）→ 0 个 PATCH",
+      [neverSet.report.patched, Boolean(neverSetPatch), neverSet.calls.length],
+      [false, false, 1],
+    );
+    eq(
+      "兜底关 + serverPolicy:null → 本地记成 {enabled:false, idleSeconds:null}",
+      neverSet.cursor.serverPolicy,
+      { enabled: false, idleSeconds: null },
+    );
+  }
+
+  // ---- 11. 只读 / 总闸关 / autoCapture 关：零网络 ----
+  {
+    const readonly = await runCapture({
+      token: "skip-readonly",
+      overrides: { readOnly: true },
+      server: null,
+    });
+    eq(
+      "只读会话短路：skipped readonly 且一次网络请求都不发",
+      [readonly.report.skipped, readonly.calls.length],
+      ["readonly", 0],
+    );
+
+    const masterOff = await runCapture({
+      token: "skip-master-off",
+      values: { enabled: false },
+      server: null,
+    });
+    eq(
+      "总闸关短路：skipped off 且一次网络请求都不发",
+      [masterOff.report.skipped, masterOff.calls.length],
+      ["off", 0],
+    );
+
+    const captureOff = await runCapture({
+      token: "skip-capture-off",
+      values: { autoCapture: false },
+      server: null,
+    });
+    eq(
+      "autoCapture 关短路：skipped off 且一次网络请求都不发",
+      [captureOff.report.skipped, captureOff.calls.length],
+      ["off", 0],
+    );
+  }
+
+  // ---- 12. 会话卡三行：captureCounts 与状态文件同源 ----
+  {
+    eq(
+      "captureCounts 会话卡三行：written / pendingTurns / lastCommitAt",
+      captureCounts(
+        normalizeCursor({
+          lastMessageCount: 7,
+          pendingTurns: 2,
+          lastCommitAt: "2026-01-02T03:04:05.000Z",
+        }),
+      ),
+      {
+        written: 7,
+        pendingTurns: 2,
+        lastCommitAt: "2026-01-02T03:04:05.000Z",
+      },
+    );
+    eq(
+      "parseTopicAnswer：先认否定再认肯定，认不出给 null",
+      ["no", "Yes.", "否", "不是同一件", "yes", "同一件事", "随便"].map(
+        parseTopicAnswer,
+      ),
+      ["different", "same", "different", "different", "same", "same", null],
+    );
+    const rendered = renderTopicPrompt("旧内容", "新内容");
+    check(
+      "renderTopicPrompt 带「上一段 / 这一段」两个抬头与两段正文",
+      rendered.includes("上一段：") &&
+        rendered.includes("旧内容") &&
+        rendered.includes("这一段：") &&
+        rendered.includes("新内容"),
+      rendered,
+    );
+    eq(
+      "captureDecision：空欠账不提交 / fixed 够轮数提交 / 不认识的档不提交",
+      [
+        await captureDecision({ mode: "fixed", pendingTurns: 0, turnsLimit: 1 }),
+        await captureDecision({ mode: "fixed", pendingTurns: 2, turnsLimit: 2 }),
+        await captureDecision({ mode: "bogus", pendingTurns: 2, turnsLimit: 2 }),
+      ],
+      [
+        { commit: false, reason: "empty" },
+        { commit: true, reason: "turns" },
+        { commit: false, reason: "unknown-mode" },
+      ],
+    );
+    eq(
+      "写回常量：题面 / 样本字数 / 判断超时 / maxTokens",
+      [CAPTURE_SAMPLE_CHARS, CAPTURE_ASK_TIMEOUT_MS, CAPTURE_ASK_MAX_TOKENS],
+      [1200, 1500, 8],
+    );
+  }
+
+  fs.rmSync(root, { recursive: true, force: true });
 }
 
 // ================= 会话 key：路径 / key / 稳定 id =================
@@ -8473,6 +9773,285 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ],
     [BOUND_KEY, true, filesBeforePathWrite],
   );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ================= 写回：路由与入口 =================
+{
+  const dir = path.join(import.meta.dirname, ".tmp-route-capture");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const handlers = {};
+  const app = {
+    get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+    post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+  };
+  const values = {};
+  const writes = [];
+  const warnings = [];
+  const ctx = {
+    dataDir: dir,
+    config: {
+      get: async (key) => values[key],
+      set: async (key, value) => {
+        writes.push([key, value]);
+        values[key] = value;
+      },
+    },
+    logger: { warn: (message) => warnings.push(String(message)) },
+    network: { fetch: async () => { throw new Error("不该联网"); } },
+  };
+  registerCaptureRoutes(app, ctx);
+
+  const jsonOf = (payload, status) => ({ body: payload, status });
+  const getConfig = () => handlers["GET /capture-config"]({ json: jsonOf });
+  const postConfig = (body) =>
+    handlers["POST /capture-config"]({
+      req: { json: async () => body },
+      json: jsonOf,
+    });
+  const getStatus = (sessionId) =>
+    handlers["GET /capture-status"]({
+      req: {
+        query: (name) => (name === "sessionId" ? sessionId : undefined),
+      },
+      json: jsonOf,
+    });
+  const filesOf = () => {
+    const sessions = path.join(dir, "sessions");
+    return fs.existsSync(sessions) ? fs.readdirSync(sessions).sort() : [];
+  };
+
+  // ---- 1. 空配置的投影逐字对 ----
+  eq(
+    "空配置 GET /capture-config：默认档 / 数字串 / 范围与枚举都来自同一份常量",
+    (await getConfig()).body,
+    {
+      mode: "fixed",
+      effectiveMode: "fixed",
+      missing: [],
+      turns: "12",
+      serverFallback: false,
+      idleSeconds: "600",
+      model: "",
+      serviceUrl: "",
+      modes: ["fixed", "llm", "discriminator"],
+      turnsRange: [1, 100],
+      idleRange: [60, 86400],
+    },
+  );
+
+  // ---- 2. POST 整单校验：一项不合法一个字段都不写 ----
+  {
+    const before = writes.length;
+    const invalid = await postConfig({
+      captureCommitMode: "fixed",
+      captureCommitTurns: 0,
+      captureServerFallback: true,
+    });
+    eq(
+      "POST /capture-config 整单校验：captureCommitTurns=0 → 400 且 config.set 一次都没调",
+      [invalid.status, invalid.body.ok, writes.length],
+      [400, false, before],
+    );
+
+    const invalidModel = await postConfig({ captureModel: "not-a-model-ref" });
+    eq(
+      "POST /capture-config 整单校验：captureModel 非 provider/model → 400 且仍不写",
+      [invalidModel.status, invalidModel.body.ok, writes.length],
+      [400, false, before],
+    );
+
+    const valid = await postConfig({
+      captureCommitMode: "fixed",
+      captureCommitTurns: "20",
+      captureServerFallback: true,
+      captureServerIdleSeconds: 900,
+      captureModel: " acme/model ",
+      captureServiceUrl: "http://judge:1/",
+      somethingUnknown: "ignore me",
+    });
+    const readBack = (await getConfig()).body;
+    eq(
+      "合法一单六项整单落库、认不出的键不写，读回来是同一组值（地址去尾斜杠 / 模型 trim）",
+      [
+        valid.status,
+        valid.body.ok,
+        valid.body.applied,
+        writes.length,
+        readBack.mode,
+        readBack.turns,
+        readBack.serverFallback,
+        readBack.idleSeconds,
+        readBack.model,
+        readBack.serviceUrl,
+        "somethingUnknown" in values,
+      ],
+      [
+        200,
+        true,
+        [
+          "captureCommitMode",
+          "captureCommitTurns",
+          "captureServerFallback",
+          "captureServerIdleSeconds",
+          "captureModel",
+          "captureServiceUrl",
+        ],
+        6,
+        "fixed",
+        "20",
+        true,
+        "900",
+        "acme/model",
+        "http://judge:1",
+        false,
+      ],
+    );
+  }
+
+  // ---- 3. llm 缺模型回落 fixed，补模型后生效 ----
+  {
+    await postConfig({ captureCommitMode: "llm", captureModel: "" });
+    const missing = (await getConfig()).body;
+    eq(
+      "llm 但 captureModel 为空 → 存值仍是 llm，effectiveMode 回落 fixed，missing 点名 captureModel",
+      [missing.mode, missing.effectiveMode, missing.missing],
+      ["llm", "fixed", ["captureModel"]],
+    );
+
+    await postConfig({ captureModel: "provider/model" });
+    const filled = (await getConfig()).body;
+    eq(
+      "补上 provider/model 之后 effectiveMode 变 llm、missing 变空",
+      [filled.effectiveMode, filled.missing],
+      ["llm", []],
+    );
+  }
+
+  // ---- 4. capture-status 只读：无文件也 active，认不出的 key 一个文件都不建 ----
+  {
+    const key = "01a1585b-86d2-7c64-b8ac-edbe7099d0a3";
+    const before = filesOf();
+    const writesBefore = writes.length;
+    const empty = await getStatus(key);
+    eq(
+      "真 uuid 但还没有状态文件 → active:true，三数是 0 / null / 0",
+      [
+        empty.body.sessionId,
+        empty.body.active,
+        empty.body.written,
+        empty.body.lastCommitAt,
+        empty.body.pendingTurns,
+      ],
+      [key, true, 0, null, 0],
+    );
+
+    const missing = await getStatus(undefined);
+    eq(
+      "sessionId 缺失 → sessionId:null / active:false / 三数零值",
+      [
+        missing.body.sessionId,
+        missing.body.active,
+        missing.body.written,
+        missing.body.lastCommitAt,
+        missing.body.pendingTurns,
+      ],
+      [null, false, 0, null, 0],
+    );
+
+    const bogus = [
+      await getStatus("sess_0mvgejpps_97df7c693a452f408c2c"),
+      await getStatus("foo"),
+    ];
+    eq(
+      "sess_ 稳定 id 与任意字符串都 active:false，且 sessions/ 目录一个文件都不多",
+      [bogus.map((out) => [out.body.sessionId, out.body.active]), filesOf()],
+      [[[null, false], [null, false]], before],
+    );
+    eq(
+      "只读状态路由没有写过任何配置，也没有 warn",
+      [writes.length, warnings.length],
+      [writesBefore, 0],
+    );
+  }
+
+  // ---- 5. 有游标时三行与 captureCounts / readSwitches 同源 ----
+  {
+    const key = "01a1585b-86d2-7c64-b8ac-edbe7099d0a4";
+    patchSession(dir, key, {
+      capture: {
+        cursor: {
+          lastEntryId: "m9",
+          lastMessageCount: 12,
+          lastCommitCount: 2,
+          lastCommitAt: "2026-11-11T02:00:00.000Z",
+          lastCommitMessageCount: 9,
+          lastCommitSample: "上一段",
+          pendingTurns: 3,
+          serverPolicy: null,
+        },
+      },
+    });
+    const status = await getStatus(key);
+    const switches = await readSwitches(ctx);
+    const counts = captureCounts(readSession(dir, key).capture.cursor);
+    eq(
+      "capture-status 的 written / pendingTurns / lastCommitAt 与 captureCounts 同源，mode 是 captureEffectiveMode",
+      [
+        status.body.sessionId,
+        status.body.active,
+        status.body.written,
+        status.body.pendingTurns,
+        status.body.lastCommitAt,
+        status.body.mode,
+      ],
+      [
+        key,
+        true,
+        counts.written,
+        counts.pendingTurns,
+        counts.lastCommitAt,
+        switches.captureEffectiveMode,
+      ],
+    );
+  }
+
+  // ---- 6. 源码级契约：路由不裸 fetch；settled 里接写回且失败不抛出 ----
+  {
+    const routeCode = fs.readFileSync(
+      path.join(import.meta.dirname, "../routes/capture.js"),
+      "utf8",
+    );
+    check(
+      "routes/capture.js 不出现裸 fetch(（网络一律走 client / transport）",
+      !/fetch\s*\(/.test(routeCode),
+      routeCode.split("\n").find((line) => /fetch\s*\(/.test(line)) || "",
+    );
+
+    const indexCode = fs
+      .readFileSync(path.join(import.meta.dirname, "../index.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/[^\n]*/gm, "");
+    check(
+      "index.js 的 agent/settled 调了 capture 且包在 try / catch 里",
+      /hooks\.on\("agent\/settled"[\s\S]{0,800}?try\s*{[\s\S]{0,300}?await\s+capture\(invocation\)[\s\S]{0,300}?}\s*catch\s*\(/.test(
+        indexCode,
+      ),
+      "agent/settled 段没有按契约接上写回",
+    );
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(import.meta.dirname, "../manifest.json"), "utf8"),
+    );
+    check(
+      "manifest 网络白名单含 PATCH（写回要 PATCH 会话配置）",
+      Array.isArray(manifest.network?.methods) && manifest.network.methods.includes("PATCH"),
+      JSON.stringify(manifest.network?.methods),
+    );
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
