@@ -26,6 +26,7 @@ import {
   captureModeMissing,
   normalizeGateModel,
   normalizeServiceUrl,
+  promptForStorage,
   readSwitches,
   serializeCaptureCommitSchema,
   serializeCaptureCommitTurns,
@@ -110,7 +111,7 @@ export default function registerCaptureRoutes(app, ctx) {
     const changes = [];
 
     // 提前提交：开关 / 判断方式 / 话题作用域 / 候选池上限。
-    // 旧的 captureCommitMode 当未知键忽略：不再 400，也不再写。
+    // 旧键已删除：当未知键忽略，不再 400，也不再写。
     if (has(body, "captureEarlyCommit")) {
       if (typeof body.captureEarlyCommit !== "boolean") {
         return c.json({ ok: false, error: "captureEarlyCommit 只能是 true / false" }, 400);
@@ -240,8 +241,8 @@ export default function registerCaptureRoutes(app, ctx) {
       }
     }
 
-    // 判断题面：非字符串直接拒，超长整单拒；存原样，不 trim、不规范化
-    // （空串是有意义的值：= 用内置那句默认问法）。
+    // 判断题面：非字符串直接拒，超长整单拒；长度按用户提交的原文判断。
+    // 写时归一：等于内置默认（含历史默认）就存空串，其余原样（不 trim、不截断）。
     if (has(body, "capturePrompt")) {
       if (typeof body.capturePrompt !== "string") {
         return c.json({ ok: false, error: "capturePrompt 必须是字符串" }, 400);
@@ -252,7 +253,7 @@ export default function registerCaptureRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["capturePrompt", body.capturePrompt]);
+      changes.push(["capturePrompt", promptForStorage("capturePrompt", body.capturePrompt)]);
     }
 
     // 认不出的键一律忽略：前端半新半旧不该整单失败。

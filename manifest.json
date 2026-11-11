@@ -124,7 +124,7 @@
           "gatePrompt": {
             "type": "string",
             "title": "判断提示词",
-            "description": "语言模型判断（llm 档）使用的提示词，最长 2000 字符。留空表示不拦截任何召回。决策模型判断不吃这一项，那份存在 gateDecisionPrompt 里。",
+            "description": "语言模型判断（llm 档）使用的提示词，最长 2000 字符。留空表示使用内置默认题面。决策模型判断不吃这一项，那份存在 gateDecisionPrompt 里。",
             "default": ""
           },
           "gateDecisionPrompt": {
@@ -158,7 +158,7 @@
           "gateContextPrompt": {
             "type": "string",
             "title": "带前文判断提示词",
-            "description": "gateContext=turns 时决策模型使用的题面，最长 2000 字符。判定标准由带前文模式的两条内置 criteria 描述决定，这一格只决定怎么问。留空表示不拦截任何召回。与不带前文那份分开存、互不影响。",
+            "description": "gateContext=turns 时决策模型使用的题面，最长 2000 字符。判定标准由带前文模式的两条内置 criteria 描述决定，这一格只决定怎么问。留空表示使用内置默认题面。与不带前文那份分开存、互不影响。",
             "default": "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？"
           },
           "gateDecisionThreshold": {
@@ -309,28 +309,10 @@
             "description": "每轮结束后把对话写回 OpenViking。",
             "default": true
           },
-          "captureCommitMode": {
-            "type": "string",
-            "title": "写回提交策略（旧版）",
-            "description": "旧版三档，仅用于迁移：读写侧会把它换成 captureEarlyCommit / captureEarlyJudge，之后不再据此判定。",
-            "default": "fixed",
-            "enum": [
-              "fixed",
-              "llm",
-              "discriminator"
-            ],
-            "ui": {
-              "enumLabels": [
-                "固定轮次",
-                "语言模型判断",
-                "判别模型判断"
-              ]
-            }
-          },
           "captureCommitSchema": {
             "type": "string",
             "title": "写回提交策略版本",
-            "description": "提交策略的语义版本。空串 = 老配置，读取时按旧版三档迁移；保存成功后写 2。存数字串。",
+            "description": "提交策略的语义版本。空串 = 从没写过（老配置）；保存成功后写 2。存数字串。",
             "default": ""
           },
           "captureEarlyCommit": {

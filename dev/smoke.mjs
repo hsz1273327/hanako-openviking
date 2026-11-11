@@ -129,7 +129,6 @@ import {
   RECALL_TIMEOUT_DEFAULT,
   RECALL_TIMEOUT_MIN,
   RECALL_TIMEOUT_MAX,
-  CAPTURE_COMMIT_MODES,
   CAPTURE_EARLY_JUDGES,
   CAPTURE_TOPIC_SCOPES,
   CAPTURE_TOPIC_CANDIDATES_DEFAULT,
@@ -153,7 +152,6 @@ import {
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
   CAPTURE_PROMPT_MAX,
-  normalizeCaptureCommitMode,
   normalizeCaptureEarlyCommit,
   normalizeCaptureEarlyJudge,
   normalizeCaptureTopicScope,
@@ -162,7 +160,6 @@ import {
   captureCommitSchemaIsLegacy,
   normalizeCaptureCommitSchema,
   serializeCaptureCommitSchema,
-  applyCaptureCommitSchema,
   normalizeCapturePrompt,
   normalizeCaptureCommitTurns,
   serializeCaptureCommitTurns,
@@ -173,6 +170,9 @@ import {
   normalizeCaptureIdleSeconds,
   serializeCaptureIdleSeconds,
   captureModeMissing,
+  promptForStorage,
+  migratePromptDefaults,
+  PROMPT_DEFAULTS_MIGRATION_VERSION,
   DEFAULTS,
 } from "../src/ov/settings.js";
 import { maskOf, maskString } from "../src/ov/mask.js";
@@ -392,6 +392,10 @@ import {
 } from "../src/memory/backfill.js";
 import readline from "node:readline";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
+import {
+  CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  GATE_PROMPT_RETIRED_DEFAULTS,
+} from "../src/ov/prompt-defaults.js";
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
 // 边栏会话卡的数据投影：覆盖提交语义、统计 / 提示 / peer 文案都在这里，纯函数。
 import {
@@ -2886,14 +2890,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   ).contributes.settings.schema.properties;
 
   eq(
-    "带前文题的草稿与三态：空配置坐默认题面、动过不再填、自定义照显、清空提醒不拦截 / manifest 声明 enum、默认值、类型",
+    "带前文题的草稿与三态：空配置坐默认题面、动过不再填、自定义照显、留空提醒用内置默认 / manifest 声明 enum、默认值、类型",
     [
       contextPromptDraft(""),
       contextPromptDraft("", true),
       contextPromptDraft("带前文自定义"),
       contextPromptStatus(DEFAULT_GATE_CONTEXT_PROMPT),
       contextPromptStatus("带前文自定义"),
-      contextPromptStatus("").includes("不会拦截任何召回"),
+      contextPromptStatus("").includes("留空时使用内置默认提示词"),
       [props.gateContext?.enum, props.gateContext?.ui?.enumLabels, props.gateContext?.default],
       [props.gateContextTurns?.type, props.gateContextTurns?.default],
       [props.gateContextPrompt?.type, props.gateContextPrompt?.default],
@@ -3661,8 +3665,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 }
 // ================= 卡片标题字号：全局只有那一处 13px =================
 {
-  // 这是一条数值约定（不是审美）：tab 12px → 卡片标题 13px → 分组标题 12px。
-  // 卡片标题吃 naive 默认值时是 16px，比上一级的 tab 还大，层级倒挂。
+  // 这是一条数值约定（不是审美）：tab 12px → 卡片标题 13px，分组标题与卡片标题同档 13px，
+  // 靠位置和分隔线区分层级。卡片标题吃 naive 默认值时是 16px，比上一级的 tab 还大，层级倒挂。
   const cardTheme = lightThemeOverrides?.Card ?? {};
   check(
     "卡片标题字号规则：13px / 600，且面板样式里不再单独钉一套卡片标题字号",
@@ -3672,6 +3676,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         (match) => !/font-size/.test(match[0]),
       ),
     `${JSON.stringify(cardTheme)} | ${[...panelCss().matchAll(/[^{}]*\.n-card-header__main[^{}]*\{[^}]*\}/g)].map((match) => match[0]).join(" ")}`,
+  );
+  const groupTitleRule = ruleBody(panelCss(), ".capture-card .capture-group-title") || "";
+  check(
+    "分组标题字号：13px / 600",
+    /font-size\s*:\s*13px/.test(groupTitleRule) && /font-weight\s*:\s*600/.test(groupTitleRule),
+    groupTitleRule.trim(),
   );
 }
 // ================= 组装：精排之后把候选拼成一段上下文 =================
@@ -5025,8 +5035,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await ui.touchPrompt("gate", "");
     await ui.setPrompt("gate", "");
     eq(
-      "清空后状态提醒不拦截 / 清空的值也提交（配置为空）",
-      [ui.gatePromptStatus().includes("不会拦截任何召回"), backend["/recall-mode"].gatePrompt],
+      "清空后状态提醒留空用内置默认 / 清空的值也提交（配置为空）",
+      [ui.gatePromptStatus().includes("留空时使用内置默认提示词"), backend["/recall-mode"].gatePrompt],
       [true, ""],
     );
     // 复位，后面的断言按默认草稿走。
@@ -5867,7 +5877,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 提示词框的显示与状态（value 当草稿，不靠 placeholder） ----
   eq(
-    "两份默认提示词逐字一致 / 提示词草稿（空配置坐默认全文、动过就不再填、自定义照显、超长按截断显示） / 提示词状态小字（等于默认 / 改过 / 清空提醒不拦截，只有空白也算空）",
+    "两份默认提示词逐字一致 / 提示词草稿（空配置坐默认全文、动过就不再填、自定义照显、超长按截断显示） / 提示词状态小字（等于默认 / 改过 / 留空提醒用内置默认，只有空白也算留空）",
     [UI_DEFAULT_GATE_PROMPT, [
       promptDraft(""),
       promptDraft("", true),
@@ -5876,8 +5886,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ], [
       promptStatus(DEFAULT_GATE_PROMPT),
       promptStatus("我的提示词"),
-      promptStatus("").includes("已修改") && promptStatus("").includes("提示词为空时不会拦截任何召回"),
-      promptStatus("   \n ").includes("不会拦截任何召回"),
+      promptStatus("").includes("已修改") && promptStatus("").includes("留空时使用内置默认提示词"),
+      promptStatus("   \n ").includes("留空时使用内置默认提示词"),
     ]],
     [DEFAULT_GATE_PROMPT, [DEFAULT_GATE_PROMPT, "", "我的提示词", GATE_PROMPT_MAX], ["当前为默认提示词", "已修改", true, true]],
   );
@@ -7953,7 +7963,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         autoCapture: true,
         serverUrl: "http://h:1",
         apiKey: "k",
-        captureCommitMode: "fixed",
         captureCommitTurns: "50",
       },
       fetchImpl,
@@ -8826,21 +8835,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- 9. 旧配置迁移：fixed / llm / discriminator，写入后不再迁移 ----
+  // ---- 9. 旧键已删除：captureCommitSchema 仍在，captureCommitMode 不再参与读取 ----
   {
-    eq(
-      "applyCaptureCommitSchema：fixed → 关 + llm；llm → 开 + llm；discriminator → 开 + discriminator",
-      [
-        applyCaptureCommitSchema({ mode: "fixed" }),
-        applyCaptureCommitSchema({ mode: "llm" }),
-        applyCaptureCommitSchema({ mode: "discriminator" }),
-      ],
-      [
-        { early: false, judge: "llm" },
-        { early: true, judge: "llm" },
-        { early: true, judge: "discriminator" },
-      ],
-    );
     eq(
       "captureCommitSchemaIsLegacy / normalize / serialize：空串与 <2 是老语义，>=2 保持",
       [
@@ -8856,30 +8852,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ["2", "2"],
       ],
     );
-    const legacyFixed = await readSwitches(sdkWith({ captureCommitMode: "fixed" }));
-    const legacyLlm = await readSwitches(sdkWith({ captureCommitMode: "llm" }));
-    const legacyDisc = await readSwitches(sdkWith({ captureCommitMode: "discriminator" }));
-    const migrated = await readSwitches(
+    const legacyModeOnly = await readSwitches(sdkWith({ captureCommitMode: "discriminator" }));
+    const explicitKeys = await readSwitches(
       sdkWith({
-        captureCommitSchema: "2",
         captureCommitMode: "llm",
-        captureEarlyCommit: false,
+        captureEarlyCommit: true,
         captureEarlyJudge: "discriminator",
       }),
     );
     eq(
-      "readSwitches 迁移三种老档位；captureCommitSchema=2 之后不再按旧档位迁移",
+      "老配置不再读 captureCommitMode：只按 captureEarlyCommit / captureEarlyJudge 取默认",
       [
-        [legacyFixed.captureEarlyCommit, legacyFixed.captureEarlyJudge],
-        [legacyLlm.captureEarlyCommit, legacyLlm.captureEarlyJudge],
-        [legacyDisc.captureEarlyCommit, legacyDisc.captureEarlyJudge],
-        [migrated.captureEarlyCommit, migrated.captureEarlyJudge],
+        [legacyModeOnly.captureEarlyCommit, legacyModeOnly.captureEarlyJudge],
+        [explicitKeys.captureEarlyCommit, explicitKeys.captureEarlyJudge],
+        "captureCommitMode" in legacyModeOnly,
       ],
       [
         [false, "llm"],
-        [true, "llm"],
         [true, "discriminator"],
-        [false, "discriminator"],
+        false,
       ],
     );
     const llmEmpty = await readSwitches(
@@ -8916,6 +8907,257 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         captureModeMissing(discMissing, "discriminator"),
       ],
       [false, ["captureServiceUrl", "systemoneServiceModel"]],
+    );
+  }
+
+  // ---- 9.1 提示词默认值：写时归一 + 一次性迁移（读取路径不转换） ----
+  {
+    eq(
+      "promptForStorage：等于当前默认 / 历史默认 → 空串；自定义 → 原样；空串 → 空串；非字符串 → 原样",
+      [
+        promptForStorage("rerankPrompt", DEFAULT_RERANK_PROMPT),
+        promptForStorage("capturePrompt", CAPTURE_PROMPT_RETIRED_DEFAULTS[0]),
+        promptForStorage("gatePrompt", GATE_PROMPT_RETIRED_DEFAULTS[0]),
+        promptForStorage("gateContextPrompt", DEFAULT_GATE_CONTEXT_PROMPT),
+        promptForStorage("rerankPrompt", "我的题面"),
+        promptForStorage("gatePrompt", "  自定义  "),
+        promptForStorage("rerankPrompt", ""),
+        promptForStorage("rerankPrompt", 42),
+      ],
+      ["", "", "", "", "我的题面", "  自定义  ", "", 42],
+    );
+    check(
+      "gate 历史默认以「只回一个词：需要，或不需要。」结尾，且与当前默认不相等",
+      GATE_PROMPT_RETIRED_DEFAULTS[0].endsWith("只回一个词：需要，或不需要。") &&
+        GATE_PROMPT_RETIRED_DEFAULTS[0] !== DEFAULT_GATE_PROMPT,
+      GATE_PROMPT_RETIRED_DEFAULTS[0],
+    );
+
+    // 读侧原样：配置里直接放当前默认全文，读出来还是全文。
+    const readCurrent = await readSwitches(
+      sdkWith({
+        capturePrompt: CAPTURE_TOPIC_QUESTION,
+        gatePrompt: DEFAULT_GATE_PROMPT,
+        gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
+        rerankPrompt: DEFAULT_RERANK_PROMPT,
+      }),
+    );
+    eq(
+      "readSwitches 不做转换：配置里放当前默认全文，读出来还是全文",
+      [
+        readCurrent.capturePrompt,
+        readCurrent.gatePrompt,
+        readCurrent.gateContextPrompt,
+        readCurrent.rerankPrompt,
+      ],
+      [
+        CAPTURE_TOPIC_QUESTION,
+        DEFAULT_GATE_PROMPT,
+        DEFAULT_GATE_CONTEXT_PROMPT,
+        DEFAULT_RERANK_PROMPT,
+      ],
+    );
+    const readEmpty = await readSwitches(
+      sdkWith({
+        capturePrompt: "",
+        gatePrompt: "",
+        gateContextPrompt: "",
+        rerankPrompt: "",
+      }),
+    );
+    eq(
+      "读侧原样：盘上是空串就读出空串，不替换成默认",
+      [
+        readEmpty.capturePrompt,
+        readEmpty.gatePrompt,
+        readEmpty.gateContextPrompt,
+        readEmpty.rerankPrompt,
+      ],
+      ["", "", "", ""],
+    );
+
+    // 迁移：四个键各自默认全文 + 一个自定义 + 一个空串。
+    const store = {
+      capturePrompt: CAPTURE_TOPIC_QUESTION,
+      gatePrompt: GATE_PROMPT_RETIRED_DEFAULTS[0],
+      gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
+      rerankPrompt: DEFAULT_RERANK_PROMPT,
+      rerankSystemonePrompt: "自定义判别题面",
+      gateDecisionPrompt: "",
+    };
+    const writes = [];
+    const sdk = {
+      config: {
+        get: async (key) => store[key],
+        set: async (key, value) => {
+          writes.push([key, value]);
+          store[key] = value;
+        },
+      },
+    };
+    const first = await migratePromptDefaults(sdk);
+    eq(
+      "migratePromptDefaults：四个默认全文各写成空串，自定义与空串不动，返回被改写的键",
+      [writes, first, store.rerankSystemonePrompt, store.gateDecisionPrompt],
+      [
+        [
+          ["capturePrompt", ""],
+          ["gatePrompt", ""],
+          ["gateContextPrompt", ""],
+          ["rerankPrompt", ""],
+        ],
+        ["capturePrompt", "gatePrompt", "gateContextPrompt", "rerankPrompt"],
+        "自定义判别题面",
+        "",
+      ],
+    );
+    const afterFirst = writes.length;
+    const second = await migratePromptDefaults(sdk);
+    eq(
+      "migratePromptDefaults 第二次跑零写入",
+      [second, writes.length, afterFirst],
+      [[], afterFirst, afterFirst],
+    );
+
+    // 标记生效：第一次跑完写 <dataDir>/prompt-defaults.json；第二次一次 get 都不发。
+    const markerDir = path.join(import.meta.dirname, ".tmp-prompt-defaults-marker");
+    fs.rmSync(markerDir, { recursive: true, force: true });
+    fs.mkdirSync(markerDir, { recursive: true });
+    const markerFile = path.join(markerDir, "prompt-defaults.json");
+    const markerStore = {
+      capturePrompt: CAPTURE_TOPIC_QUESTION,
+      gatePrompt: DEFAULT_GATE_PROMPT,
+      gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
+      rerankPrompt: DEFAULT_RERANK_PROMPT,
+    };
+    let markerGets = 0;
+    const markerSdk = {
+      dataDir: markerDir,
+      config: {
+        get: async (key) => {
+          markerGets += 1;
+          return markerStore[key];
+        },
+        set: async (key, value) => {
+          markerStore[key] = value;
+        },
+      },
+    };
+    const markerFirst = await migratePromptDefaults(markerSdk);
+    const marker = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+    const getsAfterFirst = markerGets;
+    const markerSecond = await migratePromptDefaults(markerSdk);
+    eq(
+      "迁移标记：第一次跑完写 version 标记；第二次直接返回空数组且 config.get 零调用",
+      [
+        fs.existsSync(markerFile),
+        marker.version,
+        markerFirst,
+        markerSecond,
+        markerGets - getsAfterFirst,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+      ],
+      [
+        true,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+        ["capturePrompt", "gatePrompt", "gateContextPrompt", "rerankPrompt"],
+        [],
+        0,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+      ],
+    );
+    fs.rmSync(markerDir, { recursive: true, force: true });
+
+    // 失败不抛、不写标记；换一个不抛的 set 再调一次 → 补上那个键并写标记。
+    const retryDir = path.join(import.meta.dirname, ".tmp-prompt-defaults-retry");
+    fs.rmSync(retryDir, { recursive: true, force: true });
+    fs.mkdirSync(retryDir, { recursive: true });
+    const retryFile = path.join(retryDir, "prompt-defaults.json");
+    const retryStore = {
+      capturePrompt: CAPTURE_TOPIC_QUESTION,
+      gatePrompt: DEFAULT_GATE_PROMPT,
+      gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
+      rerankPrompt: DEFAULT_RERANK_PROMPT,
+    };
+    const retryWarns = [];
+    let failing = true;
+    const retrySdk = {
+      dataDir: retryDir,
+      logger: { warn: (message) => retryWarns.push(message) },
+      config: {
+        get: async (key) => retryStore[key],
+        set: async (key, value) => {
+          if (key === "gatePrompt" && failing) throw new Error("boom");
+          retryStore[key] = value;
+        },
+      },
+    };
+    let firstError = null;
+    let retryFirst;
+    try {
+      retryFirst = await migratePromptDefaults(retrySdk);
+    } catch (error) {
+      firstError = error;
+    }
+    const retryStateAfterFailure = {
+      capturePrompt: retryStore.capturePrompt,
+      gatePrompt: retryStore.gatePrompt,
+      gateContextPrompt: retryStore.gateContextPrompt,
+      rerankPrompt: retryStore.rerankPrompt,
+    };
+    const retryMarkerAfterFailure = fs.existsSync(retryFile);
+    failing = false;
+    const retrySecond = await migratePromptDefaults(retrySdk);
+    eq(
+      "迁移失败不抛、其它键照常改写、不写标记、日志带键名；下次重试补上失败键并写标记",
+      [
+        firstError,
+        retryFirst,
+        retryStateAfterFailure,
+        retryMarkerAfterFailure,
+        retryWarns.some((message) => message.includes("gatePrompt")),
+        retrySecond,
+        retryStore.gatePrompt,
+        fs.existsSync(retryFile),
+        JSON.parse(fs.readFileSync(retryFile, "utf8")).version,
+      ],
+      [
+        null,
+        ["capturePrompt", "gateContextPrompt", "rerankPrompt"],
+        {
+          capturePrompt: "",
+          gatePrompt: DEFAULT_GATE_PROMPT,
+          gateContextPrompt: "",
+          rerankPrompt: "",
+        },
+        false,
+        true,
+        ["gatePrompt"],
+        "",
+        true,
+        PROMPT_DEFAULTS_MIGRATION_VERSION,
+      ],
+    );
+    fs.rmSync(retryDir, { recursive: true, force: true });
+  }
+
+  // ---- 9.2 源码里不再有那个旧键 ----
+  {
+    const sourceFiles = ["../src", "../routes"].flatMap((rel) => {
+      const dir = path.join(import.meta.dirname, rel);
+      return fs
+        .readdirSync(dir, { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+        .map((entry) => path.join(entry.parentPath, entry.name));
+    });
+    sourceFiles.push(path.join(import.meta.dirname, "../manifest.json"));
+    const offending = sourceFiles.filter((file) =>
+      fs.readFileSync(file, "utf8").includes("captureCommitMode"),
+    );
+    eq(
+      "源码里不再有 captureCommitMode（src/** / routes/** / manifest.json）",
+      offending.map((file) => path.relative(import.meta.dirname, file)),
+      [],
     );
   }
 
@@ -10000,6 +10242,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [store.rerankPrompt, store.rerankSystemonePrompt],
     ],
     [[400, 400, 400, 400], [400, 400], 0, "llm", ["只改提示词", "只改题面"]]);
+
+  // 写时归一：gatePrompt / gateContextPrompt / rerankPrompt 提交各自默认全文 → 落库空串。
+  const normalizedPromptWrites = [];
+  for (const [key, value] of [
+    ["gatePrompt", DEFAULT_GATE_PROMPT],
+    ["gatePrompt", GATE_PROMPT_RETIRED_DEFAULTS[0]],
+    ["gateContextPrompt", DEFAULT_GATE_CONTEXT_PROMPT],
+    ["rerankPrompt", DEFAULT_RERANK_PROMPT],
+    ["gatePrompt", "自定义题面"],
+    ["gatePrompt", "  自定义  "],
+    ["gateContextPrompt", "自定义带前文题面"],
+    ["rerankPrompt", "自定义精排题面"],
+  ]) {
+    const saved = await post({ [key]: value });
+    normalizedPromptWrites.push([saved.status, store[key], saved.body[key]]);
+  }
+  eq(
+    "POST /recall-mode 写时归一：gatePrompt 当前 / 历史默认、gateContextPrompt / rerankPrompt 默认都落库空串；自定义原样",
+    normalizedPromptWrites,
+    [
+      [200, "", ""],
+      [200, "", ""],
+      [200, "", ""],
+      [200, "", ""],
+      [200, "自定义题面", "自定义题面"],
+      [200, "  自定义  ", "  自定义  "],
+      [200, "自定义带前文题面", "自定义带前文题面"],
+      [200, "自定义精排题面", "自定义精排题面"],
+    ],
+  );
 
   writes.length = 0;
   const rerankRef = await post({ rerankModel: "  p2/m2  " });
@@ -11125,10 +11397,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [400, false, before],
     );
 
-    const oldMode = await postConfig({ captureCommitMode: "llm" });
+    const unknownKey = await postConfig({ captureLegacyMode: "llm" });
     eq(
-      "旧键 captureCommitMode 当未知键忽略：200、不写、也不再 400",
-      [oldMode.status, oldMode.body.ok, oldMode.body.applied, writes.length],
+      "未知键当未知键忽略：200、不写、也不再 400",
+      [unknownKey.status, unknownKey.body.ok, unknownKey.body.applied, writes.length],
       [200, true, [], before],
     );
 
@@ -11267,6 +11539,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         writtenText,
       ],
     );
+
+    for (const [label, value] of [
+      ["当前默认", CAPTURE_TOPIC_QUESTION],
+      ["历史默认", CAPTURE_PROMPT_RETIRED_DEFAULTS[0]],
+    ]) {
+      const saved = await postConfig({ capturePrompt: value });
+      eq(
+        `POST /capture-config 提交${label} → 落库空串，响应 prompt 是空串`,
+        [saved.status, writes.at(-2), (await getConfig()).body.prompt],
+        [200, ["capturePrompt", ""], ""],
+      );
+    }
 
     // 收尾：清回空串，后面的断言按默认题面走。
     await postConfig({ capturePrompt: "" });
@@ -11475,11 +11759,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   check("默认模板含 {{message}}", DEFAULT_GATE_PROMPT.includes(GATE_MESSAGE_PLACEHOLDER));
   check("默认模板以占位符结尾", DEFAULT_GATE_PROMPT.endsWith(GATE_MESSAGE_PLACEHOLDER));
-  // 空提示词不再是“用默认”：没有判据就不拦。
+  // 空提示词 / 只有空白 / 没传这个键 → 都用内置默认。
   eq(
-    "提示词为空时没有提示词 / 只有空白的提示词也算空 / 没传这个键也算空 / 自定义提示词原样用 / gate 超时 600ms / gate 只要 8 个 token",
+    "提示词为空 / 只有空白 / 没传这个键都回内置默认 / 自定义提示词原样用 / gate 超时 600ms / gate 只要 8 个 token",
     [gatePromptOf({ gatePrompt: "" }), gatePromptOf({ gatePrompt: "  \n " }), gatePromptOf({}), gatePromptOf({ gatePrompt: "  自定义  " }), GATE_TIMEOUT_MS, GATE_MAX_TOKENS],
-    ["", "", "", "自定义", 600, 8],
+    [DEFAULT_GATE_PROMPT, DEFAULT_GATE_PROMPT, DEFAULT_GATE_PROMPT, "自定义", 600, 8],
   );
 
   // ---- 模板渲染：占位符替换 / 无占位符追加 / 空模板 / 消息里的占位符字样 ----
@@ -11797,13 +12081,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["p/m", "", "", ""],
   );
   eq(
-    "提示词来源：判断层空串 = 不拦（没有判据就不拦），精排层空串 = 用内置模板 / 判别模型题面空串也用内置默认",
+    "提示词来源：判断层空串 = 用内置默认，精排层空串 = 用内置模板 / 判别模型题面空串也用内置默认",
     [
       gatePromptOf({ gatePrompt: "   " }),
       rerankPromptOf({ rerankPrompt: "  " }),
       systemonePromptOf({ rerankSystemonePrompt: "   " }),
     ],
-    ["", DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT],
+    [DEFAULT_GATE_PROMPT, DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT],
   );
   eq(
     "provider/model 解析：按第一个斜杠切，模型 id 里允许再有斜杠，缺一半回 null",
@@ -11868,7 +12152,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     serverUrl: "http://h:1",
     recallGate: "llm",
     gateModel: "",
-    // 空提示词已经不再回退成默认，要跑语言模型判断就得真存一份提示词。
+    // 空串 = 用内置默认；这里显式放默认全文，读侧原样读，运行时行为一致。
     gatePrompt: DEFAULT_GATE_PROMPT,
     probe: true,
   };
@@ -12004,7 +12288,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     check("stream-only 判断照常召回", Boolean(result?.payload));
   }
 
-  // ---- 空提示词：不是“用默认”，而是根本不问模型，直接召回 ----
+  // ---- 空提示词：= 用内置默认，模型照问 ----
   {
     const mock = mockFetch({ body: recallBody });
     const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
@@ -12018,20 +12302,30 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         logger: { info: (m) => infos.push(m) },
       }),
     );
+    const message = "重启一下服务";
     const result = await handler({
-      payload: { messages: [{ role: "user", content: "重启一下服务" }] },
+      payload: { messages: [{ role: "user", content: message }] },
       session: { sessionId: "llm-empty-prompt" },
     });
-    eq("空提示词：一次模型都没问、也不发 cancel、照常召回并发请求",
-      [fake.calls.utility.length, fake.calls.cancel.length, Boolean(result?.payload), mock.calls.length],
-      [0, 0, true, 1]);
+    eq(
+      "空提示词用内置默认：模型照问一次、发出去的是默认题面、不发召回",
+      [
+        fake.calls.utility.length,
+        fake.calls.utility[0]?.messages?.[0]?.content === renderGatePrompt(DEFAULT_GATE_PROMPT, message),
+        fake.calls.cancel.length,
+        result,
+        mock.calls.length,
+      ],
+      [1, true, 0, undefined, 0],
+    );
     check(
-      "空提示词日志说清不拦截",
-      infos.some((m) => m.includes("prompt empty") && m.includes("recall anyway")),
+      "空提示词不再走 prompt empty 兜底",
+      !infos.some((m) => m.includes("prompt empty")),
+      infos.join(" | "),
     );
   }
 
-  // ---- 只有空白的提示词同样算空 ----
+  // ---- 只有空白的提示词同样回内置默认 ----
   {
     const mock = mockFetch({ body: recallBody });
     const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
@@ -12043,12 +12337,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         models: fake.models,
       }),
     );
+    const message = "重启一下服务";
     const result = await handler({
-      payload: { messages: [{ role: "user", content: "重启一下服务" }] },
+      payload: { messages: [{ role: "user", content: message }] },
       session: { sessionId: "llm-blank-prompt" },
     });
-    eq("空白提示词也不问模型", fake.calls.utility.length, 0);
-    check("空白提示词照常召回", Boolean(result?.payload));
+    eq(
+      "空白提示词也用内置默认问模型",
+      [
+        fake.calls.utility.length,
+        fake.calls.utility[0]?.messages?.[0]?.content === renderGatePrompt(DEFAULT_GATE_PROMPT, message),
+        result,
+        mock.calls.length,
+      ],
+      [1, true, undefined, 0],
+    );
   }
 
   // ---- 空回答：安全召回 ----
@@ -12533,7 +12836,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     ["", "", "自定义"],
   );
   eq(
-    "gateContextOf / gateContextTurnsOf / gateContextPromptOf：缺项与脏值回默认 / 轮数越界回 4 / 题面去首尾空白但空串仍是空",
+    "gateContextOf / gateContextTurnsOf / gateContextPromptOf：缺项与脏值回默认 / 轮数越界回 4 / 空题面回内置默认、自定义去首尾空白",
     [
       [gateContextOf({}), gateContextOf({ gateContext: "turns" }), gateContextOf({ gateContext: "bogus" })],
       [gateContextTurnsOf({}), gateContextTurnsOf({ gateContextTurns: "12" }), gateContextTurnsOf({ gateContextTurns: 13 })],
@@ -12542,7 +12845,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     [
       ["turns", "turns", "turns"],
       [4, 12, 4],
-      ["", "", "自定义"],
+      [DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, "自定义"],
     ],
   );
 
@@ -13209,7 +13512,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
 
-  // ---- llm 档同样受这个设置影响（失败 = 宿主播错 / 超时 / 空提示词）----
+  // ---- llm 档同样受这个设置影响（失败 = 宿主播错 / 超时）----
   {
     const rows = [];
     for (const [text, tag] of [[SHORT, "short"], [LONG, "long"]]) {
@@ -13248,7 +13551,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
   }
   {
-    // llm 的空提示词 = 没有判据，同样按兜底走。
+    // llm 的空提示词 = 用内置默认，照常问模型；这个用例顺带证明它不再走失败兜底。
     const mock = mockFetch({ body: recallBody });
     const fake = modelSdk({ utility: () => ({ text: "不需要" }) });
     const handler = createRecallHandler(
@@ -13269,9 +13572,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       session: { sessionId: "fb-llm-empty-prompt" },
     });
     eq(
-      "llm 空提示词 + fallback=rules：一次模型都不问，退到规则（短指令跳过，也不发召回）",
-      [result, fake.calls.utility.length, mock.calls.length],
-      [undefined, 0, 0],
+      "llm 空提示词 + fallback=rules：按内置默认题面判断（模型照问一次），不再走失败兜底；短指令被 llm 判为不需要，不发召回",
+      [
+        result,
+        fake.calls.utility.length,
+        fake.calls.utility[0]?.messages?.[0]?.content === renderGatePrompt(DEFAULT_GATE_PROMPT, SHORT),
+        mock.calls.length,
+      ],
+      [undefined, 1, true, 0],
     );
   }
 

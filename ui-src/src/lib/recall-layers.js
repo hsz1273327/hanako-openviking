@@ -896,11 +896,11 @@ export function promptDraft(configValue, touched = false) {
   return touched ? "" : DEFAULT_GATE_PROMPT;
 }
 
-/** 提示词旁边那行小字：默认 / 已修改 / 空（不拦截）。 */
+/** 提示词旁边那行小字：默认 / 已修改 / 空（用内置默认）。 */
 export function promptStatus(text) {
   const value = normalizeGatePrompt(text);
   if (value === DEFAULT_GATE_PROMPT) return "当前为默认提示词";
-  if (!value.trim()) return "已修改 · 提示词为空时不会拦截任何召回";
+  if (!value.trim()) return "已修改 · 留空时使用内置默认提示词";
   return "已修改";
 }
 
@@ -930,7 +930,7 @@ export function contextPromptDraft(configValue, touched = false) {
 export function contextPromptStatus(text) {
   const value = normalizeGateContextPrompt(text);
   if (value === DEFAULT_GATE_CONTEXT_PROMPT) return "当前为默认提示词";
-  if (!value.trim()) return "已修改 · 提示词为空时不会拦截任何召回";
+  if (!value.trim()) return "已修改 · 留空时使用内置默认提示词";
   return "已修改";
 }
 

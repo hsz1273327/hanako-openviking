@@ -597,13 +597,13 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   padding-top: 12px;
   border-top: 1px solid rgba(0, 0, 0, 0.07);
 }
-/* 组标题比字段标签实一点，跟下级字段拉开层级。 */
+/* 与卡片标题同档，靠位置和分隔线区分。 */
 .capture-card .capture-group-title {
   margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 1.35;
-  opacity: 0.78;
+  opacity: 0.95;
 }
 /* 组内最后一个字段不再叠下边距，交给组间距。 */
 .capture-card .capture-group > .field:last-child { margin-bottom: 0; }

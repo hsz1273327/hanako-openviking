@@ -3,10 +3,20 @@
 // 铁律：所有开关在"使用的那一刻"从 sdk.config 现读，不在加载时缓存。
 // 因此设置页里点一下关，下一轮立刻生效，不用重载 App。
 
+import fs from "node:fs";
+import path from "node:path";
+import {
+  CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  CAPTURE_TOPIC_QUESTION,
+  DEFAULT_GATE_PROMPT,
+  DEFAULT_RERANK_PROMPT,
+  GATE_PROMPT_RETIRED_DEFAULTS,
+} from "./prompt-defaults.js";
+
 /**
  * 决策模型判断的默认题面（不是提示词模板）。
  *
- * 与 gatePrompt 的默认值不一样：那一条默认是空串（空 = 不拦截），这一条默认给一句完整问法，
+ * 与 gatePrompt 的默认值不一样：那一条空串 = 用内置默认题面，这一条默认给一句完整问法，
  * 因为决策模型的题型固定是 choice + criteria（两条内置描述写在 src/memory/recall.js 的
  * DECISION_GATE_CRITERIA 里），用户能改的只是「题面」怎么问，不是判定标准。
  * 空值仍然是「没有判据，照常召回」——这里给的是「没配过时读到什么」，不是「空值时偷偷套什么」。
@@ -20,8 +30,8 @@ export const DEFAULT_GATE_DECISION_PROMPT =
 /**
  * 带前文模式专用题面：模型能看到最近几轮对话，问的是「上面那几轮里有没有」。
  *
- * 与 gateDecisionPrompt 一样，这里给的是「没配过时读到什么」，不是「空值兜底」：
- * 用户把这一格清空仍然是「没有判据」，不拿默认去盖。
+ * 空串 = 用内置默认题面（与 gatePrompt 同一规则）；要关掉判断请切 recallGate / gateContext，
+ * 不要靠清空这一格。
  */
 export const DEFAULT_GATE_CONTEXT_PROMPT =
   "这句话要的信息，上面的对话里有吗？还是要翻更早的记录？";
@@ -111,14 +121,6 @@ export const DEDUPE_THRESHOLD_MAX = 1;
 /** 步长只影响数字框的加减手感，不是归一化要圆整到的格点。 */
 export const DEDUPE_THRESHOLD_STEP = 0.05;
 
-/**
- * 写回的老三档。现在只用于迁移与 manifest 声明，运行时不再按它判定。
- *   fixed         攒够若干完整轮就提交（= 提前提交关）
- *   llm           提前提交 + 语言模型判断
- *   discriminator 提前提交 + 判别模型判断
- */
-export const CAPTURE_COMMIT_MODES = Object.freeze(["fixed", "llm", "discriminator"]);
-
 /** 提前提交时的两种判断方式。 */
 export const CAPTURE_EARLY_JUDGES = Object.freeze(["llm", "discriminator"]);
 
@@ -131,7 +133,7 @@ export const CAPTURE_TOPIC_CANDIDATES_MIN = 1;
 export const CAPTURE_TOPIC_CANDIDATES_MAX = 20;
 export const CAPTURE_TOPIC_CANDIDATES_STEP = 1;
 
-/** 提交策略的语义版本。空串 = 老配置（按旧的 captureCommitMode 迁移）。 */
+/** 提交策略的语义版本。空串 = 从没写过（老配置）；保存成功后写 2。 */
 export const CAPTURE_COMMIT_SCHEMA = 2;
 
 /** 固定轮次档的默认值、边界与面板步长。 */
@@ -166,9 +168,7 @@ export const DEFAULTS = {
   mergeMemory: false,
   autoRecall: true,
   autoCapture: true,
-  // 写回：老档位只用于迁移；运行时的判据是「提前提交 + 判断方式」。
-  captureCommitMode: "fixed",
-  // 提交策略语义版本：空串 = 老配置（读侧按 captureCommitMode 迁移）。
+  // 提交策略语义版本：空串 = 从没写过（老配置）；保存成功后写 2。
   captureCommitSchema: "",
   captureEarlyCommit: false,
   captureEarlyJudge: "llm",
@@ -231,6 +231,106 @@ export const DEFAULTS = {
   systemoneServiceTimeoutMs: "",
   systemoneServiceKey: "",
 };
+
+/** 四个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
+const PROMPT_DEFAULT_VALUES = Object.freeze({
+  capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
+  gatePrompt: Object.freeze([DEFAULT_GATE_PROMPT, ...GATE_PROMPT_RETIRED_DEFAULTS]),
+  gateContextPrompt: Object.freeze([DEFAULT_GATE_CONTEXT_PROMPT]),
+  rerankPrompt: Object.freeze([DEFAULT_RERANK_PROMPT]),
+});
+
+/** 写入前归一：值等于内置默认就存空串，其余原样（不 trim、不截断、不做类型转换）。 */
+export function promptForStorage(key, raw) {
+  const defaults = PROMPT_DEFAULT_VALUES[key] || [];
+  return typeof raw === "string" && defaults.includes(raw) ? "" : raw;
+}
+
+/** 迁移标记的版本。标记里的 version >= 这个值就不再扫配置。 */
+export const PROMPT_DEFAULTS_MIGRATION_VERSION = 1;
+
+const PROMPT_DEFAULTS_MIGRATION_FILE = "prompt-defaults.json";
+
+function promptMigrationMarkerPath(sdk) {
+  const dataDir = typeof sdk?.dataDir === "string" ? sdk.dataDir.trim() : "";
+  return dataDir ? path.join(dataDir, PROMPT_DEFAULTS_MIGRATION_FILE) : "";
+}
+
+/** 标记损坏 / JSON 坏 / version 小 / 没 dataDir：一律当成「没迁移过」。 */
+function promptMigrationAlreadyDone(sdk) {
+  const file = promptMigrationMarkerPath(sdk);
+  if (!file) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const version = Number(parsed?.version);
+    return Number.isFinite(version) && version >= PROMPT_DEFAULTS_MIGRATION_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+/** 标记写失败只 warn，不抛；没写成下次启动会重扫，重扫是幂等的。 */
+function writePromptMigrationMarker(sdk) {
+  const file = promptMigrationMarkerPath(sdk);
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: PROMPT_DEFAULTS_MIGRATION_VERSION,
+        at: new Date().toISOString(),
+      }),
+    );
+  } catch (error) {
+    try {
+      sdk.logger?.warn?.(
+        `openviking prompt migration marker write failed: ${error?.message || error}`,
+      );
+    } catch {
+      /* 日志不能影响 App 装载 */
+    }
+  }
+}
+
+/**
+ * 盘上存着与内置默认逐字相同的值 → 真实写成空串一次。
+ * 只处理非空字符串；自定义值、空串、类型不对的一律不碰。返回被改写的键。
+ *
+ * 单个键失败只 warn，不阻断其它键，也不阻断 App 装载，并且不写「已迁移」标记——
+ * 下次启动会重扫，重扫是幂等的。成功跑完写 <dataDir>/prompt-defaults.json，
+ * 之后的装载看到 version 就直接返回，一次 config.get 都不发。
+ *
+ * 迁移只挂 App 装载路径，不放进 readSwitches：/status 这类只读路由也走 readSwitches，
+ * 不能让它产生写配置的副作用。标记就是为了让后续装载不再扫。
+ */
+export async function migratePromptDefaults(sdk) {
+  if (promptMigrationAlreadyDone(sdk)) return [];
+
+  const changed = [];
+  let failed = false;
+  for (const [key, defaults] of Object.entries(PROMPT_DEFAULT_VALUES)) {
+    try {
+      const value = await sdk.config.get(key);
+      if (typeof value === "string" && value && defaults.includes(value)) {
+        await sdk.config.set(key, "");
+        changed.push(key);
+      }
+    } catch (error) {
+      failed = true;
+      try {
+        sdk.logger?.warn?.(
+          `openviking prompt migration failed for ${key}: ${error?.message || error}`,
+        );
+      } catch {
+        /* 日志不能影响配置迁移 / App 装载 */
+      }
+    }
+  }
+
+  if (!failed) writePromptMigrationMarker(sdk);
+  return changed;
+}
 
 /**
  * 召回判断（四档，界面文案见 ui-src/src/lib/recall-layers.js 的 RECALL_GATE_LABELS）：
@@ -423,11 +523,6 @@ export function normalizeCapturePrompt(raw) {
   return Array.from(raw).slice(0, CAPTURE_PROMPT_MAX).join("");
 }
 
-/** 写回提交策略：只认三档，其余（缺项、类型不对、脏值）一律回 fixed。 */
-export function normalizeCaptureCommitMode(raw) {
-  return oneOf(raw, CAPTURE_COMMIT_MODES, "fixed");
-}
-
 /** 提前提交开关：只认布尔 true，其余一律关。 */
 export function normalizeCaptureEarlyCommit(raw) {
   return raw === true;
@@ -478,21 +573,6 @@ export function normalizeCaptureCommitSchema(raw) {
 /** 写回配置的形状：一律存数字串。 */
 export function serializeCaptureCommitSchema(raw) {
   return String(normalizeCaptureCommitSchema(raw));
-}
-
-/**
- * 老档位 → 新语义。只在 captureCommitSchema 还是老版本时使用。
- * fixed 关提前提交；llm / discriminator 打开并带上对应判断方式。
- */
-export function applyCaptureCommitSchema({ early, judge, mode } = {}) {
-  switch (normalizeCaptureCommitMode(mode)) {
-    case "llm":
-      return { early: true, judge: "llm" };
-    case "discriminator":
-      return { early: true, judge: "discriminator" };
-    default:
-      return { early: false, judge: "llm" };
-  }
 }
 
 /**
@@ -684,7 +764,7 @@ export function normalizeGateDecisionPrompt(raw) {
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
 }
 
-/** 带前文模式那套题面与 gateDecisionPrompt 同口径：同一份长度上限，空串 = 没有判据。 */
+/** 带前文模式那套题面与 gatePrompt 同一份长度上限；空串在运行时 = 用内置默认题面。 */
 export function normalizeGateContextPrompt(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, GATE_PROMPT_MAX).join("");
@@ -1157,23 +1237,14 @@ export async function readSwitches(sdk) {
   // 迁移只在这一层做（内存里），落库等下一次整单保存，见 routes/recall-mode.js。
   const rerankLaneSchemaRaw = await read(sdk, "rerankLaneSchema");
   const legacyLanes = rerankLaneSchemaIsLegacy(rerankLaneSchemaRaw);
-  // 写回：老的 captureCommitMode 只在 schema 还是老版本时参与迁移，之后不再当判据。
-  const captureCommitMode = normalizeCaptureCommitMode(await read(sdk, "captureCommitMode"));
   const captureModel = String((await read(sdk, "captureModel")) ?? "").trim();
   const captureServiceUrl = normalizeServiceUrl(await read(sdk, "captureServiceUrl"));
   const captureChoice = { captureModel, captureServiceUrl, systemoneServiceModel };
   const captureCommitSchemaRaw = await read(sdk, "captureCommitSchema");
-  const legacyCaptureCommit = captureCommitSchemaIsLegacy(captureCommitSchemaRaw);
   const storedEarlyCommit = normalizeCaptureEarlyCommit(await read(sdk, "captureEarlyCommit"));
   const storedEarlyJudge = normalizeCaptureEarlyJudge(await read(sdk, "captureEarlyJudge"));
-  // 老配置里没有这两个键，唯一的凭据是旧档位：fixed 关，llm / discriminator 开。
-  const earlyCommit = legacyCaptureCommit
-    ? applyCaptureCommitSchema({
-        early: storedEarlyCommit,
-        judge: storedEarlyJudge,
-        mode: captureCommitMode,
-      })
-    : { early: storedEarlyCommit, judge: storedEarlyJudge };
+  // 旧键已删除：读不到就是没有，只按这两个键取默认值。
+  const earlyCommit = { early: storedEarlyCommit, judge: storedEarlyJudge };
   const captureEarlyMissing = captureModeMissing(
     { ...captureChoice, captureEarlyCommit: earlyCommit.early, captureEarlyJudge: earlyCommit.judge },
     earlyCommit.judge,
@@ -1182,8 +1253,7 @@ export async function readSwitches(sdk) {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
     autoCapture: await read(sdk, "autoCapture"),
-    // 写回：老档位留着给兼容报告；运行时只看提前提交与判断方式。
-    captureCommitMode,
+    // 写回：运行时只看提前提交与判断方式。
     captureCommitSchema: normalizeCaptureCommitSchema(captureCommitSchemaRaw),
     captureEarlyCommit: earlyCommit.early,
     captureEffectiveEarly: earlyCommit.early && captureEarlyMissing.length === 0,
@@ -1203,6 +1273,7 @@ export async function readSwitches(sdk) {
     captureModel,
     captureServiceUrl,
     // 写回判断题面：提前提交时共用这一句，空串 = 运行时不变量那句默认问法。
+    // 读取路径不做转换：盘上是什么就读什么；默认值不落库由写入端与启动迁移负责。
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,

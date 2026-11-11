@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
+import { CAPTURE_TOPIC_QUESTION } from "../ov/prompt-defaults.js";
 import {
   CAPTURE_COMMIT_TURNS_DEFAULT,
   CAPTURE_MIN_TURNS_DEFAULT,
@@ -35,9 +36,12 @@ import {
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
 import { candidatePool, readTopics, recordSegment, withTopics } from "./topics.js";
 
-/** 内置默认题面（面板里可编辑的那一格）；答案格式由代码固定追加，见 CAPTURE_TOPIC_FORMAT。 */
-export const CAPTURE_TOPIC_QUESTION =
-  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。";
+/**
+ * 内置默认题面（面板里可编辑的那一格）。字面量在 src/ov/prompt-defaults.js——
+ * settings.js 的写时归一与启动迁移也要用它。继续从本模块导出，原有引用不用改。
+ * 答案格式由代码固定追加，见 CAPTURE_TOPIC_FORMAT。
+ */
+export { CAPTURE_TOPIC_QUESTION };
 
 /** 答案格式：固定追加，不进用户可编辑的那一格。解析靠它，题面只决定怎么问。 */
 export const CAPTURE_TOPIC_FORMAT = [

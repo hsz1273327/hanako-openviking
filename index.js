@@ -8,7 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { defineApp } from "./sdk/app-contract/server-client.js";
-import { readConnection, readSwitches } from "./src/ov/settings.js";
+import { migratePromptDefaults, readConnection, readSwitches } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { normalizeReady } from "./src/ov/ready.js";
 import { activateRuntime, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
@@ -127,6 +127,16 @@ function scheduleRuntimeRestart(sdk, runtimeId, reason) {
 
 export default defineApp(async (sdk) => {
   await startManagedRuntime(sdk);
+
+  // 盘上存着与内置默认逐字相同的提示词值 → 真实写成空串一次。失败不阻断装载。
+  try {
+    const migrated = await migratePromptDefaults(sdk);
+    if (migrated.length) {
+      sdk.logger.info(`openviking prompts migrated to empty: ${migrated.join(", ")}`);
+    }
+  } catch (error) {
+    sdk.logger.warn(`openviking prompt migration failed: ${error?.message || error}`);
+  }
 
   const probe = createProbe({ dataDir: sdk.dataDir, logger: sdk.logger });
   const probeOn = async () => (await sdk.config.get("probe")) === true;

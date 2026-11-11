@@ -134,7 +134,7 @@ entry id 来自 JSONL 每条记录的 `id` 字段（8 位十六进制，配 `par
 ## 五、提交策略
 
 每次提交前都会先做归类，但「要不要因为换话题提前提交」由 `captureEarlyCommit` 决定。
-旧的 `captureCommitMode` 三档只用于迁移，运行时不再按它判定。
+`captureCommitMode` 已删除，读不到就是没有；提交策略只看 `captureEarlyCommit` / `captureEarlyJudge`。
 
 ### 5.1 提交判断顺序
 
@@ -307,9 +307,13 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
   - 判断模型（`captureModel`，仅语言模型）或判别服务地址（`captureServiceUrl`，仅判别模型）
 - 服务端兜底：开关与空闲秒数
 
-旧配置自动迁移：`captureCommitMode` 为 `fixed` → 提前提交关；`llm` / `discriminator` →
-提前提交开、判断方式随档。迁移只发生在读取侧，下一次整单保存时写
-`captureCommitSchema = "2"`，此后不再按旧档位迁移。
+默认值不落库（`capturePrompt` / `gatePrompt` / `gateContextPrompt` / `rerankPrompt` 同一规则）：
+写入时，值等于内置默认（含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由
+App 装载时一次性改写成空串。迁移完成会在 `<dataDir>/prompt-defaults.json` 写一个 `version`
+标记，之后的装载不再扫配置；迁移中途失败则不写标记，下次启动重试。空串在运行时表示用
+内置默认；要关掉判断请切 `recallGate` / `gateContext`，不要靠清空提示词。
+
+老配置里存着的 `captureCommitMode` 不再参与读取，读不到就是没有；提前提交一律只看上面两个键。
 
 侧边栏会话卡显示四行：本会话已写、上次提交、待提交轮数、本会话话题数（含 dormant）。
 打开卡片只读：`/capture-status` 不建状态文件、不写话题表、不联网。

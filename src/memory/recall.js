@@ -17,7 +17,9 @@ import path from "node:path";
 import { createClient } from "../ov/client.js";
 import { transportFor } from "../ov/transport.js";
 import { resolvePeer } from "../ov/identity.js";
+import { DEFAULT_GATE_PROMPT, DEFAULT_RERANK_PROMPT } from "../ov/prompt-defaults.js";
 import {
+  DEFAULT_GATE_CONTEXT_PROMPT,
   GATE_DECISION_THRESHOLD_DEFAULT,
   RERANK_FALLBACK_CHANNEL_TYPE,
   RERANK_FALLBACK_MODEL,
@@ -178,19 +180,11 @@ export function gateFallbackOf(switches) {
 export const GATE_MESSAGE_PLACEHOLDER = "{{message}}";
 
 /**
- * llm 判断的默认提示词模板。导出给测试与面板文案对照。
- * 面板里的 textarea 以它作为草稿（配置为空时直接填进去让人改），两边必须是同一段文字，
- * 冒烟会比对 ui-src/src/lib/recall-layers.js 里的副本与这里的字面量。
+ * llm 判断的默认提示词模板。字面量在 src/ov/prompt-defaults.js——settings.js 的
+ * 写时归一与启动迁移也要用它，放这里会让两个模块互相 import。
+ * 继续从本模块导出，原有 `from "./recall.js"` 的引用不用改。
  */
-export const DEFAULT_GATE_PROMPT = `下面是一条用户消息。判断回答它需不需要先查历史记忆。
-
-需要查的情况：问过去做过什么、提到「上次」「之前」「那个」「继续」，或者要参考已经定过的决定。
-
-不需要查的情况：纯操作指令，例如运行命令、删除文件、重启服务，并且不指向任何历史内容。
-
-只回一个词：需要，或不需要。
-
-用户消息：{{message}}`;
+export { DEFAULT_GATE_PROMPT };
 
 /** 精排模板里的两个占位符：当前消息，以及带编号的候选清单。 */
 export const RERANK_MESSAGE_PLACEHOLDER = "{{message}}";
@@ -211,19 +205,10 @@ export const SYSTEMONE_N_PLACEHOLDER = "{{n}}";
 export const DEFAULT_RERANK_SYSTEMONE_PROMPT = "第 {{n}} 条候选能帮助回答用户的问题吗";
 
 /**
- * llm 精排的默认提示词模板。导出给测试与面板文案对照。
- * 面板加载不了 App 的 Node 模块，ui-src/src/lib/recall-layers.js 里存了逐字相同的一份，
- * 冒烟会比对两边；配置里的 rerankPrompt 为空时就用这段。
+ * llm 精排的默认提示词模板。字面量在 src/ov/prompt-defaults.js，理由同上。
+ * 继续从本模块导出，原有引用不用改；配置里的 rerankPrompt 为空时就用这段。
  */
-export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}
-
-下面是从记忆库里查到的候选，每条一行，前面是编号：
-
-{{candidates}}
-
-挑出真正能帮助回答这个问题的候选。只回编号，用逗号分隔，例如 1,3。
-如果一条都用不上，只回两个字：无。
-不要解释。`;
+export { DEFAULT_RERANK_PROMPT };
 
 /**
  * 模板 + 消息 -> 真正要发给模型的那一段文本。
@@ -334,14 +319,14 @@ export const GATE_TIMEOUT_MS = 600;
 export const GATE_MAX_TOKENS = 8;
 
 /**
- * 空串表示“没有提示词”，不是“用默认”。
+ * 语言模型判断的题面：空串 / 只有空白 → 用内置默认。
  *
- * 这层语义改过一次：早先空值会静默回退成 DEFAULT_GATE_PROMPT，用户以为自己在用默认、
- * 其实配置里是空的，清空也清不掉。现在空就是空，由调用方决定空的时候怎么办
- * （llm 档的处理是“不拦截”，见 handler 里那段）。
+ * 默认值不落库靠写入端（等于内置默认就存空串）与启动时的一次性迁移；运行时这边
+ * 空串统一表示「用内置默认」。要关掉判断请切 recallGate，不要靠清空提示词。
  */
 export function gatePromptOf(switches) {
-  return typeof switches?.gatePrompt === "string" ? switches.gatePrompt.trim() : "";
+  const value = typeof switches?.gatePrompt === "string" ? switches.gatePrompt.trim() : "";
+  return value || DEFAULT_GATE_PROMPT;
 }
 
 /**
@@ -766,7 +751,7 @@ function noulScoreOf(value) {
  */
 
 /**
- * 决策那一档的判据：空串 = 没有判据（照常召回），与 gatePromptOf 同一条语义。
+ * 决策那一档的判据：空串 = 没有判据（照常召回），与 gatePromptOf 不是同一条语义。
  *
  * 默认题面（DEFAULT_GATE_DECISION_PROMPT，在 src/ov/settings.js）是配置的默认值，
  * 不是空值时的兜底：用户把这一格清空就是「不想判」，不能偷偷把默认题面塞回去。
@@ -811,13 +796,15 @@ export function gateContextTurnsOf(switches) {
 }
 
 /**
- * 带前文模式那份题面的读数：与 gateDecisionPromptOf 同一条语义。
- * 空串 = 没有判据（不是「偷偷用默认」）。
+ * 带前文模式那份题面的读数：空串 / 只有空白 → 用内置默认。
+ * 与 gatePromptOf 同一规则；要关掉判断请切 recallGate / gateContext。
  */
 export function gateContextPromptOf(switches) {
-  return typeof switches?.gateContextPrompt === "string"
-    ? normalizeGateContextPrompt(switches.gateContextPrompt).trim()
-    : "";
+  const value =
+    typeof switches?.gateContextPrompt === "string"
+      ? normalizeGateContextPrompt(switches.gateContextPrompt).trim()
+      : "";
+  return value || DEFAULT_GATE_CONTEXT_PROMPT;
 }
 
 /**
@@ -2347,7 +2334,7 @@ export function createRecallHandler(sdk, options = {}) {
     // 召回判断：rules 只看极短纯操作指令；llm 让宿主的生成式模型回答（语言模型判断）；
     // decision 让决策模型（/v1/systemone）在 need / standalone 之间选一个（决策模型判断）。
     //
-    // 判断失败（网络错 / 超时 / 返回结构不认识 / 题面为空）时按 gateFallback 兜底：
+    // 判断失败（网络错 / 超时 / 返回结构不认识）时按 gateFallback 兜底：
     //   recall（默认）——照常召回，判断失败不能变成漏召回；
     //   rules        ——退到规则判断跑一遍，规则说跳过才跳过。
     // 兜底日志一律带 fallback=<走的那条>，看得出这一轮是模型判的、规则判的，还是干脆没判。
@@ -2370,19 +2357,14 @@ export function createRecallHandler(sdk, options = {}) {
     };
 
     if (switches.recallGate === "llm") {
-      const prompt = gatePromptOf(switches);
-      if (!prompt) {
-        // 空提示词不是“用默认”：没有判据就不问，按兜底走。
-        gateFailure("llm prompt empty");
-      } else {
-        try {
-          const answer = await askGateModel(sdk, switches, lastText);
-          if (!gateAnswerRecalls(answer)) {
-            gateSkip = { by: "llm", reason: "llm-no-need" };
-          }
-        } catch (error) {
-          gateFailure("llm failed", reasonOf(error));
+      // 空提示词 = 用内置默认，不是失败路径：gatePromptOf 已经回退好了。
+      try {
+        const answer = await askGateModel(sdk, switches, lastText);
+        if (!gateAnswerRecalls(answer)) {
+          gateSkip = { by: "llm", reason: "llm-no-need" };
         }
+      } catch (error) {
+        gateFailure("llm failed", reasonOf(error));
       }
     } else if (switches.recallGate === "decision") {
       const service = decisionGateServiceOf(switches);

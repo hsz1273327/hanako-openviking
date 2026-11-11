@@ -58,6 +58,7 @@ import {
   serializeServiceTimeout,
   servicePairError,
   serviceTimeoutOrDefault,
+  promptForStorage,
 } from "../src/ov/settings.js";
 import { maskString } from "../src/ov/mask.js";
 import {
@@ -297,7 +298,7 @@ export default function registerRecallModeRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["gatePrompt", body.gatePrompt]);
+      changes.push(["gatePrompt", promptForStorage("gatePrompt", body.gatePrompt)]);
     }
 
     if (has(body, "gateDecisionPrompt")) {
@@ -323,7 +324,10 @@ export default function registerRecallModeRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["gateContextPrompt", body.gateContextPrompt]);
+      changes.push([
+        "gateContextPrompt",
+        promptForStorage("gateContextPrompt", body.gateContextPrompt),
+      ]);
     }
 
     if (has(body, "gateContextTurns")) {
@@ -386,7 +390,7 @@ export default function registerRecallModeRoutes(app, ctx) {
           400,
         );
       }
-      changes.push(["rerankPrompt", body.rerankPrompt]);
+      changes.push(["rerankPrompt", promptForStorage("rerankPrompt", body.rerankPrompt)]);
     }
 
     // 判别模型那份题面：与精排提示词同一个长度上限，分开校验、分开落库。
