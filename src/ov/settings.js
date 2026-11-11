@@ -252,10 +252,11 @@ export function promptForStorage(key, raw) {
 
 /**
  * 迁移标记的版本。标记里的 version >= 这个值就不再扫配置。
- * v2 把 gateDecisionPrompt / rerankSystemonePrompt 纳入同一张表：写过 v1 标记的装载
- * 会再扫一次，之后写 v2 标记（不升版的话这两个新键永远轮不到迁移）。
+ * v2 把 gateDecisionPrompt / rerankSystemonePrompt 纳入同一张表。
+ * v3 修的是「在 apply 阶段读配置」：那时候设置贡献还没登记，六个键都答 null，
+ * v2 逻辑把这当成「没有要迁的」写了标记；v3 必须重扫一次，否则盘上的 v2 会挡死。
  */
-export const PROMPT_DEFAULTS_MIGRATION_VERSION = 2;
+export const PROMPT_DEFAULTS_MIGRATION_VERSION = 3;
 
 const PROMPT_DEFAULTS_MIGRATION_FILE = "prompt-defaults.json";
 
@@ -302,25 +303,34 @@ function writePromptMigrationMarker(sdk) {
 }
 
 /**
- * 盘上存着与内置默认逐字相同的值 → 真实写成空串一次。
- * 只处理非空字符串；自定义值、空串、类型不对的一律不碰。返回被改写的键。
+ * 盘上存着与内置默认逐字相同的值 → 真实写成空串一次，返回被改写的键。
  *
- * 单个键失败只 warn，不阻断其它键，也不阻断 App 装载，并且不写「已迁移」标记——
- * 下次启动会重扫，重扫是幂等的。成功跑完写 <dataDir>/prompt-defaults.json，
- * 之后的装载看到 version 就直接返回，一次 config.get 都不发。
+ * 只处理非空字符串；自定义值、空串一律不碰。**值不是字符串（null / {}）时不算迁移成功**：
+ * apply 阶段设置贡献还没登记，config.get 对每个键都答 null，那不是「没有要迁的」，是「读不到」。
+ * 这种情况不写标记、不返回 changed，留给下一次重试。空串是已经迁完的合法终态，算迁移成功。
  *
- * 迁移只挂 App 装载路径，不放进 readSwitches：/status 这类只读路由也走 readSwitches，
- * 不能让它产生写配置的副作用。标记就是为了让后续装载不再扫。
+ * 单个键失败只 warn，不阻断其它键，也不阻断调用方，同样不写标记——下次会重扫，重扫是幂等的。
+ * 成功跑完写 <dataDir>/prompt-defaults.json，之后看到 version 就直接返回，一次 config.get 都不发。
+ *
+ * 迁移只挂 agent/before-start（设置贡献早就登记完了），不放进 readSwitches：/status 这类
+ * 只读路由也走 readSwitches，不能让它产生写配置的副作用。标记就是为了让后续调用不再扫。
  */
 export async function migratePromptDefaults(sdk) {
   if (promptMigrationAlreadyDone(sdk)) return [];
 
   const changed = [];
   let failed = false;
+  let notReady = false;
+  const seen = [];
   for (const [key, defaults] of Object.entries(PROMPT_DEFAULT_VALUES)) {
     try {
       const value = await sdk.config.get(key);
-      if (typeof value === "string" && value && defaults.includes(value)) {
+      seen.push({ key, type: value === null ? "null" : typeof value });
+      if (typeof value !== "string") {
+        notReady = true;
+        continue;
+      }
+      if (value && defaults.includes(value)) {
         await sdk.config.set(key, "");
         changed.push(key);
       }
@@ -336,8 +346,53 @@ export async function migratePromptDefaults(sdk) {
     }
   }
 
+  if (notReady) {
+    try {
+      sdk.logger?.debug?.(
+        `openviking prompt migration deferred: config not ready ${JSON.stringify(seen)}`,
+      );
+    } catch {
+      /* 日志不能影响配置迁移 / App 装载 */
+    }
+    return [];
+  }
   if (!failed) writePromptMigrationMarker(sdk);
   return changed;
+}
+
+// 每进程只跑一次；没落成标记（config 没就绪 / 写标记失败）就清掉，下一轮再试。
+let promptMigrationOnce = null;
+
+export function migratePromptDefaultsOnce(sdk) {
+  if (!promptMigrationOnce) {
+    promptMigrationOnce = migratePromptDefaults(sdk)
+      .then((changed) => {
+        if (!promptMigrationAlreadyDone(sdk)) promptMigrationOnce = null;
+        return changed;
+      })
+      .catch((error) => {
+        promptMigrationOnce = null;
+        throw error;
+      });
+  }
+  return promptMigrationOnce;
+}
+
+/** 测试用：清掉进程内的一次性状态。 */
+export function resetPromptMigrationOnce() {
+  promptMigrationOnce = null;
+}
+
+/** 钩子入口：自己吞错，只负责迁移与日志。 */
+export async function runPromptMigrationOnce(sdk) {
+  try {
+    const migrated = await migratePromptDefaultsOnce(sdk);
+    if (migrated.length) {
+      sdk.logger?.info?.(`openviking prompts migrated to empty: ${migrated.join(", ")}`);
+    }
+  } catch (error) {
+    sdk.logger?.warn?.(`openviking prompt migration failed: ${error?.message || error}`);
+  }
 }
 
 /**

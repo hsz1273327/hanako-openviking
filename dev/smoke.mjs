@@ -172,6 +172,8 @@ import {
   captureModeMissing,
   promptForStorage,
   migratePromptDefaults,
+  migratePromptDefaultsOnce,
+  resetPromptMigrationOnce,
   PROMPT_DEFAULTS_MIGRATION_VERSION,
   DEFAULTS,
 } from "../src/ov/settings.js";
@@ -9109,6 +9111,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
     const v1Store = {
       capturePrompt: "自定义题面",
+      gatePrompt: "自定义",
+      gateContextPrompt: "自定义",
+      rerankPrompt: "自定义",
       gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
       rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
     };
@@ -9129,7 +9134,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const v1GetsAfterFirst = v1Gets;
     const v1Second = await migratePromptDefaults(v1Sdk);
     eq(
-      "v1 标记不会挡掉新键：重扫一次、迁完写 v2，之后再跑零调用",
+      "v1 标记不会挡掉新键：重扫一次、迁完写当前版本，之后再跑零调用",
       [
         v1Gets > 0,
         v1Store.gateDecisionPrompt,
@@ -9238,6 +9243,127 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     );
     fs.rmSync(retryDir, { recursive: true, force: true });
+
+    // apply 阶段读到的 null / {}：不算迁移成功，不写标记，不返回 changed。
+    const nullDir = path.join(import.meta.dirname, ".tmp-prompt-defaults-null");
+    fs.rmSync(nullDir, { recursive: true, force: true });
+    fs.mkdirSync(nullDir, { recursive: true });
+    const nullFile = path.join(nullDir, "prompt-defaults.json");
+    let nullWrites = 0;
+    let nullGets = 0;
+    const nullSdk = {
+      dataDir: nullDir,
+      config: {
+        get: async () => {
+          nullGets += 1;
+          return null;
+        },
+        set: async () => {
+          nullWrites += 1;
+        },
+      },
+    };
+    const nullChanged = await migratePromptDefaults(nullSdk);
+    eq(
+      "读到 null 不算迁移成功：不写标记、不返回 changed、不写配置",
+      [nullChanged, nullWrites, fs.existsSync(nullFile), nullGets],
+      [[], 0, false, 6],
+    );
+
+    // 同一次进程里重试：null 之后不缓存失败结果，换一份能读的配置就迁上。
+    resetPromptMigrationOnce();
+    const retryOkStore = {
+      capturePrompt: CAPTURE_TOPIC_QUESTION,
+      gatePrompt: DEFAULT_GATE_PROMPT,
+      gateContextPrompt: DEFAULT_GATE_CONTEXT_PROMPT,
+      rerankPrompt: DEFAULT_RERANK_PROMPT,
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: DEFAULT_RERANK_SYSTEMONE_PROMPT,
+    };
+    const retryOkSdk = {
+      dataDir: nullDir,
+      config: {
+        get: async (key) => retryOkStore[key],
+        set: async (key, value) => {
+          retryOkStore[key] = value;
+        },
+      },
+    };
+    const onceDeferred = await migratePromptDefaultsOnce(nullSdk);
+    const onceRetried = await migratePromptDefaultsOnce(retryOkSdk);
+    const retriedMarker = fs.existsSync(nullFile)
+      ? JSON.parse(fs.readFileSync(nullFile, "utf8")).version
+      : null;
+    eq(
+      "迁移推迟后同进程重试：第二轮读到真实值就迁完并落标记",
+      [onceDeferred, onceRetried.length, retryOkStore.gatePrompt, retriedMarker],
+      [[], 6, "", PROMPT_DEFAULTS_MIGRATION_VERSION],
+    );
+    fs.rmSync(nullDir, { recursive: true, force: true });
+
+    // 盘上已有的 v2 标记不能挡住 v3：否则上一次误写的标记会把修复也锁死。
+    const v2Dir = path.join(import.meta.dirname, ".tmp-prompt-defaults-v2");
+    fs.rmSync(v2Dir, { recursive: true, force: true });
+    fs.mkdirSync(v2Dir, { recursive: true });
+    const v2File = path.join(v2Dir, "prompt-defaults.json");
+    fs.writeFileSync(v2File, JSON.stringify({ version: 2, at: "2026-01-01T00:00:00.000Z" }));
+    const v2Store = {
+      capturePrompt: "自定义",
+      gatePrompt: "自定义",
+      gateContextPrompt: "自定义",
+      rerankPrompt: "自定义",
+      gateDecisionPrompt: DEFAULT_GATE_DECISION_PROMPT,
+      rerankSystemonePrompt: "自定义",
+    };
+    const v2Sdk = {
+      dataDir: v2Dir,
+      config: {
+        get: async (key) => v2Store[key],
+        set: async (key, value) => {
+          v2Store[key] = value;
+        },
+      },
+    };
+    const v2Changed = await migratePromptDefaults(v2Sdk);
+    eq(
+      "v2 标记不会挡住 v3：重扫一次、只迁默认值、写回当前版本",
+      [
+        v2Changed,
+        v2Store.gateDecisionPrompt,
+        v2Store.capturePrompt,
+        JSON.parse(fs.readFileSync(v2File, "utf8")).version,
+      ],
+      [["gateDecisionPrompt"], "", "自定义", PROMPT_DEFAULTS_MIGRATION_VERSION],
+    );
+    fs.rmSync(v2Dir, { recursive: true, force: true });
+
+    // 正常情况每进程只跑一次：第二次直接复用结果，一次 config.get 都不发。
+    const onceDir = path.join(import.meta.dirname, ".tmp-prompt-defaults-once");
+    fs.rmSync(onceDir, { recursive: true, force: true });
+    fs.mkdirSync(onceDir, { recursive: true });
+    const onceFile = path.join(onceDir, "prompt-defaults.json");
+    let onceGets = 0;
+    const onceSdk = {
+      dataDir: onceDir,
+      config: {
+        get: async () => {
+          onceGets += 1;
+          return "";
+        },
+        set: async () => {},
+      },
+    };
+    resetPromptMigrationOnce();
+    const onceFirst = await migratePromptDefaultsOnce(onceSdk);
+    const getsAfterOnce = onceGets;
+    const onceSecond = await migratePromptDefaultsOnce(onceSdk);
+    eq(
+      "正常情况只跑一次：第二次走进程内缓存，config.get 零调用，标记已落",
+      [onceFirst, onceSecond, onceGets - getsAfterOnce, fs.existsSync(onceFile)],
+      [[], [], 0, true],
+    );
+    fs.rmSync(onceDir, { recursive: true, force: true });
+    resetPromptMigrationOnce();
   }
 
   // ---- 9.2 源码里不再有那个旧键 ----

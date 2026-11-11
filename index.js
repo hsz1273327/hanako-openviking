@@ -8,7 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { defineApp } from "./sdk/app-contract/server-client.js";
-import { migratePromptDefaults, readConnection, readSwitches } from "./src/ov/settings.js";
+import { readConnection, readSwitches, runPromptMigrationOnce } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { normalizeReady } from "./src/ov/ready.js";
 import { activateRuntime, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
@@ -128,16 +128,6 @@ function scheduleRuntimeRestart(sdk, runtimeId, reason) {
 export default defineApp(async (sdk) => {
   await startManagedRuntime(sdk);
 
-  // 盘上存着与内置默认逐字相同的提示词值 → 真实写成空串一次。失败不阻断装载。
-  try {
-    const migrated = await migratePromptDefaults(sdk);
-    if (migrated.length) {
-      sdk.logger.info(`openviking prompts migrated to empty: ${migrated.join(", ")}`);
-    }
-  } catch (error) {
-    sdk.logger.warn(`openviking prompt migration failed: ${error?.message || error}`);
-  }
-
   const probe = createProbe({ dataDir: sdk.dataDir, logger: sdk.logger });
   const probeOn = async () => (await sdk.config.get("probe")) === true;
   // 一个进程一份去重表：before-request 按模型步触发，同一用户文本只召回一次。
@@ -190,11 +180,17 @@ export default defineApp(async (sdk) => {
   // ---- 探针：三个接缝各记一行，返回值一律不改 ----
 
   await sdk.hooks.onDecision("agent/before-start", async (invocation) => {
+    // 迁移放这里，不放在 apply：apply 阶段设置贡献还没登记，config.get 对每个键都答 null。
+    // 每进程一次；没落成标记就留到下一轮再试。
+    await runPromptMigrationOnce(sdk);
     if (await probeOn()) await probe("agent/before-start", invocation);
     return undefined;
   });
 
   await sdk.hooks.onDecision("provider/before-request", async (invocation) => {
+    // 迁移的第二个入口：reload 落在轮次中途时，这一轮的 before-start 已经过了；
+    // provider/before-request 每次模型请求前都会过一遍，一次性开关保证仍然只扫一次。
+    await runPromptMigrationOnce(sdk);
     // peer 是会话级的：谁在说话就按谁的 sessionId 记，面板读同一份，显示和注入不会对不上。
     // 解析不出身份时这里什么也不写（peer 为 null），不会用“上一个”顶上。
     try {
