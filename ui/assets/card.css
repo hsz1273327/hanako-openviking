@@ -178,6 +178,13 @@ html, body {
   overflow-wrap: anywhere;
 }
 
+/* 补交行右侧的小按钮：不参与基线对齐，也不跟着行宽被压扁。 */
+.capture-row > .n-button {
+  flex: none;
+  align-self: center;
+  margin-left: 6px;
+}
+
 .stats {
   margin: 0;
   font-size: 10.5px;

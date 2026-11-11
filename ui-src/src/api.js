@@ -27,6 +27,20 @@ export async function jsonPost(path, body) {
   return res.json();
 }
 
+export async function jsonPatch(path, body) {
+  const res = await hana.api.fetch(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+export async function jsonDelete(path) {
+  const res = await hana.api.fetch(path, { method: "DELETE" });
+  return res.json();
+}
+
 /** 告诉宿主：这一页已经挂好，可以开始渲染。每个页面入口调一次。 */
 export function appReady() {
   hana.ready();

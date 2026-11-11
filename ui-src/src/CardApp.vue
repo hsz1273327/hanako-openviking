@@ -14,6 +14,7 @@
 // 主色在本页局部换成宿主 accent #537D96，不动共享 theme.js（面板仍是品牌绿）。
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import {
+  NButton,
   NConfigProvider,
   NRadioButton,
   NRadioGroup,
@@ -40,6 +41,7 @@ import {
 } from "./lib/card-view.js";
 import CardRow from "./components/CardRow.vue";
 import { captureStatusRows } from "./lib/capture-view.js";
+import { pendingBackfillText } from "./lib/backfill-view.js";
 
 const REFRESH_MS = 8000;
 
@@ -74,6 +76,11 @@ const state = reactive({
   hasModel: false,
   writing: false,
   capture: { active: false, autoCapture: false, data: null },
+  backfillOk: false,
+  backfillPending: null,
+  backfillRunning: false,
+  backfillRunningSession: "",
+  backfillSending: false,
 });
 
 const controlsDisabled = computed(
@@ -90,6 +97,26 @@ const captureRows = computed(() =>
     autoCapture: state.capture.autoCapture,
   }),
 );
+
+// 补交这一行：没有活动会话 / 写回关着 / 取数失败，一律「—」并禁用。
+// 正在补交时按钮字改成「补交中…」并禁用，不做乐观进度（数字等下一次刷新）。
+const backfillBusy = computed(
+  () =>
+    state.backfillSending ||
+    (state.backfillRunning &&
+      (!state.backfillRunningSession || state.backfillRunningSession === state.sessionKey)),
+);
+const backfillDisabled = computed(() => {
+  if (backfillBusy.value) return true;
+  if (!state.sessionKey) return true;
+  if (captureDisabled.value) return true;
+  if (!state.backfillOk) return true;
+  return (state.backfillPending ?? 0) <= 0;
+});
+const backfillText = computed(() => {
+  if (!state.sessionKey || captureDisabled.value || !state.backfillOk) return "—";
+  return pendingBackfillText(state.backfillPending ?? 0);
+});
 
 const overridden = computed(() => {
   const out = {};
@@ -111,6 +138,10 @@ function showNoSession() {
   state.peerText = "—";
   state.peerTitle = "";
   state.capture = { active: false, autoCapture: false, data: null };
+  state.backfillOk = false;
+  state.backfillPending = null;
+  state.backfillRunning = false;
+  state.backfillRunningSession = "";
   state.stats = "—";
   state.pillText = "—";
   state.pillTone = "";
@@ -170,6 +201,44 @@ async function readStatus(key) {
   }
 }
 
+/** 补交这一行：清单第一行的 pendingSegments + 有没有任务在跑。两边各算各的失败。 */
+function applyBackfill(sessionsOut, statusOut) {
+  if (Array.isArray(sessionsOut?.sessions)) {
+    const first = sessionsOut.sessions[0];
+    state.backfillOk = true;
+    state.backfillPending =
+      first && Number.isFinite(Number(first.pendingSegments))
+        ? Math.max(0, Math.floor(Number(first.pendingSegments)))
+        : 0;
+  } else {
+    state.backfillOk = false;
+    state.backfillPending = null;
+  }
+  if (statusOut && typeof statusOut === "object") {
+    state.backfillRunning = statusOut.running === true;
+    state.backfillRunningSession =
+      typeof statusOut.sessionId === "string" ? statusOut.sessionId : "";
+  }
+}
+
+async function startBackfill() {
+  if (backfillDisabled.value) return;
+  const key = state.sessionKey;
+  if (!key) return;
+  state.backfillSending = true;
+  try {
+    const out = await jsonPost("/backfill", { scope: "session", sessionId: key });
+    if (out?.ok === false) throw new Error(out.error || "补交失败");
+    state.backfillRunning = true;
+    state.backfillRunningSession = key;
+  } catch (error) {
+    // 失败写进现有 hint（warn 样式），不改段数。
+    setHint(String(error?.message || error), true);
+  } finally {
+    state.backfillSending = false;
+  }
+}
+
 async function refresh() {
   if (!state.sessionKey) {
     applySessionView(await currentSession());
@@ -181,10 +250,12 @@ async function refresh() {
 
   const key = state.sessionKey;
   try {
-    const [status, data, captureOut] = await Promise.all([
+    const [status, data, captureOut, backfillSessions, backfillStatus] = await Promise.all([
       readStatus(key),
       jsonGet(`/session/${encodeURIComponent(key)}`),
       jsonGet(`/capture-status?sessionId=${encodeURIComponent(key)}`).catch(() => null),
+      jsonGet(`/backfill-sessions?sessionId=${encodeURIComponent(key)}`).catch(() => null),
+      jsonGet("/backfill-status").catch(() => null),
     ]);
 
     // 后端认不出这个 key 时回 ok:false：不画一份不存在的状态，说清为什么。
@@ -192,10 +263,13 @@ async function refresh() {
       state.hasModel = false;
       state.stats = "—";
       state.capture = { active: false, autoCapture: false, data: null };
+      state.backfillOk = false;
+      state.backfillPending = null;
       setHint("这个会话对不上任何状态（unknown session key），先重新选一次会话。", true);
       return;
     }
 
+    applyBackfill(backfillSessions, backfillStatus);
     applyData(data || {}, status, captureOut);
   } catch (error) {
     setHint(String(error?.message || error), true);
@@ -407,6 +481,20 @@ onBeforeUnmount(() => {
         >
           <span class="capture-label">{{ row.label }}</span>
           <span class="capture-value">{{ row.value }}</span>
+        </span>
+
+        <!-- 补交：还在本地、没写进 OpenViking 的段数。 -->
+        <span class="capture-row" data-row="backfill">
+          <span class="capture-label">补交</span>
+          <span class="capture-value">{{ backfillText }}</span>
+          <NButton
+            id="backfillBtn"
+            size="tiny"
+            :disabled="backfillDisabled"
+            @click="startBackfill"
+          >
+            {{ backfillBusy ? "补交中…" : "补交" }}
+          </NButton>
         </span>
       </div>
 

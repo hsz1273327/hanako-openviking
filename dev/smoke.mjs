@@ -24,6 +24,10 @@ import registerSessionRoutes from "../routes/session.js";
 import registerConnRoutes from "../routes/conn.js";
 import registerRecallModeRoutes from "../routes/recall-mode.js";
 import registerCaptureRoutes from "../routes/capture.js";
+import registerTopicsRoutes, {
+  TOPIC_LABEL_MAX as BACKEND_TOPIC_LABEL_MAX,
+} from "../routes/topics.js";
+import registerBackfillRoutes from "../routes/backfill.js";
 import registerModelsRoutes from "../routes/models.js";
 import registerControlsRoutes from "../routes/controls.js";
 import {
@@ -370,7 +374,23 @@ import {
   candidatePool,
   recordSegment,
   topicsForSession,
+  removeTopic,
+  renameTopic,
 } from "../src/memory/topics.js";
+// 存量补交：分段 / 流式扫描 / 基线 / 单任务状态机（假 sdk + 假 fetch + 临时目录）。
+import {
+  BACKFILL_GAP_MS,
+  BACKFILL_MAX_SEGMENTS,
+  agentsRootOf,
+  createBackfillController,
+  listBackfillSessions,
+  planBaseline,
+  planSegments,
+  readSessionMessages,
+  resetBackfillScanCache,
+  scanSessionFile,
+} from "../src/memory/backfill.js";
+import readline from "node:readline";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import { sessionKeyOf as uiSessionKeyOf } from "../ui-src/src/lib/session-key.js";
 // 边栏会话卡的数据投影：覆盖提交语义、统计 / 提示 / peer 文案都在这里，纯函数。
@@ -415,6 +435,26 @@ import {
   captureStatusView,
   normalizeCapturePrompt as uiNormalizeCapturePrompt,
 } from "../ui-src/src/lib/capture-view.js";
+// 存量补交的界面：相对时间 / 话题表 / 补交清单全是纯函数，node 直接验。
+import { relativeTime } from "../ui-src/src/lib/relative-time.js";
+import {
+  TOPIC_LABEL_MAX as UI_TOPIC_LABEL_MAX,
+  filterTopics,
+  normalizeTopicLabel,
+  shortTopicId,
+  topicRowView,
+  topicsCountText,
+} from "../ui-src/src/lib/topics-view.js";
+import {
+  BACKFILL_MAX_SEGMENTS as UI_BACKFILL_MAX_SEGMENTS,
+  backfillAllConfirm,
+  backfillEtaText,
+  backfillProgressText,
+  backfillRowView,
+  backfillTotalsText,
+  pendingBackfillText,
+  sessionShortId,
+} from "../ui-src/src/lib/backfill-view.js";
 // 记忆页三个子页签：纯逻辑 + 组件挂载方式。
 import {
   DEFAULT_MEMORY_TAB,
@@ -18472,6 +18512,1233 @@ check(
 
   fs.rmSync(dir, { recursive: true, force: true });
   resetRuntimeTransport();
+}
+
+// ================= 存量补交 =================
+{
+  const root = path.join(import.meta.dirname, ".tmp-backfill");
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  resetBackfillScanCache();
+
+  const NOW = "2026-02-03T04:05:06.000Z";
+
+  const jsonResponse = (payload, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const okResult = (result = {}) => ({ status: 200, body: { status: "ok", result } });
+  const notFoundBody = {
+    status: "error",
+    error: { code: "NOT_FOUND", message: "no session" },
+  };
+  const methodOf = (call) => String(call.init?.method || "GET").toUpperCase();
+  const pathOf = (url) => new URL(url).pathname;
+  const bodyOf = (call) => JSON.parse(call.init?.body || "{}");
+
+  function record({ id, type = "message", role, content, timestamp = "2026-01-01T00:00:00.000Z" }) {
+    const base = { type, id, parentId: null, timestamp };
+    if (type === "message") base.message = { role, content };
+    return JSON.stringify(base);
+  }
+
+  /** 一 user 一 assistant 交替的会话；content 就是消息下标（u72 / a73）。 */
+  function linesFor(turns, tag = "m") {
+    const lines = [];
+    for (let index = 0; index < turns; index += 1) {
+      const user = index * 2;
+      const assistant = user + 1;
+      lines.push(record({ id: `${tag}u${index}`, role: "user", content: `u${user}` }));
+      lines.push(record({ id: `${tag}a${index}`, role: "assistant", content: `a${assistant}` }));
+    }
+    return lines;
+  }
+
+  function sessionFixture(dir, id, lines, agent = "blueflower") {
+    const agentsRoot = path.join(dir, "agents");
+    const file = path.join(
+      agentsRoot,
+      agent,
+      "sessions",
+      `2026-01-01T00-00-00-000Z_${id}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, lines.length ? `${lines.join("\n")}\n` : "", "utf8");
+    return { agentsRoot, file };
+  }
+
+  /** 有状态的假服务端：message_count / commit_count 跟着批次与提交涨。 */
+  function fakeServer({ id, created = true, judge, onBatch, initialState = {} } = {}) {
+    const state = {
+      created,
+      message_count: 0,
+      commit_count: 0,
+      pending_tokens: 0,
+      last_commit_at: null,
+      ...initialState,
+    };
+    const calls = [];
+    const fetchImpl = async (url, init = {}) => {
+      calls.push({ url, init });
+      const method = String(init?.method || "GET").toUpperCase();
+      const pathname = pathOf(url);
+      if (method === "GET" && pathname === `/api/v1/sessions/${id}`) {
+        if (!state.created) return jsonResponse(notFoundBody, 404);
+        return jsonResponse(okResult({ ...state }).body);
+      }
+      if (method === "POST" && pathname === "/api/v1/sessions") {
+        state.created = true;
+        return jsonResponse(okResult({ session_id: id }).body);
+      }
+      if (method === "POST" && pathname.endsWith("/messages/batch")) {
+        const body = bodyOf({ init });
+        state.message_count += Array.isArray(body.messages) ? body.messages.length : 0;
+        state.pending_tokens = Math.max(state.pending_tokens, 10);
+        onBatch?.(body, state);
+        return jsonResponse(okResult().body);
+      }
+      if (method === "POST" && pathname.endsWith("/commit")) {
+        state.commit_count += 1;
+        state.pending_tokens = 0;
+        state.last_commit_at = NOW;
+        return jsonResponse(okResult());
+      }
+      if (method === "POST" && pathname === "/v1/systemone") {
+        return jsonResponse(
+          judge ? judge() : { answers: { q: { choice: "t1", confidence: 0.9 } } },
+        );
+      }
+      return jsonResponse(okResult().body);
+    };
+    return { state, calls, fetchImpl };
+  }
+
+  function backfillCtx(stateDir, fetchImpl, values = {}, logger, models) {
+    return recallSdk({
+      values: {
+        enabled: true,
+        autoCapture: true,
+        serverUrl: "http://h:1",
+        apiKey: "k",
+        captureCommitSchema: "2",
+        captureCommitTurns: "12",
+        captureContextTurns: "3",
+        captureTopicScope: "session",
+        captureTopicCandidates: "8",
+        ...values,
+      },
+      fetchImpl,
+      dataDir: stateDir,
+      logger,
+      models,
+    });
+  }
+
+  const batchCalls = (calls) =>
+    calls.filter((call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/messages/batch"));
+  const commitCalls = (calls) =>
+    calls.filter((call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"));
+
+  // ---- 1. 分段：12137 条消息 → 506 段，最后一段 8 轮 ----
+  {
+    // user/assistant 交替，末尾一条悬空 user：6068 个完整轮。
+    const turnsAt = [];
+    for (let end = 2; end <= 12136; end += 2) turnsAt.push(end);
+    eq("夹具：12137 条消息的 turnsAt 是 6068 个完整轮", turnsAt.length, 6068);
+
+    const plan = planSegments(turnsAt, { from: 0, perSegment: 12 });
+    eq("12137 条消息按 12 轮切出 506 段", plan.length, 506);
+    eq("最后一段 8 轮", plan[plan.length - 1].turns, 8);
+    check(
+      "每段 turns 都不超过 12",
+      plan.every((segment) => segment.turns <= 12),
+      JSON.stringify(plan.filter((segment) => segment.turns > 12)),
+    );
+    check(
+      "段与段首尾相接：上一段 end === 下一段 start",
+      plan.every((segment, index) => index === 0 || plan[index - 1].end === segment.start),
+      JSON.stringify(plan.slice(0, 3)),
+    );
+    eq(
+      "所有段的轮数加起来等于总轮数（不重不漏）",
+      plan.reduce((sum, segment) => sum + segment.turns, 0),
+      6068,
+    );
+    eq("第一段从 0 起、到第 12 轮结束", plan[0], { start: 0, end: 24, turns: 12 });
+
+    // 真的造一份 12137 条消息的会话，确认扫描口径与分段口径对得上。
+    const exactDir = path.join(root, "exact");
+    const exactLines = linesFor(6068, "n");
+    exactLines.push(record({ id: "dangling", role: "user", content: "末尾悬空 user" }));
+    const exact = sessionFixture(exactDir, "01a1585b-86d2-7c64-b8ac-edbe7099d0e0", exactLines);
+    const scanned = await scanSessionFile(exact.file);
+    eq(
+      "扫一份真的 12137 条消息：数出 12137 条消息 / 6068 轮",
+      [scanned.messages, scanned.turns, scanned.turnsAt.length],
+      [12137, 6068, 6068],
+    );
+    eq("扫描得到的 turnsAt 与按消息位置推出来的一致", scanned.turnsAt, turnsAt);
+    const scannedPlan = planSegments(scanned.turnsAt, { from: 0, perSegment: 12 });
+    eq(
+      "这份会话切出来同样是 506 段、最后一段 8 轮",
+      [scannedPlan.length, scannedPlan[scannedPlan.length - 1].turns],
+      [506, 8],
+    );
+    fs.rmSync(exactDir, { recursive: true, force: true });
+
+    const fromMid = planSegments(turnsAt, { from: 25, perSegment: 12 });
+    eq("from 落在轮中间：第一段仍从 from 起，只取 end > from 的轮", fromMid[0].start, 25);
+    check(
+      "from=25 时没有把 end<=25 的轮算进来",
+      fromMid.reduce((sum, segment) => sum + segment.turns, 0) === 6068 - 12,
+      JSON.stringify(fromMid.slice(0, 2)),
+    );
+  }
+
+  // ---- 2. 流式：25MB 也只是一行一行过；回调叫停就提前停 ----
+  {
+    const bigDir = path.join(root, "big");
+    fs.mkdirSync(bigDir, { recursive: true });
+    const bigFile = path.join(bigDir, "big.jsonl");
+    const lines = [];
+    for (let index = 0; index < 50000; index += 1) {
+      lines.push(record({ id: `bu${index}`, role: "user", content: "x".repeat(200) }));
+      lines.push(record({ id: `ba${index}`, role: "assistant", content: "y".repeat(200) }));
+    }
+    const bigText = `${lines.join("\n")}\n`;
+    fs.writeFileSync(bigFile, bigText, "utf8");
+    const bigBytes = fs.statSync(bigFile).size;
+
+    const scan = await scanSessionFile(bigFile);
+    eq(
+      "25MB 会话：消息数 / 轮数 / turnsAt 都数对",
+      [scan.messages, scan.turns, scan.turnsAt.length],
+      [100000, 50000, 50000],
+    );
+    check(
+      "夹具确实在 25MB 量级",
+      bigBytes >= 20 * 1024 * 1024,
+      `${bigBytes} bytes`,
+    );
+    eq("scan 报出来的 size 与文件实际大小一致", scan.size, bigBytes);
+    eq("最后一条可写消息带 timestamp 时用它的", scan.lastActivityAt, "2026-01-01T00:00:00.000Z");
+
+    // 注入的 openLines 逐行拉取并计数；回调第 200 条消息叫停，就不该再拉。
+    let pulled = 0;
+    const openLines = async (file, onLine) => {
+      const stream = fs.createReadStream(file, { encoding: "utf8" });
+      const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      try {
+        for await (const line of reader) {
+          pulled += 1;
+          if ((await onLine(line)) === false) break;
+        }
+      } finally {
+        reader.close();
+        stream.destroy();
+      }
+    };
+    const seen = await readSessionMessages(
+      bigFile,
+      ({ index }) => index < 200,
+      { openLines },
+    );
+    eq("回调在第 201 条消息处叫停", seen, 201);
+    check(
+      "只拉了约 400 行（远小于 10 万行），没有整份读入",
+      pulled > 0 && pulled < 1000,
+      `pulled=${pulled} / total=${lines.length}`,
+    );
+
+    let firstMessage = null;
+    await readSessionMessages(bigFile, ({ index, message }) => {
+      if (index === 0) firstMessage = message;
+      return false;
+    });
+    eq(
+      "流式取出的 message 形状与 captureMessages 的单条一致",
+      [firstMessage?.role, firstMessage?.content.length, firstMessage?.id],
+      ["user", 200, "bu0"],
+    );
+
+    const source = fs.readFileSync(
+      path.join(import.meta.dirname, "../src/memory/backfill.js"),
+      "utf8",
+    );
+    check(
+      "源码级：backfill.js 用 createReadStream，不出现整份读文件的入口",
+      source.includes("createReadStream") &&
+        !source.includes("readFileSync(") &&
+        !source.includes("readFile("),
+      "createReadStream / readFile 检查",
+    );
+
+    fs.rmSync(bigDir, { recursive: true, force: true });
+  }
+
+  // ---- 3. 断点：跑到第 3 段中断，重建 controller 从第 4 段续 ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e1";
+    const dir = path.join(root, "breakpoint");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot, file } = sessionFixture(dir, id, linesFor(60, "b"));
+    const mock = fakeServer({ id });
+    const warnings = [];
+    const logger = { warn: (message) => warnings.push(String(message)) };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+
+    let sleeps = 0;
+    const first = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps === 3) throw new Error("模拟进程中断");
+      },
+    });
+    const started = await first.start({ scope: "session", sessionId: id });
+    eq("5 段会话：start 立刻返回 total=5 / sessions=1", [started.ok, started.total, started.sessions], [true, 5, 1]);
+    await first.whenIdle();
+
+    const afterBreak = normalizeCursor(readSession(stateDir, id).capture?.cursor);
+    eq(
+      "中断时游标停在第 3 段末尾，没有提前跑到第 4 段",
+      [afterBreak.lastMessageCount, afterBreak.lastCommitMessageCount],
+      [72, 72],
+    );
+    eq("服务端也只收到前 3 段的提交", mock.state.commit_count, 3);
+    eq("first controller 已不再 running", first.status().running, false);
+
+    // 重建 controller：同一份状态文件、同一个服务端。
+    mock.calls.length = 0;
+    const second = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    const resumed = await second.start({ scope: "session", sessionId: id });
+    await second.whenIdle();
+
+    const batches = batchCalls(mock.calls);
+    eq("续跑只写剩下的 2 段", batches.length, 2);
+    eq(
+      "续跑第一次 messages/batch 从第 4 段（消息下标 72）开始",
+      bodyOf(batches[0]).messages[0].content,
+      "u72",
+    );
+    eq("续跑只重发剩下 2 段的 commit，前 3 段一次都没重发", commitCalls(mock.calls).length, 2);
+    eq("续跑结果：游标推到会话末尾", normalizeCursor(readSession(stateDir, id).capture?.cursor).lastMessageCount, 120);
+    eq("续跑结果：服务端 5 次提交", mock.state.commit_count, 5);
+    eq("续跑 start 的 total 是剩余段数", resumed.total, 2);
+  }
+
+  // ---- 4. 幂等：同一段跑两次，batch / commit 都只发一次 ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e2";
+    const dir = path.join(root, "idempotent");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(24, "i"));
+    const mock = fakeServer({ id });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+
+    const first = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    await first.start({ scope: "session", sessionId: id });
+    await first.whenIdle();
+    eq(
+      "第一次：2 段各写一次 / 各提交一次",
+      [batchCalls(mock.calls).length, commitCalls(mock.calls).length, mock.state.commit_count],
+      [2, 2, 2],
+    );
+
+    // 把状态退回第 2 段之前，并丢掉 commit 回执：服务端那边其实已经交过了。
+    patchSession(stateDir, id, {
+      capture: {
+        cursor: normalizeCursor({
+          lastEntryId: "ia11",
+          lastMessageCount: 24,
+          lastCommitCount: 0,
+          lastCommitMessageCount: 24,
+        }),
+      },
+    });
+    mock.calls.length = 0;
+
+    const second = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    const again = await second.start({ scope: "session", sessionId: id });
+    await second.whenIdle();
+    eq(
+      "第二次：同一段没有再发 messages/batch，也没有再发 commit（走 2.5 段内对账第 1 条）",
+      [again.ok, batchCalls(mock.calls).length, commitCalls(mock.calls).length],
+      [true, 0, 0],
+    );
+    eq(
+      "服务端计数没有被重复提交推高",
+      [mock.state.message_count, mock.state.commit_count],
+      [48, 2],
+    );
+    eq(
+      "段内对账只把本地 commit_count 认回来，lastCommitMessageCount 停在这段起点",
+      [
+        normalizeCursor(readSession(stateDir, id).capture?.cursor).lastCommitCount,
+        normalizeCursor(readSession(stateDir, id).capture?.cursor).lastCommitMessageCount,
+      ],
+      [2, 24],
+    );
+    eq(
+      "planBaseline：本地有游标时只认服务端的 commit_count，不推翻本地条数",
+      planBaseline({
+        cursor: normalizeCursor({ lastMessageCount: 24, lastCommitCount: 0, lastCommitMessageCount: 24 }),
+        server: { message_count: 48, commit_count: 2 },
+        totalMessages: 48,
+      }).lastCommitCount,
+      2,
+    );
+  }
+
+  // ---- 4b. 基线落盘：本地空、服务端已有坐标时，第一段不能被当成「上一段已交」----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0f0";
+    const dir = path.join(root, "baseline");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(60, "z"));
+    const mock = fakeServer({
+      id,
+      initialState: { message_count: 50, commit_count: 2, pending_tokens: 10 },
+    });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+
+    const controller = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    const started = await controller.start({ scope: "session", sessionId: id });
+    eq(
+      "本地空 + 服务端已有 50 条 / 2 次提交：start 的 total 是 3（按基线排段）",
+      [started.ok, started.total],
+      [true, 3],
+    );
+    await controller.whenIdle();
+
+    const batches = batchCalls(mock.calls);
+    eq(
+      "三段都真的跑了：3 次写入 / 3 次提交",
+      [batches.length, commitCalls(mock.calls).length, controller.status().done],
+      [3, 3, 3],
+    );
+    eq(
+      "第一次 messages/batch 从服务端已有消息之后开始（第一条是 u50）",
+      bodyOf(batches[0]).messages[0].content,
+      "u50",
+    );
+    eq("三次提交把服务端 commit_count 从 2 推到 5", mock.state.commit_count, 5);
+    const cursor = normalizeCursor(readSession(stateDir, id).capture?.cursor);
+    eq(
+      "跑完游标推到 120，基线也落进了状态文件",
+      [cursor.lastMessageCount, cursor.lastCommitMessageCount, cursor.lastCommitCount],
+      [120, 120, 5],
+    );
+  }
+
+  // ---- 5. 同构：两段归到同一个话题，不是每段一条新话题 ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e3";
+    const dir = path.join(root, "homogeneous");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(24, "h"));
+    let judgeCalls = 0;
+    const mock = fakeServer({
+      id,
+      judge: () => {
+        judgeCalls += 1;
+        return { answers: { q: { choice: "t1", confidence: 0.9 } } };
+      },
+    });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(
+      stateDir,
+      mock.fetchImpl,
+      {
+        captureEarlyCommit: true,
+        captureEarlyJudge: "discriminator",
+        captureServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+      },
+      logger,
+    );
+
+    const controller = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    const started = await controller.start({ scope: "session", sessionId: id });
+    await controller.whenIdle();
+
+    const table = readTopics(stateDir);
+    const tags = commitCalls(mock.calls).map((call) =>
+      (bodyOf(call).extraction_metadata?.event?.tags || []).find((tag) =>
+        tag.startsWith("topic-id="),
+      ),
+    );
+    eq(
+      "两段提交 = 话题表里只有一个话题、segments=2",
+      [started.total, table.topics.length, table.topics[0]?.segments],
+      [2, 1, 2],
+    );
+    eq(
+      "两次 commit 的 topic-id 标签相同（第 2 段认到第 1 段建的话题）",
+      [tags.length, tags[0], tags[1], tags[0] === tags[1]],
+      [2, `topic-id=${table.topics[0]?.id}`, `topic-id=${table.topics[0]?.id}`, true],
+    );
+    eq("第 1 段没有候选不调判断器，第 2 段认了一次", judgeCalls, 1);
+  }
+
+  // ---- 5b. 同构（提前提交关着）：判断器仍取 captureEarlyJudge ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0f1";
+    const dir = path.join(root, "homogeneous-off");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(24, "L"));
+    const mock = fakeServer({ id });
+    const judged = modelSdk({
+      utility: () => ({ text: "主题：同一件事\n归属：1" }),
+    });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(
+      stateDir,
+      mock.fetchImpl,
+      {
+        captureEarlyCommit: false,
+        captureEarlyJudge: "llm",
+        captureModel: "",
+      },
+      logger,
+      judged.models,
+    );
+
+    const controller = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {},
+    });
+    const started = await controller.start({ scope: "session", sessionId: id });
+    await controller.whenIdle();
+
+    const table = readTopics(stateDir);
+    const tags = commitCalls(mock.calls).map((call) =>
+      (bodyOf(call).extraction_metadata?.event?.tags || []).find((tag) =>
+        tag.startsWith("topic-id="),
+      ),
+    );
+    eq(
+      "提前提交关着时也用 captureEarlyJudge：两段只有一个话题、segments=2",
+      [started.total, table.topics.length, table.topics[0]?.segments],
+      [2, 1, 2],
+    );
+    eq(
+      "两次 commit 的 topic-id 标签相同（不是一段一条新话题）",
+      [tags.length, tags[0], tags[1]],
+      [2, `topic-id=${table.topics[0]?.id}`, `topic-id=${table.topics[0]?.id}`],
+    );
+    eq(
+      "llm 判断器只在第 2 段被调用一次（第 1 段没有候选）",
+      judged.calls.utility.length,
+      1,
+    );
+  }
+
+  // ---- 6. 并发：任务在跑时再 POST /backfill 被拒，且没有第二个 run ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e4";
+    const dir = path.join(root, "concurrent");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(60, "c"));
+    const mock = fakeServer({ id });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let markSeen;
+    const seen = new Promise((resolve) => { markSeen = resolve; });
+    const deps = {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async () => {
+        markSeen();
+        await gate;
+      },
+    };
+
+    const handlers = {};
+    const app = {
+      get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+      post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+    };
+    registerBackfillRoutes(app, ctx, deps);
+    const jsonOf = (payload, status) => ({ body: payload, status });
+    const post = (route, body) =>
+      handlers[`POST ${route}`]({ req: { json: async () => body }, json: jsonOf });
+    const getStatus = () => handlers["GET /backfill-status"]({ json: jsonOf });
+
+    const first = await post("/backfill", { scope: "session", sessionId: id });
+    eq("第一次 POST /backfill 起了一轮", [first.status, first.body.ok, first.body.total], [200, true, 5]);
+    await seen;
+    const before = mock.calls.length;
+    const second = await post("/backfill", { scope: "session", sessionId: id });
+    eq(
+      "任务在跑时再 POST /backfill：200 + 已有补交在进行，一个请求都没多发",
+      [second.status, second.body, mock.calls.length - before],
+      [200, { ok: false, error: "已有补交在进行" }, 0],
+    );
+
+    release();
+    await post("/backfill/cancel", {});
+    for (let index = 0; index < 200 && (await getStatus()).body.running; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const finishedStatus = (await getStatus()).body;
+    eq("收尾：controller 不再 running", finishedStatus.running, false);
+    eq(
+      "GET /backfill-status 只有那六个键",
+      Object.keys(finishedStatus).sort(),
+      ["currentLabel", "done", "error", "running", "sessionId", "total"],
+    );
+    check(
+      "整轮调用序列只有一份（没有第二个 run 夹进来）",
+      mock.state.commit_count <= 5,
+      `commit_count=${mock.state.commit_count}`,
+    );
+  }
+
+  // ---- 7. 取消：段边界收住，不切断正在跑的那一段 ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e5";
+    const dir = path.join(root, "cancel");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(60, "x"));
+    const mock = fakeServer({ id });
+    const logger = { warn: () => {} };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+
+    let controller;
+    let sleeps = 0;
+    const gaps = [];
+    controller = createBackfillController(ctx, {
+      agentsRoot,
+      logger,
+      nowIso: () => NOW,
+      sleep: async (ms) => {
+        sleeps += 1;
+        gaps.push(ms);
+        if (sleeps === 1) controller.cancel();
+      },
+    });
+
+    const started = await controller.start({ scope: "session", sessionId: id });
+    eq("取消前：计划 5 段", started.total, 5);
+    await controller.whenIdle();
+    eq(
+      "cancel 后 running 变 false、error 保持空",
+      [controller.status().running, controller.status().error],
+      [false, null],
+    );
+    eq(
+      "取消发生在第 1 段边界：只写了 1 段、只提交 1 次，后面不再发请求",
+      [batchCalls(mock.calls).length, commitCalls(mock.calls).length, mock.state.commit_count],
+      [1, 1, 1],
+    );
+    eq("取消时的进度停在已处理的那一段", controller.status().done, 1);
+    eq(
+      "段与段之间的间隔走注入的 sleep，长度是 200ms",
+      [BACKFILL_GAP_MS, gaps],
+      [200, [200]],
+    );
+  }
+
+  // ---- 8. 上限：250 段只跑 200 段，下一次接上剩下的 50 ----
+  {
+    const id = "01a1585b-86d2-7c64-b8ac-edbe7099d0e6";
+    const dir = path.join(root, "limit");
+    const stateDir = path.join(dir, "state");
+    const { agentsRoot } = sessionFixture(dir, id, linesFor(3000, "l"));
+    const mock = fakeServer({ id });
+    const warnings = [];
+    const logger = { warn: (message) => warnings.push(String(message)) };
+    const ctx = backfillCtx(stateDir, mock.fetchImpl, {}, logger);
+    const deps = { agentsRoot, logger, nowIso: () => NOW, sleep: async () => {} };
+
+    eq("上限常量是 200 段", BACKFILL_MAX_SEGMENTS, 200);
+
+    const first = createBackfillController(ctx, deps);
+    const started = await first.start({ scope: "all" });
+    eq("250 段的计划：本次只跑 200 段，total=200", [started.ok, started.total], [true, 200]);
+    await first.whenIdle();
+    eq(
+      "本次确实只提交 200 段",
+      mock.state.commit_count,
+      200,
+    );
+    eq(
+      "被截断时记一条 warn：还有 50 段没补",
+      warnings.some((message) => message.includes("还有 50 段没补，下次再来")),
+      true,
+    );
+    eq(
+      "游标停在 200 段末尾（200 * 24 条消息）",
+      normalizeCursor(readSession(stateDir, id).capture?.cursor).lastMessageCount,
+      4800,
+    );
+
+    const second = createBackfillController(ctx, deps);
+    const resumed = await second.start({ scope: "all" });
+    eq("再调一次：total 是剩余段数 50", [resumed.ok, resumed.total], [true, 50]);
+    await second.whenIdle();
+    eq("两次加起来把 250 段补完", mock.state.commit_count, 250);
+    eq(
+      "状态文件游标推到会话末尾",
+      normalizeCursor(readSession(stateDir, id).capture?.cursor).lastMessageCount,
+      6000,
+    );
+  }
+
+  // ---- 9. 话题表路由：只读 / 只写本地，零联网 ----
+  {
+    const dir = path.join(root, "topics");
+    fs.mkdirSync(dir, { recursive: true });
+    const firstTopic = {
+      id: newTopicId(),
+      label: "甲话题",
+      summary: "第一件事",
+      sessionIds: ["s1", "s2"],
+      firstSeenAt: NOW,
+      lastSeenAt: NOW,
+      segments: 2,
+      status: "active",
+    };
+    const secondTopic = {
+      id: newTopicId(),
+      label: "乙话题",
+      summary: "第二件事",
+      sessionIds: ["s3"],
+      firstSeenAt: NOW,
+      lastSeenAt: NOW,
+      segments: 1,
+      status: "active",
+    };
+    writeTopics(dir, { version: 1, topics: [firstTopic, secondTopic] });
+    const file = path.join(dir, "topics.json");
+
+    let fetchCalls = 0;
+    const ctx = {
+      dataDir: dir,
+      logger: { warn: () => {} },
+      network: {
+        fetch: async () => {
+          fetchCalls += 1;
+          throw new Error("话题路由不该联网");
+        },
+      },
+    };
+    const handlers = {};
+    const app = {
+      get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+      delete: (route, handler) => { handlers[`DELETE ${route}`] = handler; },
+      patch: (route, handler) => { handlers[`PATCH ${route}`] = handler; },
+    };
+    registerTopicsRoutes(app, ctx);
+    const jsonOf = (payload, status) => ({ body: payload, status });
+    const get = () => handlers["GET /topics"]({ json: jsonOf });
+    const del = (id) =>
+      handlers["DELETE /topics/:id"]({ req: { param: () => id }, json: jsonOf });
+    const patch = (id, body) =>
+      handlers["PATCH /topics/:id"]({
+        req: { param: () => id, json: async () => body },
+        json: jsonOf,
+      });
+
+    eq(
+      "GET /topics 回整张表（version + topics）",
+      (await get()).body,
+      readTopics(dir),
+    );
+
+    const removed = await del(firstTopic.id);
+    eq("DELETE 删一条", [removed.status, removed.body], [200, { ok: true, id: firstTopic.id }]);
+    const afterDelete = readTopics(dir);
+    eq(
+      "删除后只剩另一条，它的 sessionIds 顺序与内容都没动",
+      [afterDelete.topics.length, afterDelete.topics[0]],
+      [1, secondTopic],
+    );
+    const again = await del(firstTopic.id);
+    eq(
+      "再删同一条 → 404 { ok:false, error }",
+      [again.status, again.body],
+      [404, { ok: false, error: "没有这个话题" }],
+    );
+
+    const renamed = await patch(secondTopic.id, { label: "  新标签  " });
+    eq(
+      "PATCH 改标签并读回（trim 后入库）",
+      [renamed.status, renamed.body.ok, renamed.body.topic.label, readTopics(dir).topics[0].label],
+      [200, true, "新标签", "新标签"],
+    );
+
+    const bytesBefore = fs.readFileSync(file, "utf8");
+    const invalid = [
+      { label: "" },
+      { label: "x".repeat(61) },
+      { label: 123 },
+    ];
+    const invalidResults = [];
+    for (const body of invalid) {
+      const out = await patch(secondTopic.id, body);
+      invalidResults.push([out.status, out.body.ok, typeof out.body.error]);
+    }
+    eq(
+      "label 空串 / 超 60 字 / 非字符串 → 400，且文件一个字节都不变",
+      [invalidResults, fs.readFileSync(file, "utf8") === bytesBefore],
+      [
+        [
+          [400, false, "string"],
+          [400, false, "string"],
+          [400, false, "string"],
+        ],
+        true,
+      ],
+    );
+
+    const missing = await patch(newTopicId(), { label: "找不到" });
+    eq("PATCH 找不到 → 404", [missing.status, missing.body.ok], [404, false]);
+    eq("三条路由零联网（假 fetch 一次都没被调用）", fetchCalls, 0);
+  }
+
+  // ---- 10. 补交会话清单：只列有消息的 .jsonl；30 秒内不重扫 ----
+  {
+    const idA = "01a1585b-86d2-7c64-b8ac-edbe7099d0e7";
+    const idB = "01a1585b-86d2-7c64-b8ac-edbe7099d0e8";
+    const idZ = "01a1585b-86d2-7c64-b8ac-edbe7099d0e9";
+    const dir = path.join(root, "sessions-list");
+    const stateDir = path.join(dir, "state");
+    const a = sessionFixture(dir, idA, linesFor(24, "A"));
+    sessionFixture(dir, idB, linesFor(12, "B"));
+    sessionFixture(dir, idZ, []);
+    const agentsRoot = a.agentsRoot;
+    // .files.json 不算会话。
+    fs.writeFileSync(path.join(path.dirname(a.file), "extra.files.json"), "{}", "utf8");
+
+    patchSession(stateDir, idA, { capture: { cursor: normalizeCursor({}) } });
+    patchSession(stateDir, idB, {
+      capture: {
+        cursor: normalizeCursor({ lastMessageCount: 12, lastCommitMessageCount: 12, lastCommitCount: 1 }),
+      },
+      agentDir: path.join(agentsRoot, "blueflower"),
+    });
+
+    let scans = 0;
+    const deps = {
+      agentsRoot,
+      now: () => 1000,
+      scanSessionFile: (file, inner) => {
+        scans += 1;
+        return scanSessionFile(file, inner);
+      },
+    };
+    const ctx = backfillCtx(stateDir, async () => {
+      throw new Error("列会话不该联网");
+    });
+
+    const rows = await listBackfillSessions(ctx, deps);
+    eq("只列 messages > 0 的会话（0 消息与 .files.json 都不算）", rows.length, 2);
+    const rowA = rows.find((row) => row.sessionId === idA);
+    const rowB = rows.find((row) => row.sessionId === idB);
+    eq(
+      "A：messages / written / pendingTurns / pendingSegments 与状态文件一致",
+      [rowA?.messages, rowA?.written, rowA?.pendingTurns, rowA?.pendingSegments],
+      [48, 0, 24, 2],
+    );
+    eq(
+      "B：已写 12 条（6 轮），还欠 6 轮 → 1 段",
+      [rowB?.messages, rowB?.written, rowB?.pendingTurns, rowB?.pendingSegments],
+      [24, 12, 6, 1],
+    );
+    eq(
+      "lastActivityAt 取最后一条可写消息的 timestamp",
+      [rowA?.lastActivityAt, rowB?.lastActivityAt],
+      ["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"],
+    );
+
+    const scannedOnce = scans;
+    await listBackfillSessions(ctx, deps);
+    eq("第二次调用 30 秒内不重扫", scans, scannedOnce);
+    eq("agentsRootOf 能用 deps.agentsRoot 直接定位", agentsRootOf(stateDir, deps), agentsRoot);
+    eq(
+      "agentsRootOf 也能从状态文件里记过的 agentDir 推回来",
+      agentsRootOf(stateDir),
+      agentsRoot,
+    );
+
+    const handlers = {};
+    const app = {
+      get: (route, handler) => { handlers[`GET ${route}`] = handler; },
+      post: (route, handler) => { handlers[`POST ${route}`] = handler; },
+    };
+    registerBackfillRoutes(app, ctx, deps);
+    const jsonOf = (payload, status) => ({ body: payload, status });
+    const getSessions = (sessionId = "") =>
+      handlers["GET /backfill-sessions"]({
+        req: { query: (key) => (key === "sessionId" ? sessionId : "") },
+        json: jsonOf,
+      });
+
+    const all = await getSessions();
+    eq(
+      "GET /backfill-sessions：root / 两行 / totals",
+      [all.body.root, all.body.sessions.length, all.body.totals],
+      [agentsRoot, 2, { sessions: 2, segments: 3 }],
+    );
+    const one = await getSessions(idB);
+    eq(
+      "?sessionId= 只回一行",
+      [one.body.sessions.length, one.body.sessions[0]?.sessionId, one.body.totals],
+      [1, idB, { sessions: 1, segments: 1 }],
+    );
+
+    // start 的前置检查顺序（被拒都走 { ok:false, error }，不抛 500）。
+    const offCtx = backfillCtx(stateDir, async () => jsonResponse(okResult()), {
+      enabled: false,
+    });
+    const off = createBackfillController(offCtx, deps);
+    eq(
+      "enabled 关着 → 总开关关着",
+      await off.start({ scope: "all" }),
+      { ok: false, error: "总开关关着" },
+    );
+
+    const noConnCtx = backfillCtx(stateDir, async () => jsonResponse(okResult()), {
+      serverUrl: "",
+      apiKey: "",
+    });
+    const noConn = createBackfillController(noConnCtx, deps);
+    eq(
+      "没有 serverUrl / apiKey → 没有连接",
+      await noConn.start({ scope: "all" }),
+      { ok: false, error: "没有连接" },
+    );
+
+    const okCtx = backfillCtx(stateDir, async () => jsonResponse(okResult()));
+    const missing = createBackfillController(okCtx, deps);
+    eq(
+      "scope=session 但找不到会话文件 → 找不到这个会话",
+      await missing.start({ scope: "session", sessionId: "01a1585b-86d2-7c64-b8ac-edbe7099dead" }),
+      { ok: false, error: "找不到这个会话" },
+    );
+
+    const empty = createBackfillController(okCtx, deps);
+    eq(
+      "算出 0 段 → 没有要补的段",
+      await empty.start({ scope: "session", sessionId: idZ }),
+      { ok: false, error: "没有要补的段" },
+    );
+  }
+
+  fs.rmSync(root, { recursive: true, force: true });
+  resetBackfillScanCache();
+}
+
+// ================= 存量补交：界面 =================
+{
+  const NOW_MS = Date.parse("2026-02-03T04:05:06.000Z");
+  const at = (msAgo) => new Date(NOW_MS - msAgo).toISOString();
+  const UI_UUID = "01a1585b-86d2-7c64-b8ac-edbe7099d0a9";
+  const BACKFILL_UUID = "01a17e84-3c4d-7e5f-9a0b-1c2d3e4f5a6b";
+
+  // ---- 1. 相对时间：八个档位 ----
+  eq("relativeTime：空值给 —", relativeTime(null, NOW_MS), "—");
+  eq("relativeTime：坏串给 —", relativeTime("2026-13-45T99:99:99Z", NOW_MS), "—");
+  eq("relativeTime：未来时间算刚刚", relativeTime(at(-30 * 1000), NOW_MS), "刚刚");
+  eq("relativeTime：30 秒前是刚刚", relativeTime(at(30 * 1000), NOW_MS), "刚刚");
+  eq("relativeTime：59 分钟前", relativeTime(at(59 * 60 * 1000), NOW_MS), "59 分钟前");
+  eq("relativeTime：23 小时前", relativeTime(at(23 * 60 * 60 * 1000), NOW_MS), "23 小时前");
+  eq("relativeTime：26 小时前是 1 天前", relativeTime(at(26 * 60 * 60 * 1000), NOW_MS), "1 天前");
+  eq(
+    "relativeTime：40 天前（ISO 串与毫秒数同一结果）",
+    [
+      relativeTime(at(40 * 24 * 60 * 60 * 1000), NOW_MS),
+      relativeTime(NOW_MS - 40 * 24 * 60 * 60 * 1000, NOW_MS),
+    ],
+    ["40 天前", "40 天前"],
+  );
+
+  // ---- 2. 短码：话题 id 与会话 id ----
+  eq("shortTopicId：t_ 前缀取 uuid 前 8 位", shortTopicId(`t_${UI_UUID}`), "01a1585b");
+  eq(
+    "shortTopicId：裸 uuid 也认，形状不对给空串",
+    [shortTopicId(UI_UUID), shortTopicId("t_nope"), shortTopicId(""), shortTopicId(null)],
+    ["01a1585b", "", "", ""],
+  );
+  eq(
+    "sessionShortId：正常 uuid 取前 8 位，形状不对给空串",
+    [sessionShortId(UI_UUID), sessionShortId("sess_0mvgejpps"), sessionShortId(""), sessionShortId(null)],
+    ["01a1585b", "", "", ""],
+  );
+
+  // ---- 3. 话题表的一行 ----
+  const topicFixture = {
+    id: `t_${UI_UUID}`,
+    label: "3D 打印参数调试",
+    summary: "龙门架的层高与挤出温度反复试了几轮，最后定在 0.2mm",
+    sessionIds: ["s1", "s2"],
+    firstSeenAt: at(40 * 24 * 60 * 60 * 1000),
+    lastSeenAt: at(3 * 60 * 60 * 1000),
+    segments: 4,
+    status: "active",
+  };
+  const topicView = topicRowView(topicFixture, NOW_MS);
+  eq(
+    "topicRowView：段数 / 相对时间 / 会话数 / 状态四格逐字",
+    [topicView.segmentsText, topicView.seenText, topicView.sessionsText, topicView.statusText],
+    ["4 段", "3 小时前", "2 个会话", "活跃"],
+  );
+  eq(
+    "topicRowView：短码 / labelEditable / dormant",
+    [topicView.shortId, topicView.labelEditable, topicView.dormant],
+    ["01a1585b", true, false],
+  );
+  const dormantView = topicRowView({ ...topicFixture, status: "dormant" }, NOW_MS);
+  eq("topicRowView：dormant 的 statusText 是 沉睡", [dormantView.statusText, dormantView.dormant], ["沉睡", true]);
+  eq("topicRowView：label 空给 未命名", topicRowView({ ...topicFixture, label: "" }, NOW_MS).label, "未命名");
+  eq(
+    "topicRowView：超长摘要压成一行并截断到 60 字加 …",
+    topicRowView({ ...topicFixture, summary: `${"长".repeat(61)}` }, NOW_MS).summary,
+    `${"长".repeat(60)}…`,
+  );
+  eq(
+    "topicRowView：段数非法 / 负数按 0，sessionIds 不是数组按 0 个会话",
+    [
+      topicRowView({ ...topicFixture, segments: "x" }, NOW_MS).segmentsText,
+      topicRowView({ ...topicFixture, segments: -3 }, NOW_MS).segmentsText,
+      topicRowView({ ...topicFixture, sessionIds: "s1" }, NOW_MS).sessionsText,
+    ],
+    ["0 段", "0 段", "0 个会话"],
+  );
+  eq("topicsCountText：共 N 个", topicsCountText(7), "共 7 个");
+
+  // ---- 4. 本地过滤 ----
+  const topicList = [
+    { id: `t_${UI_UUID}`, label: "3D 打印", summary: "龙门架层高" },
+    { id: `t_${BACKFILL_UUID}`, label: "Recall", summary: "记忆召回的分层权重" },
+  ];
+  eq("filterTopics：命中 label", filterTopics(topicList, "打印").map((topic) => topic.id), [topicList[0].id]);
+  eq("filterTopics：命中 summary", filterTopics(topicList, "龙门架").map((topic) => topic.id), [topicList[0].id]);
+  eq("filterTopics：大小写不敏感", filterTopics(topicList, "RECALL").map((topic) => topic.id), [topicList[1].id]);
+  eq("filterTopics：空 query 原样", filterTopics(topicList, ""), topicList);
+  eq("filterTopics：无命中给空数组", filterTopics(topicList, "不存在的词"), []);
+
+  // ---- 5. 标签收敛 ----
+  eq("normalizeTopicLabel：trim 后合法", normalizeTopicLabel("  新标签  "), "新标签");
+  eq("normalizeTopicLabel：空 / 全空白给空串", [normalizeTopicLabel(""), normalizeTopicLabel("   ")], ["", ""]);
+  eq(
+    "normalizeTopicLabel：61 字非法、60 字合法",
+    [normalizeTopicLabel("字".repeat(61)), normalizeTopicLabel("字".repeat(60)) === "字".repeat(60)],
+    ["", true],
+  );
+
+  // ---- 6. 侧边栏那一行 ----
+  eq(
+    "pendingBackfillText：0 → 已补完、3 → 欠 3 段、null / undefined → —",
+    [pendingBackfillText(0), pendingBackfillText(3), pendingBackfillText(null), pendingBackfillText(undefined)],
+    ["已补完", "欠 3 段", "—", "—"],
+  );
+
+  // ---- 7. 估时 ----
+  eq(
+    "backfillEtaText：1 段不到 1 分钟、120 段约 3 分钟",
+    [backfillEtaText(1), backfillEtaText(120)],
+    ["不到 1 分钟", "约 3 分钟"],
+  );
+
+  // ---- 8. 补交全部的确认文案（用模板字面量拼期望，不手抄第二份）----
+  const expectedConfirm = `补交全部：共 3 个会话、128 段，${backfillEtaText(128)}。\n补交会把这些历史对话写进 OpenViking 并抽取记忆，写出去的记忆不会自动撤销；\n单次最多 200 段，超出部分要再点一次。`;
+  eq("backfillAllConfirm：整段逐字（max 默认 200）", backfillAllConfirm({ sessions: 3, segments: 128 }), expectedConfirm);
+  const expectedConfirm50 = `补交全部：共 2 个会话、5 段，${backfillEtaText(5)}。\n补交会把这些历史对话写进 OpenViking 并抽取记忆，写出去的记忆不会自动撤销；\n单次最多 50 段，超出部分要再点一次。`;
+  eq(
+    "backfillAllConfirm：会话 / 段数取整，max 可覆盖",
+    backfillAllConfirm({ sessions: "2.9", segments: 5.9, max: 50 }),
+    expectedConfirm50,
+  );
+
+  // ---- 9. 进度行的四个分支 ----
+  eq(
+    "backfillProgressText：running → 当前段与完成数",
+    backfillProgressText({
+      running: true,
+      sessionId: BACKFILL_UUID,
+      done: 7,
+      total: 120,
+      currentLabel: "01a17e84 · 第 3/12 段",
+      error: null,
+    }),
+    "补交中 · 01a17e84 · 第 3/12 段（7/120 段）",
+  );
+  eq(
+    "backfillProgressText：没在跑但出错 → 上次补交出错",
+    backfillProgressText({ running: false, error: "connect ECONNREFUSED", done: 0, total: 0 }),
+    "上次补交出错：connect ECONNREFUSED",
+  );
+  eq(
+    "backfillProgressText：没在跑但跑过 → 上次补交完成",
+    backfillProgressText({ running: false, error: null, done: 5, total: 12 }),
+    "上次补交完成 5/12 段",
+  );
+  eq(
+    "backfillProgressText：其余给空串",
+    backfillProgressText({ running: false, error: null, done: 0, total: 0 }),
+    "",
+  );
+
+  // ---- 10. 会话表的一行 + 合计 ----
+  const backfillRowFixture = {
+    sessionId: BACKFILL_UUID,
+    messages: 7448,
+    written: 6120,
+    pendingTurns: 123,
+    pendingSegments: 111,
+    lastActivityAt: at(3 * 60 * 60 * 1000),
+  };
+  eq(
+    "backfillRowView：消息数 / 已写 / 待补 / 最近活动 / 短码",
+    (({ messagesText, writtenText, pendingText, seenText, shortId }) => [
+      messagesText,
+      writtenText,
+      pendingText,
+      seenText,
+      shortId,
+    ])(backfillRowView(backfillRowFixture, NOW_MS, { running: true, currentSessionId: BACKFILL_UUID })),
+    ["7448", "6120", "111 段", "3 小时前", "01a17e84"],
+  );
+  eq(
+    "backfillRowView：正在跑的那一行 busy，取消按钮只看有没有任务在跑",
+    [
+      backfillRowView(backfillRowFixture, NOW_MS, { running: true, currentSessionId: BACKFILL_UUID }).busy,
+      backfillRowView(backfillRowFixture, NOW_MS, { running: true, currentSessionId: BACKFILL_UUID })
+        .cancelDisabled,
+      backfillRowView(backfillRowFixture, NOW_MS, { running: false, currentSessionId: null }).busy,
+      backfillRowView(backfillRowFixture, NOW_MS, { running: false, currentSessionId: null })
+        .cancelDisabled,
+    ],
+    [true, false, false, true],
+  );
+  eq(
+    "backfillTotalsText：3 个会话、共 128 段",
+    backfillTotalsText({ sessions: 3, segments: 128 }),
+    "3 个会话、共 128 段",
+  );
+
+  // ---- 11. 跨端同值 ----
+  eq(
+    "跨端一致：补交段数上限与话题标签上限两端同值",
+    [UI_BACKFILL_MAX_SEGMENTS, UI_TOPIC_LABEL_MAX],
+    [BACKFILL_MAX_SEGMENTS, BACKEND_TOPIC_LABEL_MAX],
+  );
+  eq(
+    "跨端一致：后端这两个常量就是 200 / 60",
+    [BACKFILL_MAX_SEGMENTS, BACKEND_TOPIC_LABEL_MAX],
+    [200, 60],
+  );
+
+  // ---- 12. 源码级：两个新组件都排上了该有的东西 ----
+  const topicBlock = uiCode("components/TopicBlock.vue");
+  const topicNeedles = [
+    "data-topic-id",
+    "topic-label",
+    "topic-segments",
+    "topic-status",
+    "删除",
+    "还没有话题",
+    "按标签或摘要过滤",
+  ];
+  const topicMissing = topicNeedles.filter((needle) => !topicBlock.includes(needle));
+  check(
+    "TopicBlock.vue：行数据属性 / 状态位 / 删除 / 空表 / 搜索占位都在",
+    topicMissing.length === 0,
+    `缺 ${topicMissing.join("、")}`,
+  );
+
+  const backfillBlock = uiCode("components/BackfillBlock.vue");
+  const backfillNeedles = [
+    "补交全部",
+    "刷新",
+    "消息数",
+    "已写",
+    "待补",
+    "最近活动",
+    "操作",
+    "backfillAllConfirm",
+  ];
+  const backfillMissing = backfillNeedles.filter((needle) => !backfillBlock.includes(needle));
+  check(
+    "BackfillBlock.vue：两个按钮 / 六个列名 / 确认文案用的纯函数都在",
+    backfillMissing.length === 0,
+    `缺 ${backfillMissing.join("、")}`,
+  );
+
+  // ---- 13. 侧边栏卡：补交行挂在 .capture 里、四行 v-for 之后 ----
+  const cardAppSource = uiCode("CardApp.vue");
+  check(
+    "CardApp.vue：有 backfillBtn / scope session / /backfill",
+    ["id=\"backfillBtn\"", "scope: \"session\"", "/backfill"].every((needle) =>
+      cardAppSource.includes(needle),
+    ),
+    cardAppSource.slice(0, 200),
+  );
+  const captureStart = cardAppSource.indexOf('class="capture"');
+  const captureRowsLoop = cardAppSource.indexOf('v-for="row in captureRows"');
+  const backfillRowIndex = cardAppSource.indexOf('data-row="backfill"');
+  check(
+    "CardApp.vue：补交行在 .capture 块里、captureRows 的 v-for 之后",
+    captureStart >= 0 &&
+      captureRowsLoop > captureStart &&
+      backfillRowIndex > captureRowsLoop,
+    `capture=${captureStart} rows=${captureRowsLoop} backfill=${backfillRowIndex}`,
+  );
+
+  // ---- 14. 记忆共享页：两块都挂上，话题在页尾 ----
+  const capturePanelSource = uiCode("components/CapturePanel.vue");
+  const mountBackfill = capturePanelSource.indexOf("<BackfillBlock");
+  const mountTopic = capturePanelSource.indexOf("<TopicBlock");
+  check(
+    "CapturePanel.vue：BackfillBlock 与 TopicBlock 都已引入并挂载，TopicBlock 排在 BackfillBlock 之后",
+    [
+      capturePanelSource.includes("import BackfillBlock"),
+      capturePanelSource.includes("import TopicBlock"),
+      mountBackfill >= 0,
+      mountTopic >= 0,
+      mountTopic > mountBackfill,
+    ].every(Boolean),
+    `mountBackfill=${mountBackfill} mountTopic=${mountTopic}`,
+  );
 }
 
 // ================= 结果 =================

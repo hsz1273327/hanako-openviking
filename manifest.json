@@ -27,7 +27,8 @@
     "methods": [
       "GET",
       "POST",
-      "PATCH"
+      "PATCH",
+      "DELETE"
     ],
     "allowLocalhost": true,
     "defaultTimeoutMs": 1500,

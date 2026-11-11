@@ -29,6 +29,8 @@ import {
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
 } from "../lib/capture-view.js";
+import BackfillBlock from "./BackfillBlock.vue";
+import TopicBlock from "./TopicBlock.vue";
 
 const {
   state,
@@ -303,4 +305,8 @@ function onEnter(event) {
     <!-- 文案整段写在一行里：模板里的换行会被压成一个空格，中文句子中间会多出空档。 -->
     <NText class="hint-line" depth="3">打开后每轮增量提交到 OpenViking，由服务端抽成可检索的长期记忆；写在本机门牌（peer）下，不覆盖其它机器的记忆；记忆搜索与写回互不影响。</NText>
   </NCard>
+
+  <!-- 存量会话在写回卡下面；话题表是这一页的最后一块（默认收起）。 -->
+  <BackfillBlock />
+  <TopicBlock />
 </template>

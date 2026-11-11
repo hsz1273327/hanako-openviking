@@ -411,6 +411,110 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
 }
 
 /**
+ * 提交一段：归类 → 落话题表 → 带三件套标签 commit → 推进本地游标。
+ *
+ * 实时写回（createCaptureHandler 的第 12 步）与存量补交（src/memory/backfill.js）
+ * 共用这一份，否则两条路会各自长出「什么时候建话题」的两套规则。
+ *
+ * verdict 是调用方已经拿到的归类结论（实时链路的提前提交用过的那一份）；
+ * 没有就自己归类，判断失败按新话题落表，不阻塞提交。
+ * 提交失败会抛：调用方决定游标怎么收（实时链路不动，补交只推进 lastMessageCount）。
+ *
+ * 返回 { cursor, committed, topic }；topic = { id, seq, label, isNew }。
+ */
+export async function commitSegment({
+  sdk,
+  client,
+  dataDir,
+  sessionId,
+  messages,
+  cursor,
+  switches,
+  judge,
+  nowIso,
+  verdict,
+  onWarn,
+}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const base = normalizeCursor(cursor);
+  const warnLine = typeof onWarn === "function" ? onWarn : (message) => warn(sdk, message);
+
+  // 1–3. 判据范围 = 上次提交之后的所有消息；「之前」= 上次提交之前最近若干完整轮。
+  const segment = list.slice(base.lastCommitMessageCount, base.lastMessageCount);
+  const previous = tailTurns(
+    list.slice(0, base.lastCommitMessageCount),
+    switches?.captureContextTurns,
+  );
+  const candidates = candidatePool(readTopics(dataDir), {
+    sessionId,
+    scope: switches?.captureTopicScope,
+    limit: switches?.captureTopicCandidates,
+  });
+
+  // 4. 没有现成结论就自己归类。判断方式与实时链路保持一致。
+  let topicVerdict = verdict && typeof verdict === "object" ? verdict : null;
+  if (!topicVerdict) {
+    // 默认与实时链路同口径：恒取 captureEarlyJudge（顶层报告里的 mode 仍然是
+    // captureEffectiveEarly ? judge : "fixed"，那个字段不动）。fixed 只作为兜底。
+    const effectiveJudge = judge || switches?.captureEarlyJudge || "fixed";
+    let classifyError = null;
+    try {
+      topicVerdict = await buildClassifier({
+        judge: effectiveJudge,
+        sdk,
+        switches,
+        previous,
+        segment,
+        candidates,
+      })();
+    } catch (error) {
+      classifyError = error;
+      warnLine(`topic judge failed at commit: ${errorText(error)}`);
+    }
+    if (!topicVerdict) {
+      // 判断失败不能变成漏写：按新话题落表，commit 照发。
+      if (!classifyError) warnLine("topic judge failed at commit: 按新话题处理");
+      topicVerdict = { kind: "new", ...deriveTopicTitle(segment) };
+    }
+  }
+
+  // 5. 表与 commit 在同一次 withTopics 里：commit 失败表不落盘，游标也不动。
+  const at = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+  const recorded = await withTopics(
+    dataDir,
+    async (table) => {
+      const outcome = recordSegment(table, {
+        verdict: topicVerdict,
+        sessionId,
+        at,
+        label: topicVerdict.label,
+        summary: topicVerdict.summary,
+      });
+      const tags = captureTags(outcome.topic, outcome.seq);
+      await client.commit(sessionId, { tags });
+      return outcome;
+    },
+    { onWriteError: warnLine },
+  );
+
+  // 6. 提交成功之后的游标。
+  const next = markCommitted(base, {
+    at,
+    commitCount: base.lastCommitCount + 1,
+  });
+  return {
+    cursor: next,
+    committed: true,
+    topic: {
+      id: recorded.topic.id,
+      seq: recorded.seq,
+      label: recorded.topic.label,
+      isNew: recorded.isNew,
+    },
+  };
+}
+
+/**
  * 造写回钩子。deps 只给冒烟换假实现用，生产传空对象。
  *
  * 每一步失败都短路成报告：off / no-session / readonly / no-connection /
@@ -650,55 +754,28 @@ export function createCaptureHandler(sdk, deps = {}) {
         let topicReport = null;
         let committedTopicId = "";
         if (decision.commit) {
-          // 强制轮数 / 基线这两条路没有 verdict；提交时补一次归类。
-          // 这里失败按新话题落，不阻塞写入（判断失败不能变成漏写）。
-          let topicVerdict = decision.verdict || null;
-          if (!topicVerdict) {
-            try {
-              topicVerdict = await classify();
-            } catch (error) {
-              warn(sdk, `topic judge failed at commit: ${errorText(error)}`);
-              topicVerdict = null;
-            }
-            if (!topicVerdict) {
-              if (!classifyError) {
-                warn(sdk, "topic judge failed at commit: 按新话题处理");
-              }
-              topicVerdict = { kind: "new", ...deriveTopicTitle(segment) };
-            }
-            classifyError = null;
-          }
+          // 强制轮数 / 基线这两条路没有 verdict；commitSegment 内部补一次归类
+          // （失败按新话题落，不阻塞写入）。判断失败不能变成漏写。
           const commitAt = now();
           try {
-            const recorded = await withTopics(
+            const out = await commitSegment({
+              sdk,
+              client,
               dataDir,
-              async (table) => {
-                const outcome = recordSegment(table, {
-                  verdict: topicVerdict,
-                  sessionId,
-                  at: commitAt,
-                  label: topicVerdict.label,
-                  summary: topicVerdict.summary,
-                });
-                const tags = captureTags(outcome.topic, outcome.seq);
-                // commit 失败就抛：withTopics 只在 fn 正常返回后写盘，表与游标一起不动。
-                await client.commit(sessionId, { tags });
-                return outcome;
-              },
-              { onWriteError: (message) => warn(sdk, message) },
-            );
-            cursor = markCommitted(cursor, {
-              at: commitAt,
-              commitCount: cursor.lastCommitCount + 1,
+              sessionId,
+              messages,
+              cursor,
+              switches,
+              // 归类方式与实时链路原来的 classify 一致：取 captureEarlyJudge，
+              // 与「这一轮是不是提前提交」无关（报告里的 mode 才看 early）。
+              judge,
+              nowIso: commitAt,
+              verdict: decision.verdict || null,
             });
+            cursor = out.cursor;
             committed = true;
-            committedTopicId = recorded.topic.id;
-            topicReport = {
-              id: recorded.topic.id,
-              seq: recorded.seq,
-              label: recorded.topic.label,
-              isNew: recorded.isNew,
-            };
+            committedTopicId = out.topic.id;
+            topicReport = out.topic;
           } catch (error) {
             // 提交失败：游标不动，话题表也不落。下一轮对账会认出来。
             warn(sdk, `commit failed: ${errorText(error)}`);

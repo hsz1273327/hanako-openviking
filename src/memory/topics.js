@@ -226,3 +226,31 @@ export function topicsForSession(table, sessionId) {
       topic.sessionIds.includes(session),
   );
 }
+
+/**
+ * 从话题表里删掉一条，返回有没有这条。就地改表，不碰服务端、不碰别的会话。
+ *
+ * 删除只影响本地归组记录：sessionIds 里别的会话原样保留（它们本来就只是
+ * 「这些会话提到过它」的索引，不是这条话题的从属关系）。
+ */
+export function removeTopic(table, id) {
+  if (!table || typeof table !== "object" || !Array.isArray(table.topics)) return false;
+  const key = typeof id === "string" ? id : "";
+  const index = table.topics.findIndex((topic) => topic && topic.id === key);
+  if (index < 0) return false;
+  table.topics.splice(index, 1);
+  return true;
+}
+
+/**
+ * 改一条话题的 label，返回改后的 topic；找不到返回 null。
+ * label 已由调用方校验过长度，这里只做 trim；空串也照写（纯函数不替调用方拒绝）。
+ */
+export function renameTopic(table, id, label) {
+  if (!table || typeof table !== "object" || !Array.isArray(table.topics)) return null;
+  const key = typeof id === "string" ? id : "";
+  const topic = table.topics.find((item) => item && item.id === key);
+  if (!topic) return null;
+  topic.label = String(label ?? "").trim();
+  return topic;
+}

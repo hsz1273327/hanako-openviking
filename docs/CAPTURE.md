@@ -320,3 +320,176 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 5. 面板
 
 前四步每步都能独立验收，不要一次做完。
+
+## 十二、存量补交
+
+实时写回只管装上之后新发生的对话。更早的会话文件里还躺着没写进 OpenViking 的历史，
+「存量补交」负责把它们补上。补出来的数据与实时链路同构：每段都走同一份
+`commitSegment`（归类 → 落话题表 → 带三件套标签 commit → 推进游标），不是每段新开一个话题。
+
+### 12.1 分段口径
+
+第一趟 `scanSessionFile` 只数数，不保留正文。`messages` 的口径与游标表里的
+`isCaptureMessage` 完全一致（`type: "message"`、role 是 user / assistant、正文非空）；
+`turnsAt` 记每个**完整轮**结束处的消息下标（end-exclusive，升序），末尾悬空的 user
+既不算一轮，也不进 `turnsAt`。
+
+`planSegments(turnsAt, { from, perSegment })` 把 `turnsAt` 切成段：
+
+- `perSegment` 取 `captureCommitTurns`（默认 12），每段最多这么多完整轮
+- 只在完整轮边界切；最后不足一段也单独成段
+- `from` 是「已经提交到的消息下标」，只取 `end > from` 的轮；第一段的 `start = from`
+- 段与段首尾相接（上一段 `end` = 下一段 `start`），不重不漏
+
+例：12137 条消息（user / assistant 交替、末尾悬空 user）有 6068 个完整轮，按 12 轮切是
+506 段，最后一段 8 轮。
+
+### 12.2 流式读
+
+78MB、一万多条也不许整份读进内存：
+
+- 第一趟 `scanSessionFile`：默认 `fs.createReadStream` + 按行切分，只累加计数
+- 第二趟 `readSessionMessages`：同一份扫描逻辑，逐行喂回调；回调返回 `false` 立即停
+- 补交按段取正文，峰值内存只装「当前这一段 + 判据需要的上下文轮」
+
+坏行、非对象、非 `message` 记录、空正文一律跳过，与 `parseSessionLines` +
+`captureMessages` 同口径。`deps.openLines` 是测试接缝，默认实现不提供任何一次性读入口。
+
+### 12.3 会话清单
+
+`listBackfillSessions` 扫 `<agentsRoot>/<agent>/sessions/*.jsonl`：
+
+- 只认 `.jsonl` 结尾；`.files.json` / `.repair.json` 不算；`sessionKeyOf` 认不出的文件名跳过
+- 只列 `messages > 0` 的会话
+- `written` = 状态文件里 `capture.cursor.lastMessageCount`；没有状态文件就是 0
+- `pendingTurns` = 从 `written` 之后起算的完整轮数；
+  `pendingSegments = ceil(pendingTurns / captureCommitTurns)`
+- `lastActivityAt` = 最后一条可写消息的 `timestamp`，没有就用文件 mtime
+
+`agentsRoot` 依次尝试：调用方显式给的 `agentsRoot` → 状态文件里记过的 `agentDir` 的父目录
+→ `<dataDir>/../../agents`；第一个「存在且含 agent/sessions 子目录」的胜出，都没有就返回空串。
+
+扫描结果按 `(path, size, mtimeMs)` 缓存，并且同一个文件 **30 秒内不重复扫**。面板每秒轮询
+`/backfill-status`、会话卡每 8 秒轮询一次，不能每次都把 25MB 重读一遍。
+
+### 12.4 一段怎么跑
+
+每个会话：
+
+1. `scanSessionFile` 拿 `messages / turnsAt`；`messages === 0` 跳过
+2. `GET /sessions/{id}`；404 就 `createSession`
+3. `planBaseline` 定基线（见 12.5）
+4. `planSegments(turnsAt, { from: baseline.lastCommitMessageCount, perSegment })`
+5. 逐段：取消检查（只在段边界）→ 再 `GET` 一次对账 → 第二趟取这一段 →
+   只发服务端还缺的消息（`messages/batch`）→ `commitSegment` →
+   `patchSession` 推进游标 → `done += 1` → `await sleep(200)`
+
+判断器恒取 `captureEarlyJudge`，与实时链路一致；不因为 `captureEarlyCommit` 关着就退化成
+`fixed`（`fixed` 会让归类恒回空，补出来的每段都新开一个话题）。
+
+段失败不拖累下一段：写入或提交抛错只记一条 `warn`，`status.error` 记最后一条，继续下一段。
+
+### 12.5 游标、断点与幂等
+
+基线 `planBaseline`：
+
+- 本地有游标（`lastMessageCount > 0`）：以本地为准，只把 `lastCommitCount` 提到服务端的
+  `commit_count`（服务端交过更多 = 上次回执丢了）
+- 本地空、服务端有：`lastMessageCount = min(message_count, 会话消息总数)`，
+  `lastCommitCount = commit_count`，`lastCommitMessageCount = commit_count > 0 ? lastMessageCount : 0`
+  （交过就认为已写的部分都交过；没交过就从头补）
+- 服务端 404 / 字段缺失：本地游标原样用
+
+基线算完先落盘，再按 `baseline.lastCommitMessageCount` 排段。尤其是「本地状态空、服务端
+已有 `message_count` / `commit_count`」这一档：不落盘的话，第一段进段内对账会把服务端
+已有的提交误当成「上一段已交」而整段跳过。本地已有游标时不在这一步落盘——那条基线只抬
+`lastCommitCount`，要让段内对账看见旧值才能认出「回执丢了」。
+
+每段开始的这次 `GET` 之后，对账顺序不能换：
+
+1. `server.commit_count > cursor.lastCommitCount`：上一段的提交其实成功了，只是本地没落。
+   只更新 `lastCommitCount` 与 `lastCommitMessageCount = 段.start`，不重复提交，直接进下一段
+2. `server.message_count < 段.start`：服务端少了消息，按 `server.message_count` 起写这一段
+3. 否则只写 `[max(段.start, server.message_count), 段.end)`：已经写过的消息不再写
+
+这两条守住段级幂等：同一段重跑，`messages/batch` 不会发第二次，`commit` 也不会发第二次
+（服务端 `commit_count` 已经涨了）。
+
+断点由每段结束的 `patchSession` 落盘：`lastMessageCount` 停在这一段末尾，
+`lastCommitMessageCount` 在提交成功后跟到同一处。进程中断后重建 controller，下一次
+从状态文件里的游标继续，不会重发前面的段。
+
+写入失败：游标一步都不动，下次重试这一段。
+提交失败：只把 `lastMessageCount` 推到段尾（消息已经在服务端），`lastCommitMessageCount` 不动，
+下一段成功提交时会把这段一起带上。
+
+### 12.6 护栏与取消
+
+- **单任务**：一个 App 只有一份 controller。`start` 用同步的 `running` 标记挡并发，
+  第二个请求得到 `已有补交在进行`，不会出现两个 run 同时活着
+- **200 段**：计划阶段累计，到 200 就停；被截断时记一条
+  `还有 N 段没补，下次再来`。下一次 `start` 从新的游标继续算剩余段数
+- **200ms**：段与段之间真的等（`deps.sleep` 可注入，测试不真等），给服务端留一口气
+- **取消**：只在段边界生效，正在跑的这一段不切断。`cancel()` 之后不再发下一段的请求，
+  `running` 在 run 收尾时变 false；取消本身不写 `status.error`
+
+`start` 的检查顺序：已有任务在跑 → 总开关关着 → 没有连接 → 出站通道不可用 →
+（`scope: "session"` 时）找不到这个会话 → 没有要补的段。被拒一律回 `{ ok: false, error }`，
+不抛 500。
+
+### 12.7 哪些设置管不到这件事
+
+- `autoCapture` **不拦**手工补交：它是实时写回的开关，补交是用户明确点的动作
+- 会话级 `readOnly` 也**不拦**手工补交：只读限制的是自动链路
+- 但总开关 `enabled` 必须开、连接（`serverUrl` / `apiKey`）必须通、出站通道不能是 down；
+  任何一条不满足都直接拒绝，一个请求都不发
+
+**已知前提：同一会话假定单写者。** 补交靠状态文件里的游标对账；如果宿主和补交同时写同一个
+会话，或两台机器共用一个状态目录，游标会互相覆盖。这条前提与实时写回相同，没有跨进程锁。
+
+### 12.8 话题表的删与改
+
+`GET /topics` 回整张表；`DELETE /topics/:id` 删一条；`PATCH /topics/:id` 改 `label`
+（body `{ label }`，1..60 字符，先 trim）。三条路由都只碰本机 `topics.json`，零联网：
+
+- 写一律走 `withTopics`（按 `dataDir` 串行化）
+- 参数校验在写之前做全，不合法一个字节都不写
+- 删除只删本地归组记录，不碰服务端，也不动 `sessionIds` 里别的会话或表里别的项
+
+## 十三、话题列表
+
+记忆共享页最下面的「话题」块读的是本机 `<dataDir>/topics.json`，与 OpenViking 服务端无关。
+实时写回每提交一段、存量补交每补一段，都会在这张表上记一段；两条链路共用同一张表，
+所以补交不会给同一件事另开话题。折叠默认收起，展开只切显隐，不会重复读文件。
+
+一行显示七个字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| 短码 | `id` 去掉 `t_` 前缀后的前 8 位，只用于辨认 |
+| 标签 | 人可读的名字；空标签显示 `未命名`，可以原地改 |
+| 摘要 | 这一段在讲什么；压成一行，超过 60 字截断并加 `…` |
+| 段数 | `segments`，这个话题累计被提交过多少段 |
+| 最近活动 | `lastSeenAt` 的相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前） |
+| 会话数 | `sessionIds` 的长度，即这个话题在多少个会话里出现过 |
+| 状态 | `status`：`active` 显示「活跃」，`dormant` 显示「沉睡」 |
+
+`segments` 是话题的权重：没有段数的话题没有可用于归类的历史，读侧会直接丢掉。
+`sessionIds` 是出现过这个话题的会话 key 列表（去重后），删话题不会动这些会话的文件，
+也不会动服务端已经写出去的记忆。
+
+搜索框按 `label` 与 `summary` 做不区分大小写的子串过滤，纯本地筛选，不发请求。
+`改标签` 把标签那一格换成输入框，预填当前值；回车提交，`Esc` 取消，失焦不提交。
+提交失败把错误留在这一块的提示位，输入框留在编辑态。`删除` 需要二次确认，
+成功后只把那一行从本地列表里去掉，不整表重拉。
+
+后端三个端点都只碰本机 `topics.json`，零联网：
+
+- `GET /topics` → `{ version: 1, topics: [...] }`（坏 JSON / 文件不存在给空表，不抛）
+- `PATCH /topics/:id`，body `{ label }`，label 先 trim 后必须 1..60 个字符
+  → 200 `{ ok: true, topic }`；label 不合法 → 400 `{ ok: false, error }`；
+  找不到 → 404 `{ ok: false, error: "没有这个话题" }`
+- `DELETE /topics/:id` → 200 `{ ok: true, id }`；找不到 → 404 `{ ok: false, error }`
+
+参数校验在写之前做全：一次不合法请求一个字节都不写。写盘走 `withTopics` 按 `dataDir`
+串行化，`GET` 与两个写端点看到的是同一份表。
