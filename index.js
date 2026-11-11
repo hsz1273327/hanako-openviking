@@ -8,7 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { defineApp } from "./sdk/app-contract/server-client.js";
-import { readConnection, readSwitches, runPromptMigrationOnce } from "./src/ov/settings.js";
+import { readConnection, readSwitches, runPromptMigration } from "./src/ov/settings.js";
 import { createClient } from "./src/ov/client.js";
 import { normalizeReady } from "./src/ov/ready.js";
 import { activateRuntime, setRuntimeTransport, transportFor } from "./src/ov/transport.js";
@@ -181,16 +181,16 @@ export default defineApp(async (sdk) => {
 
   await sdk.hooks.onDecision("agent/before-start", async (invocation) => {
     // 迁移放这里，不放在 apply：apply 阶段设置贡献还没登记，config.get 对每个键都答 null。
-    // 每进程一次；没落成标记就留到下一轮再试。
-    await runPromptMigrationOnce(sdk);
+    // 无状态：每次调用都重扫六个键，已经是空串就什么都不写。
+    await runPromptMigration(sdk);
     if (await probeOn()) await probe("agent/before-start", invocation);
     return undefined;
   });
 
   await sdk.hooks.onDecision("provider/before-request", async (invocation) => {
-    // 迁移的第二个入口：reload 落在轮次中途时，这一轮的 before-start 已经过了；
-    // provider/before-request 每次模型请求前都会过一遍，一次性开关保证仍然只扫一次。
-    await runPromptMigrationOnce(sdk);
+    // 第二个入口：reload 落在轮次中途时，这一轮的 before-start 已经过了；
+    // 这里每次模型请求前都过一遍，扫六个键的成本可以忽略，写只发生在默认值上。
+    await runPromptMigration(sdk);
     // peer 是会话级的：谁在说话就按谁的 sessionId 记，面板读同一份，显示和注入不会对不上。
     // 解析不出身份时这里什么也不写（peer 为 null），不会用“上一个”顶上。
     try {

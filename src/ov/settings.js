@@ -250,143 +250,64 @@ export function promptForStorage(key, raw) {
   return typeof raw === "string" && defaults.includes(raw) ? "" : raw;
 }
 
+const LEGACY_PROMPT_MARKER_FILE = "prompt-defaults.json";
+
 /**
- * 迁移标记的版本。标记里的 version >= 这个值就不再扫配置。
- * v2 把 gateDecisionPrompt / rerankSystemonePrompt 纳入同一张表。
- * v3 修的是「在 apply 阶段读配置」：那时候设置贡献还没登记，六个键都答 null，
- * v2 逻辑把这当成「没有要迁的」写了标记；v3 必须重扫一次，否则盘上的 v2 会挡死。
+ * 清掉旧版留下的标记文件。无状态检查不需要它，但跑过旧版的机器上可能还留着一份。
+ * 删不掉只 warn：留着也不影响任何逻辑，下次装载再试。
  */
-export const PROMPT_DEFAULTS_MIGRATION_VERSION = 3;
-
-const PROMPT_DEFAULTS_MIGRATION_FILE = "prompt-defaults.json";
-
-function promptMigrationMarkerPath(sdk) {
+function removeLegacyPromptMarker(sdk) {
   const dataDir = typeof sdk?.dataDir === "string" ? sdk.dataDir.trim() : "";
-  return dataDir ? path.join(dataDir, PROMPT_DEFAULTS_MIGRATION_FILE) : "";
-}
-
-/** 标记损坏 / JSON 坏 / version 小 / 没 dataDir：一律当成「没迁移过」。 */
-function promptMigrationAlreadyDone(sdk) {
-  const file = promptMigrationMarkerPath(sdk);
-  if (!file) return false;
+  if (!dataDir) return;
+  const file = path.join(dataDir, LEGACY_PROMPT_MARKER_FILE);
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    const version = Number(parsed?.version);
-    return Number.isFinite(version) && version >= PROMPT_DEFAULTS_MIGRATION_VERSION;
-  } catch {
-    return false;
-  }
-}
-
-/** 标记写失败只 warn，不抛；没写成下次启动会重扫，重扫是幂等的。 */
-function writePromptMigrationMarker(sdk) {
-  const file = promptMigrationMarkerPath(sdk);
-  if (!file) return;
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({
-        version: PROMPT_DEFAULTS_MIGRATION_VERSION,
-        at: new Date().toISOString(),
-      }),
-    );
+    fs.rmSync(file, { force: true });
   } catch (error) {
     try {
-      sdk.logger?.warn?.(
-        `openviking prompt migration marker write failed: ${error?.message || error}`,
-      );
+      sdk.logger?.warn?.(`openviking prompt marker cleanup failed: ${error?.message || error}`);
     } catch {
-      /* 日志不能影响 App 装载 */
+      /* 日志不能影响调用方 */
     }
   }
 }
 
 /**
- * 盘上存着与内置默认逐字相同的值 → 真实写成空串一次，返回被改写的键。
+ * 无状态清理：盘上存着与内置默认（含历史默认）逐字相同的提示词值 → 写成空串。
  *
- * 只处理非空字符串；自定义值、空串一律不碰。**值不是字符串（null / {}）时不算迁移成功**：
- * apply 阶段设置贡献还没登记，config.get 对每个键都答 null，那不是「没有要迁的」，是「读不到」。
- * 这种情况不写标记、不返回 changed，留给下一次重试。空串是已经迁完的合法终态，算迁移成功。
+ * 每次调用都从头扫六个键，不写标记、不记版本、没有「只扫一次」的短路。
+ * 只处理非空字符串；null / {} / 空串一律不动。单个键失败只 warn，不影响其它键。
+ * 返回值是本次真正被改写的键；第二次跑同样的配置自然是空数组，幂等。
  *
- * 单个键失败只 warn，不阻断其它键，也不阻断调用方，同样不写标记——下次会重扫，重扫是幂等的。
- * 成功跑完写 <dataDir>/prompt-defaults.json，之后看到 version 就直接返回，一次 config.get 都不发。
- *
- * 迁移只挂 agent/before-start（设置贡献早就登记完了），不放进 readSwitches：/status 这类
- * 只读路由也走 readSwitches，不能让它产生写配置的副作用。标记就是为了让后续调用不再扫。
+ * 挂 agent/before-start 与 provider/before-request：设置贡献要等 apply 之后才登记，
+ * 装载阶段读不到配置；这两个钩子都在那之后，且不是只读路由。
  */
 export async function migratePromptDefaults(sdk) {
-  if (promptMigrationAlreadyDone(sdk)) return [];
-
+  removeLegacyPromptMarker(sdk);
   const changed = [];
-  let failed = false;
-  let notReady = false;
-  const seen = [];
   for (const [key, defaults] of Object.entries(PROMPT_DEFAULT_VALUES)) {
     try {
       const value = await sdk.config.get(key);
-      seen.push({ key, type: value === null ? "null" : typeof value });
-      if (typeof value !== "string") {
-        notReady = true;
-        continue;
-      }
-      if (value && defaults.includes(value)) {
-        await sdk.config.set(key, "");
-        changed.push(key);
-      }
+      if (typeof value !== "string" || !value) continue;
+      if (!defaults.includes(value)) continue;
+      await sdk.config.set(key, "");
+      changed.push(key);
     } catch (error) {
-      failed = true;
       try {
         sdk.logger?.warn?.(
           `openviking prompt migration failed for ${key}: ${error?.message || error}`,
         );
       } catch {
-        /* 日志不能影响配置迁移 / App 装载 */
+        /* 日志不能影响配置迁移 */
       }
     }
   }
-
-  if (notReady) {
-    try {
-      sdk.logger?.debug?.(
-        `openviking prompt migration deferred: config not ready ${JSON.stringify(seen)}`,
-      );
-    } catch {
-      /* 日志不能影响配置迁移 / App 装载 */
-    }
-    return [];
-  }
-  if (!failed) writePromptMigrationMarker(sdk);
   return changed;
 }
 
-// 每进程只跑一次；没落成标记（config 没就绪 / 写标记失败）就清掉，下一轮再试。
-let promptMigrationOnce = null;
-
-export function migratePromptDefaultsOnce(sdk) {
-  if (!promptMigrationOnce) {
-    promptMigrationOnce = migratePromptDefaults(sdk)
-      .then((changed) => {
-        if (!promptMigrationAlreadyDone(sdk)) promptMigrationOnce = null;
-        return changed;
-      })
-      .catch((error) => {
-        promptMigrationOnce = null;
-        throw error;
-      });
-  }
-  return promptMigrationOnce;
-}
-
-/** 测试用：清掉进程内的一次性状态。 */
-export function resetPromptMigrationOnce() {
-  promptMigrationOnce = null;
-}
-
 /** 钩子入口：自己吞错，只负责迁移与日志。 */
-export async function runPromptMigrationOnce(sdk) {
+export async function runPromptMigration(sdk) {
   try {
-    const migrated = await migratePromptDefaultsOnce(sdk);
+    const migrated = await migratePromptDefaults(sdk);
     if (migrated.length) {
       sdk.logger?.info?.(`openviking prompts migrated to empty: ${migrated.join(", ")}`);
     }

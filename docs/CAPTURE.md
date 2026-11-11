@@ -309,10 +309,12 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 
 默认值不落库（`capturePrompt` / `gatePrompt` / `gateContextPrompt` / `rerankPrompt` /
 `gateDecisionPrompt` / `rerankSystemonePrompt` 六个键同一规则）：写入时，值等于内置默认
-（含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由 App 装载时一次性改写成
-空串。迁移完成会在 `<dataDir>/prompt-defaults.json` 写一个 `version` 标记，之后的装载不再扫
-配置；迁移中途失败则不写标记，下次启动重试。空串在运行时表示用内置默认；`gateDecisionPrompt`
-也一样（空 = 用默认，不再是「没有判据」），要关掉判断请切 `recallGate`，不要靠清空提示词。
+（含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由 App 在 `agent/before-start`
+与 `provider/before-request` 两处无状态扫描，命中的改写成空串。没有标记文件、没有版本号：
+同一份配置重复跑是幂等的，第二次零写入；值不是非空字符串时一律不动，单个键失败只记日志，
+下次再试。旧版留下的 `<dataDir>/prompt-defaults.json` 会被顺手删掉。空串在运行时表示用内置默认；
+`gateDecisionPrompt` 也一样（空 = 用默认，不再是「没有判据」），要关掉判断请切 `recallGate`，
+不要靠清空提示词。
 
 老配置里存着的 `captureCommitMode` 不再参与读取，读不到就是没有；提前提交一律只看上面两个键。
 
