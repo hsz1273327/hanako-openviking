@@ -12,8 +12,6 @@
 import { computed } from "vue";
 import {
   NCard,
-  NGrid,
-  NGridItem,
   NInput,
   NInputNumber,
   NSelect,
@@ -67,16 +65,12 @@ function onEnter(event) {
       />
     </template>
 
-    <NGrid
-      class="capture-grid"
-      cols="1 700:2"
-      responsive="screen"
-      :x-gap="10"
-      :y-gap="8"
-    >
-      <NGridItem>
+    <div class="capture-fields">
+      <div class="capture-group">
+        <div class="capture-group-title">提交策略</div>
+
         <div class="field">
-          <span class="field-label">提交策略</span>
+          <span class="field-label">策略</span>
           <NSelect
             size="small"
             aria-label="提交策略"
@@ -89,10 +83,8 @@ function onEnter(event) {
           />
           <span class="field-hint">固定轮次攒够就交；语言模型 / 判别模型只在换话题时交。</span>
         </div>
-      </NGridItem>
 
-      <NGridItem v-if="state.form.captureCommitMode === 'fixed'">
-        <div class="field">
+        <div v-if="state.form.captureCommitMode === 'fixed'" class="field">
           <label for="captureCommitTurns">固定轮次</label>
           <NInputNumber
             size="small"
@@ -112,10 +104,8 @@ function onEnter(event) {
           />
           <span class="field-hint">一轮 = 一条用户消息加至少一条助手消息。范围 1–100。</span>
         </div>
-      </NGridItem>
 
-      <NGridItem v-if="state.form.captureCommitMode === 'llm'">
-        <div class="field">
+        <div v-if="state.form.captureCommitMode === 'llm'" class="field">
           <span class="field-label">判断模型</span>
           <NSelect
             size="small"
@@ -129,10 +119,8 @@ function onEnter(event) {
           />
           <span class="field-hint">留空 = 用宿主的辅助模型；非空形如 provider/model。</span>
         </div>
-      </NGridItem>
 
-      <NGridItem v-if="state.form.captureCommitMode === 'discriminator'">
-        <div class="field">
+        <div v-if="state.form.captureCommitMode === 'discriminator'" class="field">
           <label for="captureServiceUrl">判别服务地址</label>
           <NInput
             size="small"
@@ -149,11 +137,13 @@ function onEnter(event) {
           />
           <span class="field-hint">需兼容 /v1/systemone。模型与密钥沿用「决策服务」那组配置（在「记忆搜索 → 精排」页里填）。</span>
         </div>
-      </NGridItem>
+      </div>
 
-      <NGridItem>
+      <div class="capture-group">
+        <div class="capture-group-title">服务端兜底</div>
+
         <div class="field">
-          <span class="field-label">服务端兜底</span>
+          <span class="field-label">兜底提交</span>
           <NSwitch
             aria-label="服务端兜底"
             :value="state.form.captureServerFallback"
@@ -161,9 +151,7 @@ function onEnter(event) {
           />
           <span class="field-hint">打开后空闲足够久时由服务端自己提交；关着时全程由本地判断。</span>
         </div>
-      </NGridItem>
 
-      <NGridItem>
         <div class="field" :class="{ dim: !state.form.captureServerFallback }">
           <label for="captureServerIdleSeconds">空闲秒数</label>
           <NInputNumber
@@ -185,8 +173,8 @@ function onEnter(event) {
           />
           <span class="field-hint">服务端多久没有新消息就自己提交。范围 60–86400 秒。</span>
         </div>
-      </NGridItem>
-    </NGrid>
+      </div>
+    </div>
 
     <p v-if="fallbackNote" class="capture-fallback bad">{{ fallbackNote }}</p>
 

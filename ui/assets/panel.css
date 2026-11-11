@@ -572,8 +572,22 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 
 /* 写回卡按内容定高，不吃余量。 */
 #panel-capture > .capture-card { flex: none; }
-/* 字段已经按 NGrid 的 8px 节奏排开，不再叠 .field 自己的下边距。 */
-.capture-card .capture-grid .field { margin-bottom: 0; }
+/* 上下单列：设置项一件一件往下看，两组之间用一道细线分开。 */
+.capture-card .capture-group + .capture-group {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+}
+/* 组标题比字段标签实一点，跟下级字段拉开层级。 */
+.capture-card .capture-group-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  opacity: 0.78;
+}
+/* 组内最后一个字段不再叠下边距，交给组间距。 */
+.capture-card .capture-group > .field:last-child { margin-bottom: 0; }
 /* 回落提示：与页面提示位同一档；bad 与 .save-hint.bad 同色。 */
 .capture-card .capture-fallback { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; opacity: 0.5; }
 .capture-card .capture-fallback.bad { color: #c2554b; opacity: 0.9; }
