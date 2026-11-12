@@ -219,6 +219,21 @@ export function captureStatusRows(data, opts = {}) {
  * 设置页的提示：提前提交存着开着，但判断方式缺配置，所以这一轮没生效。
  * 开关本身关着（或已经生效）时不提示。
  */
+/**
+ * 判断方式下拉：关闭 / 大语言模型固定，判别模型只有决策服务配好才追加。
+ *
+ * 与「记忆搜索」的 recallGateOptions 同一套规则：选得到却永远不生效的档位，
+ * 比看不到这一档更难查。判据是服务端确认过的 layers，不是正在编辑的草稿。
+ */
+export function captureJudgeOptions(configured) {
+  const options = [
+    { value: "off", label: "关闭" },
+    { value: "llm", label: "大语言模型" },
+  ];
+  if (configured) options.push({ value: "discriminator", label: "判别模型" });
+  return options;
+}
+
 export function captureFallbackNote(config) {
   if (!config || typeof config !== "object") return "";
   if (config.early === true || config.earlyStored !== true) return "";

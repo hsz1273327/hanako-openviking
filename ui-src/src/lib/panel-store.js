@@ -389,7 +389,9 @@ export function createPanelStore(deps = {}) {
     const idle = Number(out.idleSeconds);
     const topicCandidates = Number(out.topicCandidates);
     captureConfirmed = {
-      captureEarlyCommit: earlyStored,
+      // 服务端已按「判别服务没配 → 关闭」归一过，这里跟投影走；
+      // earlyStored 只用于卡片上的红字说明，不再进表单。
+      captureEarlyCommit: early === true,
       captureEarlyJudge: judge,
       captureTopicScope: out.topicScope === "global" ? "global" : "session",
       captureTopicCandidates: Number.isFinite(topicCandidates) ? topicCandidates : 8,

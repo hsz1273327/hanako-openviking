@@ -1247,7 +1247,13 @@ export async function readSwitches(sdk) {
   const storedEarlyCommit = normalizeCaptureEarlyCommit(await read(sdk, "captureEarlyCommit"));
   const storedEarlyJudge = normalizeCaptureEarlyJudge(await read(sdk, "captureEarlyJudge"));
   // 旧键已删除：读不到就是没有，只按这两个键取默认值。
-  const earlyCommit = { early: storedEarlyCommit, judge: storedEarlyJudge };
+  // 判别服务没了就把「提前提交」读成关：存着的 discriminator 不再生效，界面必须看到关闭，
+  // 不能静默退回 llm（那会换一种判断方式继续跑，用户以为还是判别模型）。
+  const earlyJudge = storedEarlyJudge;
+  const earlyCommit = {
+    early: resolveCaptureEarlyCommit(storedEarlyCommit, earlyJudge, captureChoice),
+    judge: earlyJudge,
+  };
   const captureEarlyMissing = captureModeMissing(
     { ...captureChoice, captureEarlyCommit: earlyCommit.early, captureEarlyJudge: earlyCommit.judge },
     earlyCommit.judge,
@@ -1358,6 +1364,18 @@ export function decisionServiceConfigured(switches) {
     normalizeServiceUrl(switches?.systemoneServiceUrl) &&
       normalizeServiceModel(switches?.systemoneServiceModel),
   );
+}
+
+/**
+ * 归一化写回的提前提交：判别模型但决策服务没配 → 提前提交关。
+ *
+ * 与 resolveRecallGate 同一条判据、同一个理由：存着的 discriminator 已经没有意义了，
+ * 界面与运行时都必须看到「关闭」，而不是悄悄换成语义不同的 llm 继续跑。
+ * 大语言模型不依赖外部服务，不参与这条判断。
+ */
+export function resolveCaptureEarlyCommit(early, judge, switches) {
+  if (early !== true) return false;
+  return captureModeMissing(switches, judge).length === 0;
 }
 
 /**

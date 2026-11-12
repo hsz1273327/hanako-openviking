@@ -43,7 +43,9 @@ import {
   CAPTURE_MIN_RANGE,
   CAPTURE_TURNS_RANGE,
   captureFallbackNote,
+  captureJudgeOptions,
 } from "../lib/capture-view.js";
+import { decisionServiceConfigured } from "../lib/recall-layers.js";
 import BackfillBlock from "./BackfillBlock.vue";
 import TopicBlock from "./TopicBlock.vue";
 
@@ -76,14 +78,16 @@ function onTabKeydown(event, name) {
 // 判断方式是「关闭 / 大语言模型 / 判别模型」三态，直接落在既有的两个键上：
 // 关闭 = captureEarlyCommit false（运行时的 fixed，只按强制轮数交），
 // 另两档 = captureEarlyCommit true + captureEarlyJudge。没有新造开关。
-const modeOptions = Object.freeze([
-  { value: "off", label: "关闭" },
-  { value: "llm", label: "大语言模型" },
-  { value: "discriminator", label: "判别模型" },
-]);
+// 判别服务配好了吗：与「记忆搜索」第四档同一判据，落在服务端确认过的 layers 上。
+// 没配就不出现这一档；存着的 discriminator 也已经由读取侧归一成关闭。
+const discriminatorConfigured = computed(() => decisionServiceConfigured(state.layers));
+const modeOptions = computed(() => captureJudgeOptions(discriminatorConfigured.value));
 const judgeMode = computed(() => {
   if (state.form.captureEarlyCommit !== true) return "off";
-  return state.form.captureEarlyJudge === "discriminator" ? "discriminator" : "llm";
+  if (state.form.captureEarlyJudge === "discriminator") {
+    return discriminatorConfigured.value ? "discriminator" : "off";
+  }
+  return "llm";
 });
 // 卡片内的配置页签；切模式时只在当前页签已经不存在时回「基础配置」。
 const settingsTab = ref("base");

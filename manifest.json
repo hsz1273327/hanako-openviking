@@ -324,7 +324,7 @@
           "captureEarlyJudge": {
             "type": "string",
             "title": "提前提交的判断方式",
-            "description": "llm 用宿主语言模型回答话题编号或 new；discriminator 用 /v1/systemone 兼容的判别服务做多选判断。默认语言模型。",
+            "description": "llm 用宿主语言模型回答话题编号或 new；discriminator 用 /v1/systemone 兼容的判别服务做多选判断，需要「记忆搜索 → 精排」里的决策服务地址与模型都配好，否则读取时归一成关闭。默认语言模型。",
             "default": "llm",
             "enum": [
               "llm",

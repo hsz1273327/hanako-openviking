@@ -461,6 +461,7 @@ import {
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   captureFallbackNote,
+  captureJudgeOptions,
   captureFormatDraft,
   captureFormatStatus,
   capturePromptDraft,
@@ -3393,6 +3394,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       }),
     ],
     ["", "", "判别服务未配置，去「记忆搜索 → 精排」填"],
+  );
+
+  eq(
+    "captureJudgeOptions：判别服务没配只有关闭 / 大语言模型，配好才追加判别模型",
+    [
+      captureJudgeOptions(false).map((item) => item.value),
+      captureJudgeOptions(true).map((item) => item.value),
+    ],
+    [
+      ["off", "llm"],
+      ["off", "llm", "discriminator"],
+    ],
   );
 
   const capture = uiCode("components/CapturePanel.vue");
@@ -9026,7 +9039,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         [false, "llm"],
-        [true, "discriminator"],
+        // 判别服务没配：存着的 discriminator 读成关闭，但不改写成 llm。
+        [false, "discriminator"],
         false,
       ],
     );
@@ -9057,13 +9071,37 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [true, [], true, []],
     );
+    const discUrlOnly = await readSwitches(
+      sdkWith({
+        captureCommitSchema: "2",
+        captureEarlyCommit: true,
+        captureEarlyJudge: "discriminator",
+        systemoneServiceUrl: "http://judge:1",
+      }),
+    );
+    const discReady = await readSwitches(
+      sdkWith({
+        captureCommitSchema: "2",
+        captureEarlyCommit: true,
+        captureEarlyJudge: "discriminator",
+        systemoneServiceUrl: "http://judge:1/",
+        systemoneServiceModel: "acme/judge",
+      }),
+    );
     eq(
-      "readSwitches：judge=discriminator 缺配置时 captureEffectiveEarly 仍为 false",
+      "readSwitches：judge=discriminator 缺配置时 captureEffectiveEarly 为 false，且提前提交直接读成关闭",
       [
+        discMissing.captureEarlyCommit,
         discMissing.captureEffectiveEarly,
         captureModeMissing(discMissing, "discriminator"),
+        discUrlOnly.captureEarlyCommit,
       ],
-      [false, ["systemoneServiceUrl", "systemoneServiceModel"]],
+      [false, false, ["systemoneServiceUrl", "systemoneServiceModel"], false],
+    );
+    eq(
+      "readSwitches：判别服务地址与模型都配好时，存着的 discriminator 仍按提前提交读",
+      [discReady.captureEarlyCommit, discReady.captureEarlyJudge, discReady.captureEffectiveEarly],
+      [true, "discriminator", true],
     );
   }
 
