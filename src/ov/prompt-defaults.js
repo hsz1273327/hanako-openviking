@@ -57,8 +57,12 @@ export const DEFAULT_RERANK_PROMPT = `用户在问：{{message}}
 不要解释。`;
 
 /** 内置默认题面（面板里可编辑的那一格）；答案格式由代码固定追加，见 CAPTURE_TOPIC_FORMAT。 */
-export const CAPTURE_TOPIC_QUESTION =
-  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。";
+export const CAPTURE_TOPIC_QUESTION = `下面有几个已知话题，和一段新的对话。
+
+先判断这段对话在讲什么，给它起个名字，再决定它属于哪个话题。
+
+名字要像标题，30 个字以内，不要路径、命令、代码或 markdown 符号。
+简述按要素写，讲清楚就行，不要为了写长而铺陈。500 个字是上限，不是要求。`;
 
 /**
  * 写回判断题面用过的历史默认。c1cbb72 之前内置的是这句二元题面，面板把它当草稿填进
@@ -69,6 +73,7 @@ export const CAPTURE_TOPIC_QUESTION =
  */
 export const CAPTURE_PROMPT_RETIRED_DEFAULTS = Object.freeze([
   "只看下面这两段，它们是不是在讲同一件事？只回 yes 或 no。",
+  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。",
 ]);
 
 /**

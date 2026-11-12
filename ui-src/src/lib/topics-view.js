@@ -10,7 +10,7 @@ import { relativeTime } from "./relative-time.js";
 export const TOPIC_LABEL_MAX = 60;
 
 /** 摘要最多显示多少个字；超过就截断并加 …。 */
-export const TOPIC_SUMMARY_MAX = 60;
+export const TOPIC_SUMMARY_MAX = 80;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOPIC_ID_RE = /^t_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

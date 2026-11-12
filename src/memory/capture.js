@@ -47,16 +47,24 @@ export { CAPTURE_TOPIC_QUESTION };
 
 /** 答案格式：固定追加，不进用户可编辑的那一格。解析靠它，题面只决定怎么问。 */
 export const CAPTURE_TOPIC_FORMAT = [
-  "按这个格式回答：",
-  "主题：<一句话概括这段在讲什么>",
-  "归属：<编号> 或 new",
-  "只输出这两行。",
+  "按三行回答，不要多余内容：",
+  "",
+  "主题：<30 个字以内的标题>",
+  "",
+  "简述：<500 个字以内。按这四样写，有几样写几样，没有的就不写：",
+  "  1. 这段在解决什么问题，或者推进什么事",
+  "  2. 涉及哪些具体对象：文件、模块、配置项、人、外部服务",
+  "  3. 做了什么判断，结论是什么",
+  "  4. 哪里没做成、留了什么、下一步是什么",
+  "  写成连贯的段落，不要分点，不要复述原话，不要客套话。>",
+  "",
+  "归属：<已有话题编号，或 新>",
 ].join("\n");
 
 export const CAPTURE_SAMPLE_CHARS = 1200;
-export const CAPTURE_ASK_TIMEOUT_MS = 1500;
-// 回答从一行变成两行（主题 + 归属），12 会把「主题」那句截没，新话题的 label 就永远是空的。
-export const CAPTURE_ASK_MAX_TOKENS = 64;
+export const CAPTURE_ASK_TIMEOUT_MS = 6000;
+// 三行回答里简述最长 500 字，64 个 token 会被截断；给足预算，别让 label/summary 因为截断变空。
+export const CAPTURE_ASK_MAX_TOKENS = 1024;
 
 function clipChars(text, max) {
   const chars = Array.from(typeof text === "string" ? text : "");
@@ -188,6 +196,7 @@ export function parseTopicAnswer(text, candidates) {
   const lines = normalized.split(/\r?\n/);
 
   let label = "";
+  let summary = "";
   let choice = null;
 
   for (const line of lines) {
@@ -196,6 +205,15 @@ export function parseTopicAnswer(text, candidates) {
       // 主题与归属写在同一行时，只取「归属」之前那截。
       const cut = theme.split(/(?:^|\s)归属\s*(?:[：:]|是)/)[0];
       label = stripDecoration(cut).replace(/\s+/g, " ").trim();
+      break;
+    }
+  }
+
+  // 简述：「简述：」是现在的写法，「摘要：」是旧答案/旧模板还在用的写法。
+  for (const line of lines) {
+    const value = fieldValue(line, "简述") || fieldValue(line, "摘要");
+    if (value) {
+      summary = clipTopicSummary(stripDecoration(value));
       break;
     }
   }
@@ -243,13 +261,54 @@ export function parseTopicAnswer(text, candidates) {
   }
 
   if (choice === null) return null;
-  return { choice, label };
+  return { choice, label: clipTopicLabel(label), summary };
 }
 
 /** 把一段消息压成一行，按字符截断。 */
 function oneLine(text, max) {
   const collapsed = String(text ?? "").replace(/\s+/g, " ").trim();
   return clipChars(collapsed, max);
+}
+
+/** 标题 30 字、简述 500 字：中文按字、英文单词按 1 个计数；截断后去掉尾部标点。 */
+export const CAPTURE_TITLE_MAX_UNITS = 30;
+export const CAPTURE_SUMMARY_MAX_UNITS = 500;
+const TRAILING_PUNCT = /[\s，。；、！？：,.;:!?…—–~·]+$/u;
+
+function takeUnits(text, max) {
+  const source = String(text ?? "");
+  let out = "";
+  let count = 0;
+  for (let index = 0; index < source.length; ) {
+    const ch = String.fromCodePoint(source.codePointAt(index));
+    if (/[A-Za-z0-9]/.test(ch)) {
+      let end = index;
+      while (end < source.length && /[A-Za-z0-9'’_-]/.test(source[end])) end += 1;
+      if (count + 1 > max) break;
+      out += source.slice(index, end);
+      count += 1;
+      index = end;
+    } else {
+      if (count + 1 > max) break;
+      out += ch;
+      count += 1;
+      index += ch.length;
+    }
+  }
+  return out;
+}
+
+function clipWithUnits(text, max) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return takeUnits(flat, max).replace(TRAILING_PUNCT, "").trim();
+}
+
+export function clipTopicLabel(text, max = CAPTURE_TITLE_MAX_UNITS) {
+  return clipWithUnits(text, max);
+}
+
+export function clipTopicSummary(text, max = CAPTURE_SUMMARY_MAX_UNITS) {
+  return clipWithUnits(text, max);
 }
 
 /** 命令行 / 路径 / 代码块这类开头不像话题标题，清洗后返回空串。 */
@@ -279,11 +338,11 @@ export function cleanTitleText(text) {
  * label 优先用判断器给的「主题」，没有就退回本段第一条 user 消息（没有 user 用第一条）。
  * summary 始终取本段第一条消息。
  */
-export function deriveTopicTitle(segment, theme = "") {
+export function deriveTopicTitle(segment, theme = "", modelSummary = "") {
   const list = Array.isArray(segment) ? segment : [];
   const first = list[0];
   const firstUser = list.find((message) => message?.role === "user") || first;
-  const fromTheme = cleanTitleText(theme);
+  const fromTheme = clipTopicLabel(cleanTitleText(theme));
   // 模型给了主题就优先用；没有主题才从本段消息里找第一句像人话的。
   let labelText = fromTheme;
   if (!labelText) {
@@ -299,10 +358,15 @@ export function deriveTopicTitle(segment, theme = "") {
   }
   // 一条像样的都没有：退回原文（至少能看见是什么），不要凭空造标题。
   if (!labelText) labelText = String(theme ?? "").trim() || String(firstUser?.content ?? "");
-  const label = oneLine(labelText, 24);
-  // 摘要同样优先用模型的主题句；没有才用清洗后的第一条消息。
-  const summarySource = fromTheme || cleanTitleText(first?.content) || first?.content;
-  const summary = oneLine(summarySource, 80);
+  const label = clipTopicLabel(labelText);
+  // 简述优先用模型那句；只给了主题就用主题；都没有才退回清洗后的第一条消息。
+  const summarySource =
+    clipTopicSummary(modelSummary) ||
+    fromTheme ||
+    cleanTitleText(first?.content) ||
+    first?.content ||
+    "";
+  const summary = clipTopicSummary(summarySource);
   return { label: label || "新话题", summary };
 }
 
@@ -465,7 +529,7 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
       }
       if (!parsed) return null;
       if (parsed.choice === "new") {
-        return { kind: "new", ...deriveTopicTitle(current, parsed.label) };
+        return { kind: "new", ...deriveTopicTitle(current, parsed.label, parsed.summary) };
       }
       return { kind: "existing", id: pool[parsed.choice - 1].id };
     };

@@ -11,6 +11,8 @@ import {
   NButton,
   NCard,
   NDataTable,
+  NDrawer,
+  NDrawerContent,
   NInput,
   NPopconfirm,
   NTabPane,
@@ -45,6 +47,30 @@ const {
 // 子页签只是本组件的视图状态：默认停在话题列表，切走再回来不重建、不丢草稿。
 const activeTab = ref("topics");
 const query = ref("");
+// 详情抽屉：只记 id，内容从同一份 topics 里取，删掉后自然消失。
+const detailId = ref("");
+const detailTopic = computed(() => topicById(detailId.value));
+const detailRow = computed(() =>
+  detailTopic.value ? topicRowView(detailTopic.value, Date.now()) : null,
+);
+
+function openDetail(id) {
+  detailId.value = id;
+}
+
+function closeDetail() {
+  detailId.value = "";
+}
+
+function editFromDetail(id) {
+  closeDetail();
+  startEdit(id);
+}
+
+async function removeFromDetail(id) {
+  await remove(id);
+  closeDetail();
+}
 const promptStatusText = computed(() => capturePromptStatusOf());
 const templateStatusText = computed(() => captureTemplateStatusOf());
 
@@ -121,7 +147,7 @@ const columns = computed(() => [
         : h("span", { class: "topic-label", title: row.label }, row.label),
   },
   {
-    title: "摘要",
+    title: "简述",
     key: "summary",
     render: (row) =>
       h("span", { class: "topic-summary", title: row.summary }, row.summary || "—"),
@@ -154,10 +180,15 @@ const columns = computed(() => [
   {
     title: "操作",
     key: "ops",
-    width: 120,
+    width: 168,
     align: "right",
     render: (row) =>
       h("span", { class: "topic-ops" }, [
+        h(
+          NButton,
+          { size: "tiny", quaternary: true, onClick: () => openDetail(row.id) },
+          { default: () => "详情" },
+        ),
         h(
           NButton,
           {
@@ -288,5 +319,30 @@ onMounted(load);
     </NTabs>
 
     <p v-if="state.note" class="topic-note" :class="{ bad: state.noteBad }">{{ state.note }}</p>
+
+    <NDrawer
+      :show="Boolean(detailId)"
+      :width="420"
+      placement="right"
+      @update:show="(value) => { if (!value) closeDetail(); }"
+    >
+      <NDrawerContent v-if="detailRow" :title="detailRow.label" closable>
+        <p class="topic-detail-meta">
+          {{ detailRow.segmentsText }} · 最近 {{ detailRow.seenText }} · {{ detailRow.sessionsText }}
+        </p>
+        <p class="topic-detail-summary">{{ detailTopic.summary || "暂无简述" }}</p>
+        <template #footer>
+          <div class="topic-detail-ops">
+            <NButton size="small" @click="editFromDetail(detailRow.id)">改标签</NButton>
+            <NPopconfirm @positive-click="removeFromDetail(detailRow.id)">
+              <template #trigger>
+                <NButton size="small" quaternary>删除</NButton>
+              </template>
+              <span class="topic-confirm">删除后只移除本地归组记录，已经写出去的记忆不动。</span>
+            </NPopconfirm>
+          </div>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
   </NCard>
 </template>

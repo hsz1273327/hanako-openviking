@@ -378,6 +378,8 @@ import {
   parseTopicAnswer,
   deriveTopicTitle,
   cleanTitleText,
+  clipTopicLabel,
+  clipTopicSummary,
   captureTags,
   captureDecision,
   createCaptureHandler,
@@ -8150,12 +8152,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         parseTopicAnswer("", cands3),
       ],
       [
-        { choice: "new", label: "" },
-        { choice: "new", label: "" },
-        { choice: "new", label: "" },
-        { choice: "new", label: "" },
-        { choice: 2, label: "" },
-        { choice: 2, label: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: 2, label: "", summary: "" },
+        { choice: 2, label: "", summary: "" },
         null,
         null,
       ],
@@ -8170,11 +8172,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         parseTopicAnswer("主题：灯带电源走线\n归属：new", cands3),
       ],
       [
-        { choice: 1, label: "" },
-        { choice: 1, label: "" },
-        { choice: 1, label: "" },
-        { choice: "new", label: "" },
-        { choice: "new", label: "灯带电源走线" },
+        { choice: 1, label: "", summary: "" },
+        { choice: 1, label: "", summary: "" },
+        { choice: 1, label: "", summary: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: "new", label: "灯带电源走线", summary: "" },
       ],
     );
     eq(
@@ -8184,8 +8186,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         parseTopicAnswer("> - **主题：**  灯带   电源\n- 归属: 2", cands3),
       ],
       [
-        { choice: 1, label: "" },
-        { choice: 2, label: "灯带 电源" },
+        { choice: 1, label: "", summary: "" },
+        { choice: 2, label: "灯带 电源", summary: "" },
       ],
     );
     eq(
@@ -8201,8 +8203,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         "灯带",
         "灯带",
         "灯带",
-        { choice: 2, label: "灯带" },
-        { choice: 2, label: "" },
+        { choice: 2, label: "灯带", summary: "" },
+        { choice: 2, label: "", summary: "" },
       ],
     );
     eq(
@@ -8233,6 +8235,50 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     );
     eq(
+      "parseTopicAnswer：三行（主题 / 简述 / 归属）带空行也认；简述也认旧写法摘要",
+      [
+        parseTopicAnswer("主题：灯带走线\n\n简述：这段在解决电源走线。\n\n归属：2", cands3),
+        parseTopicAnswer("主题：灯带走线\n摘要：旧模板写的摘要。\n归属：1", cands3),
+      ],
+      [
+        { choice: 2, label: "灯带走线", summary: "这段在解决电源走线" },
+        { choice: 1, label: "灯带走线", summary: "旧模板写的摘要" },
+      ],
+    );
+    eq(
+      "clipTopicLabel：30 字截断、英文单词按 1 个计数、尾部标点去掉",
+      [
+        clipTopicLabel("长".repeat(40)),
+        clipTopicLabel("fix the broken capture path in the panel tonight"),
+        clipTopicLabel("灯带电源走线。"),
+      ],
+      [
+        "长".repeat(30),
+        "fix the broken capture path in the panel tonight",
+        "灯带电源走线",
+      ],
+    );
+    eq(
+      "clipTopicSummary：500 字截断、尾部标点去掉",
+      [clipTopicSummary("简".repeat(600)).length, clipTopicSummary("一句话。")],
+      [500, "一句话"],
+    );
+    eq(
+      "deriveTopicTitle：只给主题时 summary 不空；只有简述时标题退回清洗后的第一句",
+      [
+        deriveTopicTitle([{ role: "user", content: "层高还是 0.2" }], "灯带电源走线"),
+        deriveTopicTitle(
+          [{ role: "user", content: "层高还是 0.2" }],
+          "",
+          "这段在确认层高与走线。",
+        ),
+      ],
+      [
+        { label: "灯带电源走线", summary: "灯带电源走线" },
+        { label: "层高还是 0.2", summary: "这段在确认层高与走线" },
+      ],
+    );
+    eq(
       "parseTopicAnswer：回答里出现候选 label 原文就按那个候选认，长 label 优先",
       [
         parseTopicAnswer("我就是上线检查那段", cands3),
@@ -8245,8 +8291,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ),
       ],
       [
-        { choice: 2, label: "" },
-        { choice: 2, label: "" },
+        { choice: 2, label: "", summary: "" },
+        { choice: 2, label: "", summary: "" },
       ],
     );
     eq(
@@ -8257,7 +8303,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         parseTopicAnswer("1", []),
         parseTopicAnswer("归属：new", []),
       ],
-      [null, null, null, { choice: "new", label: "" }],
+      [null, null, null, { choice: "new", label: "", summary: "" }],
     );
     eq(
       "deriveTopicTitle：label 优先用 theme，没有 theme 退回第一条 user 压空白截 24 字，summary 取第一条消息截 80 字",
@@ -8539,12 +8585,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       JSON.stringify(sameModel.calls.stream[0] || {}),
     );
     check(
-      "llm 路径的题面含固定追加的答案格式块（主题 / 归属 / 只输出这两行）",
+      "llm 路径的题面含固定追加的答案格式块（主题 / 简述 / 归属）",
       String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
         CAPTURE_TOPIC_FORMAT,
       ) &&
         String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
-          "只输出这两行",
+          "归属：<已有话题编号，或 新>",
         ),
       String(sameModel.calls.stream[0]?.messages?.[0]?.content || ""),
     );
@@ -8620,7 +8666,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         typeof systemoneCall,
         systemoneBody.state?.type,
         systemoneBody.state?.content?.includes("对话："),
-        systemoneBody.state?.content?.includes("只输出这两行"),
+        systemoneBody.state?.content?.includes("按三行回答"),
         systemoneBody.questions?.q?.type,
         systemoneBody.questions?.q?.instructions,
       ],
@@ -9384,8 +9430,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         parseTopicAnswer(text, [{ label: "一" }, { label: "二" }, { label: "三" }]),
       ),
       [
-        { choice: "new", label: "" },
-        { choice: 2, label: "" },
+        { choice: "new", label: "", summary: "" },
+        { choice: 2, label: "", summary: "" },
         null,
       ],
     );
@@ -9707,7 +9753,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [false, false, false, false],
     );
     eq(
-      "写回常量：题面 / 样本字数 / 判断超时 / maxTokens（两行回答要 64，12 会把主题截没）",
+      "写回常量：题面 / 样本字数 / 判断超时 / maxTokens（三行回答要留够简述预算）",
       [
         CAPTURE_TOPIC_QUESTION,
         CAPTURE_SAMPLE_CHARS,
@@ -9715,10 +9761,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         CAPTURE_ASK_MAX_TOKENS,
       ],
       [
-        "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。",
+        "下面有几个已知话题，和一段新的对话。\n\n先判断这段对话在讲什么，给它起个名字，再决定它属于哪个话题。\n\n名字要像标题，30 个字以内，不要路径、命令、代码或 markdown 符号。\n简述按要素写，讲清楚就行，不要为了写长而铺陈。500 个字是上限，不是要求。",
         1200,
-        1500,
-        64,
+        6000,
+        1024,
       ],
     );
   }
@@ -20345,9 +20391,9 @@ check(
   eq("topicRowView：dormant 的 statusText 是 沉睡", [dormantView.statusText, dormantView.dormant], ["沉睡", true]);
   eq("topicRowView：label 空给 未命名", topicRowView({ ...topicFixture, label: "" }, NOW_MS).label, "未命名");
   eq(
-    "topicRowView：超长摘要压成一行并截断到 60 字加 …",
-    topicRowView({ ...topicFixture, summary: `${"长".repeat(61)}` }, NOW_MS).summary,
-    `${"长".repeat(60)}…`,
+    "topicRowView：超长简述压成一行并截断到 80 字加 …",
+    topicRowView({ ...topicFixture, summary: `${"长".repeat(81)}` }, NOW_MS).summary,
+    `${"长".repeat(80)}…`,
   );
   eq(
     "topicRowView：段数非法 / 负数按 0，sessionIds 不是数组按 0 个会话",

@@ -21,8 +21,14 @@ export const CAPTURE_TEMPLATE_MAX = 4000;
  * 内置默认题面。与 src/memory/capture.js 的 CAPTURE_TOPIC_QUESTION 逐字一致
  * （冒烟比对两边）。配置 capturePrompt 为空时就是它。
  */
-export const DEFAULT_CAPTURE_PROMPT =
-  "下面有几个已知话题，和一段新的对话。先判断这段在讲什么，再决定它属于哪个。";
+export const DEFAULT_CAPTURE_PROMPT = [
+  "下面有几个已知话题，和一段新的对话。",
+  "",
+  "先判断这段对话在讲什么，给它起个名字，再决定它属于哪个话题。",
+  "",
+  "名字要像标题，30 个字以内，不要路径、命令、代码或 markdown 符号。",
+  "简述按要素写，讲清楚就行，不要为了写长而铺陈。500 个字是上限，不是要求。",
+].join("\n");
 
 /** 与后端 normalizeCapturePrompt 同一口径：非字符串 / 空 → 空串，否则按字符截断。 */
 export function normalizeCapturePrompt(value) {
