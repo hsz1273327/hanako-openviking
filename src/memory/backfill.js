@@ -19,7 +19,7 @@ import { readConnection, readSwitches } from "../ov/settings.js";
 import { transportFor } from "../ov/transport.js";
 import { patchSession, readSession, sessionKeyOf } from "../state/session.js";
 import { commitSegment } from "./capture.js";
-import { forEachSessionLine, listSessionFiles } from "./session-reader.js";
+import { forEachSessionLine, listSessionFiles, readSessionText } from "./session-reader.js";
 import {
   batchMessagesByTurn,
   countTurns,
@@ -34,8 +34,9 @@ export const BACKFILL_MAX_SEGMENTS = 200;
 /** 段与段之间至少隔多久。给服务端留一口气，也让取消能在段边界收住。 */
 export const BACKFILL_GAP_MS = 200;
 
-/** 扫描结果缓存：同一个文件 30 秒内不重复扫。 */
+/** 扫描结果缓存：同一个文件 30 秒内不重复扫。改字段形状时把版本加一。 */
 const SCAN_TTL_MS = 30_000;
+const SCAN_CACHE_VERSION = 3;
 const SCAN_CACHE_MAX = 256;
 const scanCache = new Map();
 
@@ -141,17 +142,24 @@ export async function scanSessionFile(file, deps = {}) {
   let turns = 0;
   let openUser = false;
   let lastTimestamp = "";
+  let hostSessionId = "";
+  let firstUserText = "";
   const turnsAt = [];
 
   await forEachLine(
     file,
     (line) => {
       const record = parseRecord(line);
-      if (!record || !isCaptureMessage(record)) return;
+      if (!record) return;
+      // 标题表按宿主的 sess_xxx 建键；会话文件里的记录带着它，文件名里没有。
+      // 位置不固定：顶层 sessionId，或消息的 details.sessionId（工具回执里常见）。
+      if (!hostSessionId) hostSessionId = hostSessionIdOf(record, file);
+      if (!isCaptureMessage(record)) return;
       messages += 1;
       lastTimestamp = typeof record.timestamp === "string" ? record.timestamp : "";
       const role = record.message.role;
       if (role === "user") {
+        if (!firstUserText) firstUserText = clipTitleText(messageTextOf(record.message.content));
         openUser = true;
       } else if (role === "assistant" && openUser) {
         turns += 1;
@@ -164,7 +172,56 @@ export async function scanSessionFile(file, deps = {}) {
 
   const stat = await statOf(file);
   const lastActivityAt = lastTimestamp || (stat ? stat.mtime.toISOString() : "");
-  return { messages, turns, turnsAt, lastActivityAt, size: stat?.size ?? 0 };
+  return {
+    messages,
+    turns,
+    turnsAt,
+    lastActivityAt,
+    size: stat?.size ?? 0,
+    hostSessionId,
+    firstUserText,
+  };
+}
+
+/**
+ * 从一条记录里找宿主的 sess_xxx；找不到给空串。
+ *
+ * 一个会话文件里可能出现多个 sess id（子代理、卡片回执），不能见一个就用：
+ * details 里同时给了 sessionPath，路径对得上这个文件才算数；没有路径时退回顶层字段。
+ */
+function hostSessionIdOf(record, file) {
+  const direct = record?.sessionId;
+  if (typeof direct === "string" && direct.startsWith("sess_")) return direct;
+  const fileBase = path.basename(file);
+  for (const holder of [record?.details, record?.message?.details]) {
+    const found = sessionIdIn(holder, fileBase, 0);
+    if (found) return found;
+  }
+  return "";
+}
+
+/** details 里 sessionId 会缩在 download / card 这类子对象里，按层往下找，最多四层。 */
+function sessionIdIn(value, fileBase, depth) {
+  if (!value || typeof value !== "object" || depth > 4) return "";
+  const direct = value.sessionId;
+  if (typeof direct === "string" && direct.startsWith("sess_")) {
+    const sessionPath = value.sessionPath;
+    if (typeof sessionPath === "string" && sessionPath) {
+      if (path.basename(sessionPath) !== fileBase) return "";
+    }
+    return direct;
+  }
+  for (const child of Object.values(value)) {
+    const found = sessionIdIn(child, fileBase, depth + 1);
+    if (found) return found;
+  }
+  return "";
+}
+
+/** 标题兜底：首条用户消息压成一行，前 40 字。 */
+function clipTitleText(text) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  return flat.length > 40 ? flat.slice(0, 40) : flat;
 }
 
 /**
@@ -398,6 +455,7 @@ async function scanCached(file, deps = {}) {
   const cached = scanCache.get(file);
   if (
     cached &&
+    cached.version === SCAN_CACHE_VERSION &&
     cached.size === stat.size &&
     cached.mtimeMs === stat.mtimeMs &&
     at - cached.at < SCAN_TTL_MS
@@ -410,13 +468,50 @@ async function scanCached(file, deps = {}) {
     const oldest = scanCache.keys().next().value;
     if (oldest !== undefined) scanCache.delete(oldest);
   }
-  scanCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, at, value });
+  scanCache.set(file, { version: SCAN_CACHE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, at, value });
   return value;
 }
 
 /** 清空扫描缓存（测试用；正常路径不需要）。 */
 export function resetBackfillScanCache() {
   scanCache.clear();
+}
+
+/**
+ * 读 <agent>/sessions/session-titles.json，合成 sess_xxx → 标题。
+ * 文件缺失是常态（还没命名过），静默跳过；其它读失败只记一条 warn，不影响列表。
+ */
+async function readSessionTitles(files, deps = {}) {
+  const dirs = new Set();
+  for (const item of files) {
+    const dir = path.dirname(item.file);
+    if (path.basename(dir) === "sessions") dirs.add(dir);
+  }
+  const titles = new Map();
+  for (const dir of [...dirs].sort()) {
+    const file = path.join(dir, "session-titles.json");
+    let text = "";
+    try {
+      text = await readSessionText(file, deps);
+    } catch (error) {
+      const textOfError = errorText(error);
+      if (!/ENOENT|no such file|not found/i.test(textOfError)) {
+        warnLine(deps.logger, `session titles read failed (${file}): ${textOfError}`);
+      }
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "string" && value.trim()) titles.set(key, value.trim());
+    }
+  }
+  return titles;
 }
 
 /**
@@ -432,8 +527,10 @@ export async function listBackfillSessions(ctx, deps = {}) {
   const root = agentsRootOf(dataDir, deps);
   if (!root) return [];
 
+  const files = await sessionFilesOf(root, deps);
+  const titles = await readSessionTitles(files, deps);
   const rows = [];
-  for (const { file, sessionId } of await sessionFilesOf(root, deps)) {
+  for (const { file, sessionId } of files) {
     const scan = await scanCached(file, deps);
     if (!scan || !(scan.messages > 0)) continue;
     const written = normalizeCursor(readSession(dataDir, sessionId).capture?.cursor).lastMessageCount;
@@ -442,6 +539,10 @@ export async function listBackfillSessions(ctx, deps = {}) {
     ).length;
     rows.push({
       sessionId,
+      shortId: sessionId.slice(0, 8),
+      file,
+      agent: path.basename(path.dirname(path.dirname(file))),
+      title: titles.get(scan.hostSessionId) || scan.firstUserText || "",
       messages: scan.messages,
       written,
       pendingTurns,

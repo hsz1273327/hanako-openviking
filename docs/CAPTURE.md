@@ -416,9 +416,20 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 - `pendingTurns` = 从 `written` 之后起算的完整轮数；
   `pendingSegments = ceil(pendingTurns / captureCommitTurns)`
 - `lastActivityAt` = 最后一条可写消息的 `timestamp`，没有就用文件 mtime
+- `title` 依次取：同目录 `session-titles.json` 里按宿主 `sess_xxx` 命中的标题 →
+  首条用户消息压成一行后前 40 字 → 空串（界面显示「（无标题会话）」）
+- `shortId` 是会话 UUID 的前 8 位，`agent` 是会话文件所在助手目录名
+
+标题表的键是宿主的 `sess_xxx`，文件名里只有 UUID；`sessionId` 从会话记录里找：顶层字段、
+`details.sessionId`，或者 `details.download` 这类子对象里的（最多四层），带 `sessionPath`
+时还要和当前文件同名才算数——一个文件里可能混着子代理与卡片回执的 sessionId。
 
 `agentsRoot` 依次尝试：调用方显式给的 `agentsRoot` → 状态文件里记过的 `agentDir` 的父目录
 → `<dataDir>/../../agents`；第一个「存在且含 agent/sessions 子目录」的胜出，都没有就返回空串。
+
+会话表的「会话」列主行是标题（一行省略，`title` 属性放全文），副行是短码与 agent 名；
+短码自己的 `title` 是两行——完整 UUID 与完整文件路径，悬停就能复制去搜日志；单元格本身不再
+叠第三个 `title`。表格用固定布局、标题列吃剩余宽度，不出横向滚动。
 
 扫描结果按 `(path, size, mtimeMs)` 缓存，并且同一个文件 **30 秒内不重复扫**。面板每秒轮询
 `/backfill-status`、会话卡每 8 秒轮询一次，不能每次都把 25MB 重读一遍。

@@ -65,12 +65,12 @@ onMounted(load);
     <table class="backfill-table">
       <thead>
         <tr>
-          <th>会话</th>
-          <th class="num">消息数</th>
-          <th class="num">已写</th>
-          <th class="num">待补</th>
-          <th>最近活动</th>
-          <th>操作</th>
+          <th class="backfill-col-session">会话</th>
+          <th class="num backfill-col-num">消息数</th>
+          <th class="num backfill-col-num">已写</th>
+          <th class="num backfill-col-num">待补</th>
+          <th class="backfill-col-seen">最近活动</th>
+          <th class="backfill-col-ops">操作</th>
         </tr>
       </thead>
       <tbody>
@@ -81,7 +81,12 @@ onMounted(load);
           :class="{ busy: row.busy }"
           :data-session-id="row.sessionId"
         >
-          <td><code class="backfill-code">{{ row.shortId || row.sessionId }}</code></td>
+          <td class="backfill-session">
+            <div class="backfill-session-title" :title="row.titleFull">{{ row.titleText }}</div>
+            <div class="backfill-session-sub">
+              <code :title="row.idTitle">{{ row.shortId || row.sessionId }}</code><template v-if="row.agentText"> · {{ row.agentText }}</template>
+            </div>
+          </td>
           <td class="num">{{ row.messagesText }}</td>
           <td class="num">{{ row.writtenText }}</td>
           <td class="num">{{ row.pendingText }}</td>

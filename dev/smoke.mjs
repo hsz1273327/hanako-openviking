@@ -20140,6 +20140,59 @@ check(
       ["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"],
     );
 
+    const titleFile = path.join(path.dirname(a.file), "session-titles.json");
+    const hostIdA = "sess_test_a_11111111";
+    fs.writeFileSync(
+      titleFile,
+      JSON.stringify({ [hostIdA]: "项目设计进展" }),
+      "utf8",
+    );
+    // 会话文件里的 sessionId 是标题表的键；文件名里只有 UUID。
+    fs.writeFileSync(
+      a.file,
+      [`{"type":"session","id":"${idA}","sessionId":"${hostIdA}"}`, ...linesFor(24, "A")].join("\n") + "\n",
+      "utf8",
+    );
+    const titled = await listBackfillSessions(ctx, deps);
+    const titledA = titled.find((row) => row.sessionId === idA);
+    const titledB = titled.find((row) => row.sessionId === idB);
+    eq(
+      "标题：titles.json 按 sess id 命中；没有标题退回首条用户消息前 40 字；短码是 UUID 前 8 位",
+      [titledA?.title, titledA?.agent, titledA?.shortId, titledB?.title],
+      ["项目设计进展", "blueflower", idA.slice(0, 8), "u0"],
+    );
+
+    // 嵌套 details：sessionId 缩在 details.download 里，靠 sessionPath 对上是同一个文件。
+    const idC = "01a1585b-86d2-7c64-b8ac-edbe7099d0f0";
+    const hostIdC = "sess_test_c_22222222";
+    const c = sessionFixture(dir, idC, linesFor(2, "C"));
+    const nested = {
+      type: "message",
+      id: "c1",
+      message: {
+        role: "assistant",
+        content: "x",
+        details: {
+          download: {
+            sessionId: hostIdC,
+            sessionPath: c.file,
+          },
+        },
+      },
+    };
+    fs.writeFileSync(c.file, `${JSON.stringify(nested)}\n${linesFor(2, "C").join("\n")}\n`, "utf8");
+    fs.writeFileSync(
+      titleFile,
+      JSON.stringify({ [hostIdA]: "项目设计进展", [hostIdC]: "嵌套会话标题" }),
+      "utf8",
+    );
+    const nestedRows = await listBackfillSessions(ctx, deps);
+    eq(
+      "嵌套 details 里的 sessionId 也能对上标题表",
+      nestedRows.find((row) => row.sessionId === idC)?.title,
+      "嵌套会话标题",
+    );
+
     const scannedOnce = scans;
     await listBackfillSessions(ctx, deps);
     eq("第二次调用 30 秒内不重扫", scans, scannedOnce);
@@ -20165,9 +20218,9 @@ check(
 
     const all = await getSessions();
     eq(
-      "GET /backfill-sessions：root / 两行 / totals",
+      "GET /backfill-sessions：root / 三行 / totals",
       [all.body.root, all.body.sessions.length, all.body.totals],
-      [agentsRoot, 2, { sessions: 2, segments: 3 }],
+      [agentsRoot, 3, { sessions: 3, segments: 4 }],
     );
     const one = await getSessions(idB);
     eq(
@@ -20246,6 +20299,14 @@ check(
     ["BAD_REQUEST", "BAD_REQUEST", "BAD_REQUEST", "BAD_REQUEST"],
   );
   eq("runtime 接受 agents 下的 .jsonl", resolveSessionFile(file, dir), file);
+  eq(
+    "runtime 也放行同目录的 session-titles.json，其它 json 仍然拒绝",
+    [
+      resolveSessionFile(path.join(dir, "agent", "sessions", "session-titles.json"), dir),
+      throwsCode(() => resolveSessionFile(path.join(dir, "agent", "sessions", "other.json"), dir)),
+    ],
+    [path.join(dir, "agent", "sessions", "session-titles.json"), "BAD_REQUEST"],
+  );
 
   const firstChunk = await readSessionChunk(file, { agentsRoot: dir, offset: 0, limit: 7 });
   const restChunk = await readSessionChunk(file, { agentsRoot: dir, offset: 5, limit: 1024 });
@@ -20498,6 +20559,18 @@ check(
       shortId,
     ])(backfillRowView(backfillRowFixture, NOW_MS, { running: true, currentSessionId: BACKFILL_UUID })),
     ["7448", "6120", "111 段", "3 小时前", "01a17e84"],
+  );
+  eq(
+    "backfillRowView：标题有就用，空标题给「（无标题会话）」；副行是短码 + agent",
+    (() => {
+      const withTitle = backfillRowView(
+        { ...backfillRowFixture, title: "项目设计进展", agent: "blueflower" },
+        NOW_MS,
+      );
+      const noTitle = backfillRowView({ ...backfillRowFixture, title: "  ", agent: "" }, NOW_MS);
+      return [withTitle.titleText, withTitle.titleFull, withTitle.agentText, noTitle.titleText];
+    })(),
+    ["项目设计进展", "项目设计进展", "blueflower", "（无标题会话）"],
   );
   eq(
     "backfillRowView：正在跑的那一行 busy，取消按钮只看有没有任务在跑",

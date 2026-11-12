@@ -273,7 +273,7 @@ export function agentsRootOf(options = {}) {
 }
 
 /**
- * 只放行 agents 目录下、以 .jsonl 结尾的会话文件。
+ * 只放行 agents 目录下的会话文件：.jsonl，以及同目录的 session-titles.json（标题表）。
  * 先拒绝 `..` 段，再 path.resolve，最后比前缀——顺序反过来会让 `a/../../b` 混过前缀检查。
  */
 export function resolveSessionFile(rawPath, agentsRoot) {
@@ -285,8 +285,9 @@ export function resolveSessionFile(rawPath, agentsRoot) {
   if (segments.includes("..")) {
     throw httpError("BAD_REQUEST", "path 不能包含 ..", 400);
   }
-  if (!/\.jsonl$/i.test(rawPath)) {
-    throw httpError("BAD_REQUEST", "只接受 .jsonl 文件", 400);
+  const base = path.basename(rawPath);
+  if (!/\.jsonl$/i.test(rawPath) && base !== "session-titles.json") {
+    throw httpError("BAD_REQUEST", "只接受 .jsonl 或 session-titles.json", 400);
   }
   const target = path.resolve(rawPath);
   if (target === root || !target.startsWith(root + path.sep)) {

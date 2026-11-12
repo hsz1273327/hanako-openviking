@@ -49,9 +49,17 @@ export function backfillRowView(row, nowMs, opts = {}) {
   const source = row && typeof row === "object" ? row : {};
   const sessionId = typeof source.sessionId === "string" ? source.sessionId : "";
   const running = opts.running === true;
+  const title = typeof source.title === "string" ? source.title.trim() : "";
   return {
     sessionId,
     shortId: sessionShortId(sessionId),
+    // 悬停短码：完整 UUID 一行、完整文件路径一行，方便直接搜日志。
+    idTitle: [sessionId, typeof source.file === "string" ? source.file : ""]
+      .filter(Boolean)
+      .join("\n"),
+    titleText: title || "（无标题会话）",
+    titleFull: title,
+    agentText: typeof source.agent === "string" ? source.agent : "",
     messagesText: String(nonNegativeInt(source.messages)),
     writtenText: String(nonNegativeInt(source.written)),
     pendingText: `${nonNegativeInt(source.pendingSegments)} 段`,
