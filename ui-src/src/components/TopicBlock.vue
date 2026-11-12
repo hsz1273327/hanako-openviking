@@ -246,8 +246,8 @@ onMounted(load);
             id="topicSearch"
             size="small"
             clearable
-            placeholder="按标签或摘要过滤"
-            aria-label="按标签或摘要过滤"
+            placeholder="按标签或简述过滤"
+            aria-label="按标签或简述过滤"
             :input-props="{ spellcheck: 'false' }"
             :value="query"
             @update:value="(value) => (query = value ?? '')"

@@ -8235,14 +8235,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     );
     eq(
-      "parseTopicAnswer：三行（主题 / 简述 / 归属）带空行也认；简述也认旧写法摘要",
+      "parseTopicAnswer：三行（主题 / 简述 / 归属）带空行也认；只认「简述：」这一种字段名",
       [
         parseTopicAnswer("主题：灯带走线\n\n简述：这段在解决电源走线。\n\n归属：2", cands3),
-        parseTopicAnswer("主题：灯带走线\n摘要：旧模板写的摘要。\n归属：1", cands3),
+        parseTopicAnswer("主题：灯带走线\n摘要：旧写法不再认。\n归属：1", cands3),
       ],
       [
         { choice: 2, label: "灯带走线", summary: "这段在解决电源走线" },
-        { choice: 1, label: "灯带走线", summary: "旧模板写的摘要" },
+        { choice: 1, label: "灯带走线", summary: "" },
       ],
     );
     eq(
@@ -20538,7 +20538,7 @@ check(
     "topic-status",
     "删除",
     "还没有话题",
-    "按标签或摘要过滤",
+    "按标签或简述过滤",
   ];
   const topicMissing = topicNeedles.filter((needle) => !topicBlock.includes(needle));
   check(

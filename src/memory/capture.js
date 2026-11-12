@@ -209,9 +209,9 @@ export function parseTopicAnswer(text, candidates) {
     }
   }
 
-  // 简述：「简述：」是现在的写法，「摘要：」是旧答案/旧模板还在用的写法。
+  // 简述：只认「简述：」这一种写法。
   for (const line of lines) {
-    const value = fieldValue(line, "简述") || fieldValue(line, "摘要");
+    const value = fieldValue(line, "简述");
     if (value) {
       summary = clipTopicSummary(stripDecoration(value));
       break;

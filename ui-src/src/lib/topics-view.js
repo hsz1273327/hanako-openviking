@@ -9,7 +9,7 @@ import { relativeTime } from "./relative-time.js";
 /** 与后端 routes/topics.js 的 TOPIC_LABEL_MAX 同值（按码点算）。 */
 export const TOPIC_LABEL_MAX = 60;
 
-/** 摘要最多显示多少个字；超过就截断并加 …。 */
+/** 简述最多显示多少个字；超过就截断并加 …。 */
 export const TOPIC_SUMMARY_MAX = 80;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
