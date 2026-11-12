@@ -287,7 +287,7 @@ onMounted(load);
             <NInput
               type="textarea"
               size="small"
-              :autosize="{ minRows: 3, maxRows: 6 }"
+              :autosize="{ minRows: 5, maxRows: 16 }"
               :maxlength="CAPTURE_PROMPT_MAX"
               :input-props="{ id: 'capturePrompt', spellcheck: 'false' }"
               :value="configState.form.capturePrompt"
@@ -309,7 +309,7 @@ onMounted(load);
             <NInput
               type="textarea"
               size="small"
-              :autosize="{ minRows: 6, maxRows: 12 }"
+              :autosize="{ minRows: 13, maxRows: 26 }"
               :maxlength="CAPTURE_TEMPLATE_MAX"
               :input-props="{ id: 'captureTemplate', spellcheck: 'false' }"
               :value="configState.form.captureTemplate"

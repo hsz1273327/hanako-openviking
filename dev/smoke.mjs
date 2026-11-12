@@ -20158,8 +20158,8 @@ check(
     const titledB = titled.find((row) => row.sessionId === idB);
     eq(
       "标题：titles.json 按 sess id 命中；没有标题退回首条用户消息前 40 字；短码是 UUID 前 8 位",
-      [titledA?.title, titledA?.agent, titledA?.shortId, titledB?.title],
-      ["项目设计进展", "blueflower", idA.slice(0, 8), "u0"],
+      [titledA?.title, titledA?.agent, titledA?.shortId, titledA?.file, titledB?.title],
+      ["项目设计进展", "blueflower", idA.slice(0, 8), a.file, "u0"],
     );
 
     // 嵌套 details：sessionId 缩在 details.download 里，靠 sessionPath 对上是同一个文件。
@@ -20571,6 +20571,14 @@ check(
       return [withTitle.titleText, withTitle.titleFull, withTitle.agentText, noTitle.titleText];
     })(),
     ["项目设计进展", "项目设计进展", "blueflower", "（无标题会话）"],
+  );
+  eq(
+    "backfillRowView：短码的 title 是「完整 UUID + 换行 + 完整文件路径」",
+    backfillRowView(
+      { ...backfillRowFixture, file: "/home/hsz/.hanako/agents/blueflower/sessions/x.jsonl" },
+      NOW_MS,
+    ).idTitle,
+    `${BACKFILL_UUID}\n/home/hsz/.hanako/agents/blueflower/sessions/x.jsonl`,
   );
   eq(
     "backfillRowView：正在跑的那一行 busy，取消按钮只看有没有任务在跑",
