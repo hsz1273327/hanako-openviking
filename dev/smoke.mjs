@@ -3435,36 +3435,54 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     capture.match(/重排|兜底轮次/)?.[0],
   );
 
-  const earlyOpenLine =
-    capture.split("\n").find((line) => line.includes("earlyOpen = computed")) || "";
-  check(
-    "CapturePanel 提前提交开关：earlyOpen 直接来自 captureEarlyCommit",
-    earlyOpenLine.includes("captureEarlyCommit"),
-    earlyOpenLine,
-  );
   {
-    const captureLines = capture.split("\n");
-    const fieldBlock = (id) => {
-      const index = captureLines.findIndex((line) => line.includes(`id: '${id}'`));
-      return index < 0 ? "" : captureLines.slice(Math.max(0, index - 18), index + 1).join("\n");
-    };
-    const ids = [
-      "captureEarlyJudge",
-      "captureTopicScope",
-      "captureContextTurns",
-      "captureMinTurns",
-    ];
-    const blocks = ids.map(fieldBlock);
+    const lines = capture.split("\n");
+    const at = lines.findIndex((line) => line.includes("judgeMode = computed"));
+    const judgeModeBlock = at < 0 ? "" : lines.slice(at, at + 6).join("\n");
     check(
-      "CapturePanel 四个子项都在且 v-if 都认 earlyOpen",
-      blocks.every((block) => Boolean(block) && block.includes('v-if="earlyOpen"')),
-      blocks.map((block) => block.slice(0, 120)).join(" || "),
+      "CapturePanel 判断方式三态：关闭 = captureEarlyCommit false，另两档看 captureEarlyJudge",
+      judgeModeBlock.includes("captureEarlyCommit") &&
+        judgeModeBlock.includes("captureEarlyJudge"),
+      judgeModeBlock,
     );
-    const commitTurnsBlock = fieldBlock("captureCommitTurns");
+  }
+  {
+    const between = (start, end) => {
+      const a = capture.indexOf(start);
+      const b = capture.indexOf(end, a + 1);
+      return a < 0 || b < 0 ? "" : capture.slice(a, b);
+    };
+    const basePane = between('name="base"', 'name="llm"');
+    const llmPane = between('name="llm"', 'name="discriminator"');
+    const discPane = between('name="discriminator"', "</NTabs>");
     check(
-      "CapturePanel 强制提交轮数那一格不带提前提交的 v-if（所有情况共用）",
-      Boolean(commitTurnsBlock) && !commitTurnsBlock.includes('v-if="earlyOpen"'),
-      commitTurnsBlock.slice(0, 400),
+      "基础配置只有强制轮数与服务端兜底，没有提前提交 / 判断模型 / 判别地址",
+      ["captureCommitTurns", "captureServerIdleSeconds"].every((id) =>
+        basePane.includes(`id: '${id}'`),
+      ) &&
+        basePane.includes('aria-label="服务端兜底"') &&
+        !basePane.includes('aria-label="提前提交"') &&
+        !basePane.includes("captureModel") &&
+        !basePane.includes("captureServiceUrl"),
+      basePane.slice(0, 200),
+    );
+    check(
+      "语言模型设置：提前提交 / 作用域 / 上下文 / 最少轮数 / 判断模型都在，且没有判别地址",
+      ["captureTopicScope", "captureContextTurns", "captureMinTurns", "captureModel"].every(
+        (id) => llmPane.includes(`id: '${id}'`),
+      ) &&
+        llmPane.includes('aria-label="提前提交"') &&
+        !llmPane.includes("captureServiceUrl"),
+      llmPane.slice(0, 200),
+    );
+    check(
+      "判别模型设置：提前提交 / 作用域 / 上下文 / 最少轮数 / 服务地址都在，且没有判断模型",
+      ["captureTopicScope", "captureContextTurns", "captureMinTurns", "captureServiceUrl"].every(
+        (id) => discPane.includes(`id: '${id}'`),
+      ) &&
+        discPane.includes('aria-label="提前提交"') &&
+        !discPane.includes("captureModel"),
+      discPane.slice(0, 200),
     );
     check(
       "UI 的判据上下文 / 最少轮数 / 候选池范围与后端常量同值",

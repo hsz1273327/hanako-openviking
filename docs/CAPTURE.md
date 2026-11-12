@@ -311,20 +311,35 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 不进 store、不落 localStorage；页签的 `data-capture-tab` 与 `id` 前缀 `capture-`
 和记忆页的 `memory-` 分得开。
 
-写回页签下：
+写回页签的纵向结构：
 
-- 写回开关（`autoCapture`）
+1. 卡片头右上角：写回开关（`autoCapture`）
+2. 判断方式（三选一）：`关闭` / `大语言模型` / `判别模型`
+3. 卡片内的配置页签，随判断方式联动：
+   - 关闭：只有「基础配置」
+   - 大语言模型：「基础配置」+「语言模型设置」
+   - 判别模型：「基础配置」+「判别模型设置」
+
+判断方式直接落在既有两个键上，没有新增开关：`关闭` 写 `captureEarlyCommit=false`
+（运行时就是 `fixed`，只按强制轮数交）；另两档写 `captureEarlyCommit=true` +
+`captureEarlyJudge`。切模式时，当前页签不存在就回到「基础配置」。
+
+「基础配置」（三种模式都有）：
+
 - 强制提交轮数（`captureCommitTurns`，默认 12，范围 1–100）：所有情况共用
-- 提前提交开关（`captureEarlyCommit`）。打开后才出现下面这些子项：
-  - 判断方式（`captureEarlyJudge`）：语言模型 / 判别模型
-  - 话题作用域（`captureTopicScope`）：会话内 / 全局，并写明两种的代价
-  - 上下文轮数（`captureContextTurns`，默认 3，范围 1–20）
-  - 最少触发轮数（`captureMinTurns`，默认 2，范围 1–50）
-  - 判断题面（`capturePrompt`，留空 = 内置那句默认问法）
-  - 题面骨架（`captureTemplate`，留空 = 内置五段式模板）
-  - 答案格式（`captureFormat`，留空 = 内置三行格式）
-  - 判断模型（`captureModel`，仅语言模型）或判别服务地址（`captureServiceUrl`，仅判别模型）
-- 服务端兜底：开关与空闲秒数
+- 服务端兜底：兜底提交开关（`captureServerFallback`）与空闲秒数
+  （`captureServerIdleSeconds`，开关关着时变淡且禁用）
+
+「语言模型设置」：提前提交开关（`captureEarlyCommit`）、话题作用域
+（`captureTopicScope`）、上下文轮数（`captureContextTurns`）、最少触发轮数
+（`captureMinTurns`）、判断模型（`captureModel`）。
+
+「判别模型设置」：同一组前四项，最后一项换成判别服务地址（`captureServiceUrl`）。
+
+关闭模式下不出现提前提交、上下文轮数、最少触发轮数、判断模型与判别服务地址；
+这些值不会因为切模式被清掉，切回来还在。反过来，在「语言模型设置 / 判别模型设置」里把
+提前提交关掉，等同于回到「关闭」：页签收回到「基础配置」，再选回模型档时其它设置原样保留。判断题面 / 题面骨架 / 答案格式在「话题」页签里，
+不在这张卡。（`capturePrompt` / `captureTemplate` / `captureFormat`）
 
 默认值不落库（`capturePrompt` / `captureTemplate` / `captureFormat` / `gatePrompt` /
 `gateContextPrompt` / `rerankPrompt` / `gateDecisionPrompt` / `rerankSystemonePrompt` 八个键同一规则）：写入时，值等于内置默认
