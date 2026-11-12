@@ -713,17 +713,18 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   font-variant-numeric: tabular-nums;
 }
 .topic-tools { margin-bottom: 8px; max-width: 320px; }
-.topic-list { display: flex; flex-direction: column; }
-.topic-row {
-  display: grid;
-  grid-template-columns: 72px minmax(72px, 0.9fr) minmax(0, 1.6fr) 48px 68px 64px 40px auto;
-  align-items: baseline;
-  gap: 10px;
-  padding: 6px 4px;
-  font-size: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+.topic-table { max-width: 100%; }
+.topic-table .n-data-table-th {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.95;
 }
-.topic-row.dormant { opacity: 0.6; }
+.topic-table .n-data-table-th,
+.topic-table .n-data-table-td { padding: 6px 8px; vertical-align: middle; }
+.topic-table .n-data-table-td { overflow: hidden; }
+.topic-table .n-data-table-th__title { white-space: nowrap; }
+/* dormant 行整行变浅；状态列本来就写着「沉睡」，颜色只是辅助。 */
+.topic-table .topic-row-dormant { opacity: 0.6; }
 .topic-code {
   font: 11.5px/1.4 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   opacity: 0.85;
