@@ -17,6 +17,9 @@ export const CAPTURE_PROMPT_MAX = 2000;
 /** 题面骨架模板的字符上限：与后端 src/ov/settings.js 的 CAPTURE_TEMPLATE_MAX 同值。 */
 export const CAPTURE_TEMPLATE_MAX = 4000;
 
+/** 答案格式的字符上限：与后端 src/ov/settings.js 的 CAPTURE_FORMAT_MAX 同值。 */
+export const CAPTURE_FORMAT_MAX = 4000;
+
 /**
  * 内置默认题面。与 src/memory/capture.js 的 CAPTURE_TOPIC_QUESTION 逐字一致
  * （冒烟比对两边）。配置 capturePrompt 为空时就是它。
@@ -94,6 +97,46 @@ export function captureTemplateStatus(text) {
   const value = normalizeCaptureTemplate(text);
   if (value === DEFAULT_CAPTURE_TEMPLATE) return "当前为默认模板";
   if (!value.trim()) return "已修改 · 模板为空时使用内置默认";
+  return "已修改";
+}
+
+/**
+ * 内置默认答案格式。与 src/ov/prompt-defaults.js 的 DEFAULT_CAPTURE_FORMAT 逐字一致
+ * （冒烟比对两边）。配置 captureFormat 为空时就是它。
+ */
+export const DEFAULT_CAPTURE_FORMAT = [
+  "按三行回答，不要多余内容：",
+  "",
+  "主题：<30 个字以内的标题>",
+  "",
+  "简述：<500 个字以内。按这四样写，有几样写几样，没有的就不写：",
+  "  1. 这段在解决什么问题，或者推进什么事",
+  "  2. 涉及哪些具体对象：文件、模块、配置项、人、外部服务",
+  "  3. 做了什么判断，结论是什么",
+  "  4. 哪里没做成、留了什么、下一步是什么",
+  "  写成连贯的段落，不要分点，不要复述原话，不要客套话。>",
+  "",
+  "归属：<已有话题编号，或 新>",
+].join("\n");
+
+/** 与后端 normalizeCaptureFormat 同一口径：非字符串 / 空 → 空串，否则按字符截断。 */
+export function normalizeCaptureFormat(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, CAPTURE_FORMAT_MAX).join("");
+}
+
+/** 格式框里该显示什么：空配置坐默认全文当草稿，touched 之后不再盖。 */
+export function captureFormatDraft(configValue, touched = false) {
+  const value = normalizeCaptureFormat(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_CAPTURE_FORMAT;
+}
+
+/** 格式旁边那行小字：默认 / 已修改 / 空（回内置默认）。 */
+export function captureFormatStatus(text) {
+  const value = normalizeCaptureFormat(text);
+  if (value === DEFAULT_CAPTURE_FORMAT) return "当前为默认格式";
+  if (!value.trim()) return "已修改 · 格式为空时使用内置默认";
   return "已修改";
 }
 

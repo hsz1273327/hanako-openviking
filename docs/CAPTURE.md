@@ -157,7 +157,7 @@ entry id 来自 JSONL 每条记录的 `id` 字段（8 位十六进制，配 `par
 ### 5.2 归类
 
 拿待提交这一段去候选池里比。题面先让判断器「判断这段在讲什么」，再决定归属；列已有话题
-的 `label` 与 `summary`，最后固定追加一段答案格式（`CAPTURE_TOPIC_FORMAT`）：
+的 `label` 与 `summary`，最后是答案格式（默认 `DEFAULT_CAPTURE_FORMAT`，可用 `captureFormat` 覆盖）：
 
 ```
 下面有几个已知话题，和一段新的对话。
@@ -195,8 +195,9 @@ entry id 来自 JSONL 每条记录的 `id` 字段（8 位十六进制，配 `par
 作引子；每条消息截到 1200 字。候选池为空时不调模型，直接按新话题处理：没有候选就没有
 选项，空题面只会白花一次调用（题面里「已有话题：」下写「（无）」）。
 
-面板里能改的只有开头那句 `capturePrompt`；答案格式块由代码无条件追加，用户自定义的
-题面也照加——解析契约归代码，题面只决定怎么问。
+面板里能改三样：开头那句 `capturePrompt`、骨架 `captureTemplate`、答案格式 `captureFormat`。
+格式仍然进题面，只是从硬编码变成了配置项：行数、字段名、要素顺序都能改。解析器认的是
+「主题： / 简述： / 归属：」，格式写歪了模型答歪，先改这一格再谈解析。
 
 两种判断方式：
 
@@ -321,11 +322,12 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
   - 最少触发轮数（`captureMinTurns`，默认 2，范围 1–50）
   - 判断题面（`capturePrompt`，留空 = 内置那句默认问法）
   - 题面骨架（`captureTemplate`，留空 = 内置五段式模板）
+  - 答案格式（`captureFormat`，留空 = 内置三行格式）
   - 判断模型（`captureModel`，仅语言模型）或判别服务地址（`captureServiceUrl`，仅判别模型）
 - 服务端兜底：开关与空闲秒数
 
-默认值不落库（`capturePrompt` / `captureTemplate` / `gatePrompt` / `gateContextPrompt` /
-`rerankPrompt` / `gateDecisionPrompt` / `rerankSystemonePrompt` 七个键同一规则）：写入时，值等于内置默认
+默认值不落库（`capturePrompt` / `captureTemplate` / `captureFormat` / `gatePrompt` /
+`gateContextPrompt` / `rerankPrompt` / `gateDecisionPrompt` / `rerankSystemonePrompt` 八个键同一规则）：写入时，值等于内置默认
 （含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由 App 在 `agent/before-start`
 与 `provider/before-request` 两处无状态扫描，命中的改写成空串。没有标记文件、没有版本号：
 同一份配置重复跑是幂等的，第二次零写入；值不是非空字符串时一律不动，单个键失败只记日志，
@@ -338,6 +340,10 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 格式（为空时整行连同前面的空行一起去掉）。`{{previous}}` / `{{current}}` 为空时那一行不留空行。
 模板里没有 `{{current}}` 判无效：回退内置模板并记一条 warn（只记一次，不每轮刷）。替换是单次
 展开，占位符的值里再写 `{{xxx}}` 不会被二次替换。
+
+`captureFormat` 是 `{{format}}` 的取值：空串 = 内置三行格式（主题 / 简述 / 归属），非空原样填进去；
+连格式也不要时，把骨架里的 `{{format}}` 删掉即可（格式为空时那一行连同前面的空行一起去掉）。
+它没有「判无效回退」：写什么模型就看到什么，答歪了先改它。最长 4000 字符，非字符串写入直接 400。
 
 归类的读数容忍这些写法：`主题：` / `主题:` / `主题是` / `**主题**：` 都算；主题与归属写在同一行时
 只取「归属」之前那段；只有归属、没有主题时 label 为空。新话题没有主题时，标题从本段消息里找第一句

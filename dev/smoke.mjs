@@ -165,6 +165,7 @@ import {
   CAPTURE_IDLE_SECONDS_DEFAULT,
   CAPTURE_IDLE_SECONDS_MIN,
   CAPTURE_IDLE_SECONDS_MAX,
+  CAPTURE_FORMAT_MAX,
   CAPTURE_PROMPT_MAX,
   CAPTURE_TEMPLATE_MAX,
   normalizeCaptureEarlyCommit,
@@ -374,6 +375,7 @@ import {
   CAPTURE_ASK_MAX_TOKENS,
   renderTopicPrompt,
   resetCaptureTemplateWarning,
+  resolveCaptureFormat,
   resolveCaptureTemplate,
   parseTopicAnswer,
   deriveTopicTitle,
@@ -414,6 +416,7 @@ import readline from "node:readline";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE,
   GATE_PROMPT_RETIRED_DEFAULTS,
 } from "../src/ov/prompt-defaults.js";
@@ -449,13 +452,17 @@ import {
   CAPTURE_IDLE_RANGE,
   CAPTURE_CONTEXT_RANGE,
   CAPTURE_MIN_RANGE,
+  CAPTURE_FORMAT_MAX as UI_CAPTURE_FORMAT_MAX,
   CAPTURE_PROMPT_MAX as UI_CAPTURE_PROMPT_MAX,
   CAPTURE_TEMPLATE_MAX as UI_CAPTURE_TEMPLATE_MAX,
+  DEFAULT_CAPTURE_FORMAT as UI_DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE as UI_DEFAULT_CAPTURE_TEMPLATE,
   CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   captureFallbackNote,
+  captureFormatDraft,
+  captureFormatStatus,
   capturePromptDraft,
   capturePromptStatus,
   captureStatusRows,
@@ -5682,7 +5689,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await cap.setCaptureForm("captureEarlyJudge", "discriminator");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 十二个新键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 十四个新键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
@@ -5703,6 +5710,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "captureContextTurns",
           "captureEarlyCommit",
           "captureEarlyJudge",
+          "captureFormat",
           "captureMinTurns",
           "captureModel",
           "capturePrompt",
@@ -9577,6 +9585,31 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       ["", "自定义 {{current}}", true, true],
     );
+    eq(
+      "答案格式：默认逐字一致、空串归一、读取回默认、UI 常量同值",
+      [
+        CAPTURE_TOPIC_FORMAT === DEFAULT_CAPTURE_FORMAT,
+        resolveCaptureFormat({}),
+        resolveCaptureFormat({ captureFormat: "F1\nF2" }),
+        promptForStorage("captureFormat", DEFAULT_CAPTURE_FORMAT),
+        promptForStorage("captureFormat", "F1"),
+        UI_DEFAULT_CAPTURE_FORMAT === DEFAULT_CAPTURE_FORMAT,
+        UI_CAPTURE_FORMAT_MAX === CAPTURE_FORMAT_MAX,
+        captureFormatDraft(""),
+        captureFormatStatus(DEFAULT_CAPTURE_FORMAT),
+      ],
+      [
+        true,
+        DEFAULT_CAPTURE_FORMAT,
+        "F1\nF2",
+        "",
+        "F1",
+        true,
+        true,
+        DEFAULT_CAPTURE_FORMAT,
+        "当前为默认格式",
+      ],
+    );
 
     const turnMessages = [
       { role: "user", content: "u1" },
@@ -11599,6 +11632,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       serviceUrl: "",
       prompt: "",
       template: "",
+      format: "",
       judges: ["llm", "discriminator"],
       scopes: ["session", "global"],
       turnsRange: [1, 100],
@@ -11742,6 +11776,35 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "captureTemplate 自定义 → 原样落库并读回",
       [customTemplate.status, values.captureTemplate, (await getConfig()).body.template],
       [200, "问题：{{question}}\n现在：{{current}}", "问题：{{question}}\n现在：{{current}}"],
+    );
+  }
+
+  // ---- 2.045 答案格式：同样的三道关 ----
+  {
+    const beforeFormat = writes.length;
+    const badFormat = await postConfig({ captureFormat: 42 });
+    eq(
+      "captureFormat 非字符串 → 400 且不写",
+      [badFormat.status, badFormat.body.ok, writes.length],
+      [400, false, beforeFormat],
+    );
+    const longFormat = await postConfig({ captureFormat: "字".repeat(CAPTURE_FORMAT_MAX + 1) });
+    eq(
+      "captureFormat 超长 → 400 且不写",
+      [longFormat.status, longFormat.body.ok, writes.length],
+      [400, false, beforeFormat],
+    );
+    const defaultFormat = await postConfig({ captureFormat: DEFAULT_CAPTURE_FORMAT });
+    eq(
+      "captureFormat 等于默认 → 写空串，读回空（运行时用内置格式）",
+      [defaultFormat.status, defaultFormat.body.ok, values.captureFormat, (await getConfig()).body.format],
+      [200, true, "", ""],
+    );
+    const customFormat = await postConfig({ captureFormat: "主题：T\n归属：N" });
+    eq(
+      "captureFormat 自定义 → 原样落库并读回",
+      [customFormat.status, values.captureFormat, (await getConfig()).body.format],
+      [200, "主题：T\n归属：N", "主题：T\n归属：N"],
     );
   }
 

@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE,
   CAPTURE_TOPIC_QUESTION,
   DEFAULT_GATE_PROMPT,
@@ -236,10 +237,11 @@ export const DEFAULTS = {
   systemoneServiceKey: "",
 };
 
-/** 六个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
+/** 八个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
 const PROMPT_DEFAULT_VALUES = Object.freeze({
   capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
   captureTemplate: Object.freeze([DEFAULT_CAPTURE_TEMPLATE]),
+  captureFormat: Object.freeze([DEFAULT_CAPTURE_FORMAT]),
   gatePrompt: Object.freeze([DEFAULT_GATE_PROMPT, ...GATE_PROMPT_RETIRED_DEFAULTS]),
   gateContextPrompt: Object.freeze([DEFAULT_GATE_CONTEXT_PROMPT]),
   rerankPrompt: Object.freeze([DEFAULT_RERANK_PROMPT]),
@@ -468,6 +470,9 @@ export const CAPTURE_PROMPT_MAX = GATE_PROMPT_MAX;
 /** 题面骨架模板的字符上限：比题面宽一些，够写完整的五段式。 */
 export const CAPTURE_TEMPLATE_MAX = 4000;
 
+/** 答案格式的字符上限：同样宽一点，够写字段说明与示例。 */
+export const CAPTURE_FORMAT_MAX = 4000;
+
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
 function oneOf(raw, allowed, fallback) {
   return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
@@ -511,6 +516,11 @@ export function normalizeQueryChars(raw) {
 export function normalizeCaptureTemplate(raw) {
   if (typeof raw !== "string" || !raw) return "";
   return Array.from(raw).slice(0, CAPTURE_TEMPLATE_MAX).join("");
+}
+
+export function normalizeCaptureFormat(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, CAPTURE_FORMAT_MAX).join("");
 }
 
 export function normalizeCapturePrompt(raw) {
@@ -1272,6 +1282,8 @@ export async function readSwitches(sdk) {
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
     // 题面骨架：空串 = 内置默认模板；少了 {{current}} 由运行时判无效并回退。
     captureTemplate: normalizeCaptureTemplate(await read(sdk, "captureTemplate")),
+    // 答案格式：空串 = 内置默认；与题面 / 骨架同一套读取口径。
+    captureFormat: normalizeCaptureFormat(await read(sdk, "captureFormat")),
     // 记忆搜索总开关：缺项时默认 true，与 DEFAULTS 一致。
     recallEnabled: (await read(sdk, "recallEnabled")) !== false,
     readOnly: await read(sdk, "readOnly"),

@@ -19,6 +19,7 @@ import {
   NTabs,
 } from "naive-ui";
 import {
+  CAPTURE_FORMAT_MAX,
   CAPTURE_PROMPT_MAX,
   CAPTURE_TEMPLATE_MAX,
 } from "../lib/capture-view.js";
@@ -42,6 +43,10 @@ const {
   setCaptureTemplate,
   resetCaptureTemplate,
   captureTemplateStatusOf,
+  touchCaptureFormat,
+  setCaptureFormat,
+  resetCaptureFormat,
+  captureFormatStatusOf,
 } = useConfig();
 
 // 子页签只是本组件的视图状态：默认停在话题列表，切走再回来不重建、不丢草稿。
@@ -73,6 +78,7 @@ async function removeFromDetail(id) {
 }
 const promptStatusText = computed(() => capturePromptStatusOf());
 const templateStatusText = computed(() => captureTemplateStatusOf());
+const formatStatusText = computed(() => captureFormatStatusOf());
 
 function onPromptInput(value) {
   touchCapturePrompt(value ?? "");
@@ -88,6 +94,14 @@ function onTemplateInput(value) {
 
 function onTemplateChange(value) {
   setCaptureTemplate(value ?? "");
+}
+
+function onFormatInput(value) {
+  touchCaptureFormat(value ?? "");
+}
+
+function onFormatChange(value) {
+  setCaptureFormat(value ?? "");
 }
 
 const filtered = computed(() => filterTopics(state.topics, query.value));
@@ -319,6 +333,28 @@ onMounted(load);
               @change="onTemplateChange"
             />
             <span class="field-hint" v-pre>占位符：{{question}} 题面、{{candidates}} 已有话题、{{previous}} 之前对话、{{current}} 当前对话、{{format}} 答案格式。必须包含 {{current}}，否则回退内置模板并记一条警告。</span>
+          </div>
+
+          <!-- 答案格式：填进骨架里 {{format}} 的那一段，留空 = 内置三行格式。 -->
+          <div class="field">
+            <div class="prompt-head">
+              <label for="captureFormat">答案格式</label>
+              <span id="captureFormatStatus" class="prompt-status">{{ formatStatusText }}</span>
+              <NButton id="captureResetFormat" size="small" quaternary @click="resetCaptureFormat()">恢复默认</NButton>
+            </div>
+            <NInput
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 8, maxRows: 18 }"
+              :maxlength="CAPTURE_FORMAT_MAX"
+              :input-props="{ id: 'captureFormat', spellcheck: 'false' }"
+              :value="configState.form.captureFormat"
+              @focus="setFocus('captureFormat')"
+              @blur="setFocus('')"
+              @update:value="onFormatInput"
+              @change="onFormatChange"
+            />
+            <span class="field-hint" v-pre>这一段会替换题面骨架里的 {{format}} 占位符；留空 = 内置的三行格式（主题 / 简述 / 归属）。模型答歪时先改这里：行数、字段名、要素顺序都由它决定。</span>
           </div>
           </div>
       </NTabPane>

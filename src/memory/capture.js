@@ -13,7 +13,11 @@
 import fs from "node:fs";
 import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
-import { CAPTURE_TOPIC_QUESTION, DEFAULT_CAPTURE_TEMPLATE } from "../ov/prompt-defaults.js";
+import {
+  CAPTURE_TOPIC_QUESTION,
+  DEFAULT_CAPTURE_FORMAT,
+  DEFAULT_CAPTURE_TEMPLATE,
+} from "../ov/prompt-defaults.js";
 import {
   CAPTURE_COMMIT_TURNS_DEFAULT,
   CAPTURE_MIN_TURNS_DEFAULT,
@@ -41,25 +45,12 @@ import { candidatePool, readTopics, recordSegment, withTopics } from "./topics.j
 /**
  * 内置默认题面（面板里可编辑的那一格）。字面量在 src/ov/prompt-defaults.js——
  * settings.js 的写时归一与启动迁移也要用它。继续从本模块导出，原有引用不用改。
- * 答案格式由代码固定追加，见 CAPTURE_TOPIC_FORMAT。
+ * 答案格式由 captureFormat 决定，空串时用 DEFAULT_CAPTURE_FORMAT。
  */
 export { CAPTURE_TOPIC_QUESTION };
 
-/** 答案格式：固定追加，不进用户可编辑的那一格。解析靠它，题面只决定怎么问。 */
-export const CAPTURE_TOPIC_FORMAT = [
-  "按三行回答，不要多余内容：",
-  "",
-  "主题：<30 个字以内的标题>",
-  "",
-  "简述：<500 个字以内。按这四样写，有几样写几样，没有的就不写：",
-  "  1. 这段在解决什么问题，或者推进什么事",
-  "  2. 涉及哪些具体对象：文件、模块、配置项、人、外部服务",
-  "  3. 做了什么判断，结论是什么",
-  "  4. 哪里没做成、留了什么、下一步是什么",
-  "  写成连贯的段落，不要分点，不要复述原话，不要客套话。>",
-  "",
-  "归属：<已有话题编号，或 新>",
-].join("\n");
+/** 答案格式的默认值；字面量在 prompt-defaults.js（= DEFAULT_CAPTURE_FORMAT），settings 的写时归一也要用。 */
+export const CAPTURE_TOPIC_FORMAT = DEFAULT_CAPTURE_FORMAT;
 
 export const CAPTURE_SAMPLE_CHARS = 1200;
 export const CAPTURE_ASK_TIMEOUT_MS = 6000;
@@ -146,6 +137,12 @@ export function resolveCaptureTemplate(switches, sdk) {
     return DEFAULT_CAPTURE_TEMPLATE;
   }
   return raw;
+}
+
+/** 取这一轮该用的答案格式：空串 = 内置默认，没有「判无效回退」这一说。 */
+export function resolveCaptureFormat(switches) {
+  const raw = typeof switches?.captureFormat === "string" ? switches.captureFormat : "";
+  return raw || DEFAULT_CAPTURE_FORMAT;
 }
 
 /** 去掉 markdown 装饰（加粗 / 斜体 / 代码 / 引用），保留正文。 */
@@ -492,7 +489,8 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
     ? switches.capturePrompt
     : CAPTURE_TOPIC_QUESTION;
   const template = resolveCaptureTemplate(switches, sdk);
-  const rendered = renderTopicPrompt(previous, current, pool, question, undefined, template);
+  const format = resolveCaptureFormat(switches);
+  const rendered = renderTopicPrompt(previous, current, pool, question, format, template);
 
   if (!pool.length) return async () => fallback();
 
