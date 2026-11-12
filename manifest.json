@@ -395,12 +395,6 @@
             "description": "提前提交选用语言模型时使用的模型。留空 = 用宿主的辅助模型（utility）；非空形如 provider/model，provider 与 model 各自最长 128 字符。",
             "default": ""
           },
-          "captureServiceUrl": {
-            "type": "string",
-            "title": "写回判别服务地址",
-            "description": "提前提交选用判别模型时使用的服务地址，需兼容 /v1/systemone。只接受 http:// 或 https://，留空表示未配置。模型与密钥沿用「决策服务」那组配置；缺地址或模型时不提前提交，仍按强制轮数交。",
-            "default": ""
-          },
           "capturePrompt": {
             "type": "string",
             "title": "写回判断题面",

@@ -149,7 +149,7 @@ export const CAPTURE_IDLE_RANGE = Object.freeze([60, 86400]);
 
 /** 回落原因里的配置键 → 人话。 */
 export const CAPTURE_MISSING_LABELS = Object.freeze({
-  captureServiceUrl: "判别服务地址",
+  systemoneServiceUrl: "判别服务地址",
   systemoneServiceModel: "决策服务模型",
 });
 
@@ -222,7 +222,12 @@ export function captureStatusRows(data, opts = {}) {
 export function captureFallbackNote(config) {
   if (!config || typeof config !== "object") return "";
   if (config.early === true || config.earlyStored !== true) return "";
-  const missing = (Array.isArray(config.missing) ? config.missing : [])
+  const rawMissing = Array.isArray(config.missing) ? config.missing : [];
+  // 判别服务地址统一在「记忆搜索 → 精排」里配，这里只把话说清楚，不再给第二个入口。
+  if (rawMissing.includes("systemoneServiceUrl")) {
+    return "判别服务未配置，去「记忆搜索 → 精排」填";
+  }
+  const missing = rawMissing
     .map((key) => CAPTURE_MISSING_LABELS[key] || String(key || ""))
     .filter(Boolean);
   return missing.length

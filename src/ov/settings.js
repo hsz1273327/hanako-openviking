@@ -184,7 +184,6 @@ export const DEFAULTS = {
   captureServerFallback: false,
   captureServerIdleSeconds: CAPTURE_IDLE_SECONDS_DEFAULT,
   captureModel: "",
-  captureServiceUrl: "",
   // 写回判断题面：空串 = 用内置那句默认问法（见 src/memory/capture.js）。
   capturePrompt: "",
   captureTemplate: "",
@@ -656,7 +655,7 @@ export function serializeCaptureIdleSeconds(raw) {
  * 留空走的就是它。把它算成「缺配置」会让默认状态永远打不开提前提交，而提交时刻的
  * 补归类同一条路又照常走 utility，自相矛盾。
  *
- * discriminator 必须显式配好：服务地址用 captureServiceUrl，模型与密钥沿用精排页那组
+ * discriminator 必须显式配好：服务地址与模型都沿用精排页「决策服务」那一组
  * 「决策服务」配置：/v1/systemone 是这个仓库里唯一接判别模型的地方。
  * 传 "fixed" 是给老调用方留的口子：提前提交关着时没有判断方式，当然不缺。
  */
@@ -665,7 +664,7 @@ export function captureModeMissing(switches, judge) {
   const value = normalizeCaptureEarlyJudge(judge);
   if (value === "llm") return [];
   const missing = [];
-  if (!String(switches?.captureServiceUrl ?? "").trim()) missing.push("captureServiceUrl");
+  if (!String(switches?.systemoneServiceUrl ?? "").trim()) missing.push("systemoneServiceUrl");
   if (!String(switches?.systemoneServiceModel ?? "").trim()) {
     missing.push("systemoneServiceModel");
   }
@@ -1243,8 +1242,7 @@ export async function readSwitches(sdk) {
   const rerankLaneSchemaRaw = await read(sdk, "rerankLaneSchema");
   const legacyLanes = rerankLaneSchemaIsLegacy(rerankLaneSchemaRaw);
   const captureModel = String((await read(sdk, "captureModel")) ?? "").trim();
-  const captureServiceUrl = normalizeServiceUrl(await read(sdk, "captureServiceUrl"));
-  const captureChoice = { captureModel, captureServiceUrl, systemoneServiceModel };
+  const captureChoice = { captureModel, systemoneServiceUrl, systemoneServiceModel };
   const captureCommitSchemaRaw = await read(sdk, "captureCommitSchema");
   const storedEarlyCommit = normalizeCaptureEarlyCommit(await read(sdk, "captureEarlyCommit"));
   const storedEarlyJudge = normalizeCaptureEarlyJudge(await read(sdk, "captureEarlyJudge"));
@@ -1276,7 +1274,6 @@ export async function readSwitches(sdk) {
       await read(sdk, "captureServerIdleSeconds"),
     ),
     captureModel,
-    captureServiceUrl,
     // 写回判断题面：提前提交时共用这一句，空串 = 运行时不变量那句默认问法。
     // 读取路径不做转换：盘上是什么就读什么；默认值不落库由写入端与启动迁移负责。
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),

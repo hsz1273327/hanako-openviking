@@ -535,7 +535,7 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
 
   if (judge === "discriminator") {
     return async () => {
-      const endpoint = `${String(switches.captureServiceUrl || "").replace(/\/+$/, "")}/v1/systemone`;
+      const endpoint = `${String(switches.systemoneServiceUrl || "").replace(/\/+$/, "")}/v1/systemone`;
       const criteria = {};
       pool.forEach((topic, index) => {
         criteria[`t${index + 1}`] = `属于话题「${topic.label}」`;

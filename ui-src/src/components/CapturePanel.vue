@@ -111,14 +111,6 @@ const scopeOptions = Object.freeze([
 const modelOptions = computed(() => options(state.form.captureModel));
 const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
 
-function onServiceUrlInput(value) {
-  state.form.captureServiceUrl = value ?? "";
-}
-
-function onServiceUrlChange(value) {
-  setCaptureForm("captureServiceUrl", value ?? "");
-}
-
 function onEnter(event) {
   event.preventDefault();
   event.target.blur();
@@ -413,21 +405,8 @@ function onEnter(event) {
               </div>
 
               <div class="field">
-                <label for="captureServiceUrl">判别服务地址</label>
-                <NInput
-                  size="small"
-                  type="text"
-                  aria-label="判别服务地址"
-                  placeholder="http://127.0.0.1:8000"
-                  :input-props="{ id: 'captureServiceUrl', spellcheck: 'false' }"
-                  :value="state.form.captureServiceUrl"
-                  @focus="setFocus('captureServiceUrl')"
-                  @blur="setFocus('')"
-                  @update:value="onServiceUrlInput"
-                  @change="onServiceUrlChange"
-                  @keydown.enter="onEnter"
-                />
-                <span class="field-hint">需兼容 /v1/systemone。模型与密钥沿用「决策服务」那组配置（在「记忆搜索 → 精排」页里填）。</span>
+                <span class="field-label">判别服务地址</span>
+                <p class="field-static">与「记忆搜索 → 精排 → 决策服务」共用同一个地址（<code>systemoneServiceUrl</code>），密钥与模型也在那一组里配。这一页不再单独维护。</p>
               </div>
             </div>
           </NTabPane>

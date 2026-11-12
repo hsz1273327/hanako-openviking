@@ -3385,14 +3385,14 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "captureFallbackNote：生效 / 开关本身关着返回空串 / 多个缺项按人话用、号连接",
     [
       captureFallbackNote({ early: true, earlyStored: true, missing: [] }),
-      captureFallbackNote({ early: false, earlyStored: false, missing: ["captureServiceUrl"] }),
+      captureFallbackNote({ early: false, earlyStored: false, missing: ["systemoneServiceUrl"] }),
       captureFallbackNote({
         early: false,
         earlyStored: true,
-        missing: ["captureServiceUrl", "systemoneServiceModel"],
+        missing: ["systemoneServiceUrl", "systemoneServiceModel"],
       }),
     ],
-    ["", "", "当前不提前提交：还缺 判别服务地址、决策服务模型"],
+    ["", "", "判别服务未配置，去「记忆搜索 → 精排」填"],
   );
 
   const capture = uiCode("components/CapturePanel.vue");
@@ -3418,7 +3418,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "captureServerFallback",
       "captureServerIdleSeconds",
       "captureModel",
-      "captureServiceUrl",
+      "systemoneServiceUrl",
     ].every((word) => capture.includes(word)) && capture.includes('aria-label="提前提交"'),
     capture.slice(0, 1400),
   );
@@ -3463,7 +3463,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         basePane.includes('aria-label="服务端兜底"') &&
         !basePane.includes('aria-label="提前提交"') &&
         !basePane.includes("captureModel") &&
-        !basePane.includes("captureServiceUrl"),
+        !basePane.includes("systemoneServiceUrl"),
       basePane.slice(0, 200),
     );
     check(
@@ -3472,16 +3472,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         (id) => llmPane.includes(`id: '${id}'`),
       ) &&
         llmPane.includes('aria-label="提前提交"') &&
-        !llmPane.includes("captureServiceUrl"),
+        !llmPane.includes("systemoneServiceUrl"),
       llmPane.slice(0, 200),
     );
     check(
-      "判别模型设置：提前提交 / 作用域 / 上下文 / 最少轮数 / 服务地址都在，且没有判断模型",
-      ["captureTopicScope", "captureContextTurns", "captureMinTurns", "captureServiceUrl"].every(
-        (id) => discPane.includes(`id: '${id}'`),
+      "判别模型设置：提前提交 / 作用域 / 上下文 / 最少轮数都在，服务地址只是一行只读说明",
+      ["captureTopicScope", "captureContextTurns", "captureMinTurns"].every((id) =>
+        discPane.includes(`id: '${id}'`),
       ) &&
         discPane.includes('aria-label="提前提交"') &&
-        !discPane.includes("captureModel"),
+        discPane.includes("记忆搜索 → 精排") &&
+        !discPane.includes("captureModel") &&
+        !discPane.includes("type=\"text\""),
       discPane.slice(0, 200),
     );
     check(
@@ -5707,7 +5709,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await cap.setCaptureForm("captureEarlyJudge", "discriminator");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 十四个新键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 十三个新键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
@@ -5718,7 +5720,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         cap.state.form.captureTopicCandidates,
         cap.state.form.captureServerIdleSeconds,
         cap.state.form.captureModel,
-        cap.state.form.captureServiceUrl,
         [cap.state.note.text, cap.state.note.bad],
       ],
       [
@@ -5734,7 +5735,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "capturePrompt",
           "captureServerFallback",
           "captureServerIdleSeconds",
-          "captureServiceUrl",
           "captureTemplate",
           "captureTopicCandidates",
           "captureTopicScope",
@@ -5746,7 +5746,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         9,
         777,
         "p/m",
-        "http://judge:1",
         ["写回设置已保存", false],
       ],
     );
@@ -8673,7 +8672,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       values: {
         ...llmBase,
         captureEarlyJudge: "discriminator",
-        captureServiceUrl: "http://judge:1",
+        systemoneServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
       },
       server: pending,
@@ -8792,7 +8791,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         captureCommitSchema: "2",
         captureEarlyCommit: false,
         captureEarlyJudge: "discriminator",
-        captureServiceUrl: "http://judge:1",
+        systemoneServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
         captureCommitTurns: "1",
       },
@@ -8884,7 +8883,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         captureCommitTurns: "1",
         captureTopicScope: "global",
         captureEarlyJudge: "discriminator",
-        captureServiceUrl: "http://judge:1",
+        systemoneServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
       },
       server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
@@ -9064,7 +9063,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         discMissing.captureEffectiveEarly,
         captureModeMissing(discMissing, "discriminator"),
       ],
-      [false, ["captureServiceUrl", "systemoneServiceModel"]],
+      [false, ["systemoneServiceUrl", "systemoneServiceModel"]],
     );
   }
 
@@ -11647,7 +11646,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       serverFallback: false,
       idleSeconds: "600",
       model: "",
-      serviceUrl: "",
       prompt: "",
       template: "",
       format: "",
@@ -11712,12 +11710,11 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       captureServerFallback: true,
       captureServerIdleSeconds: 900,
       captureModel: " acme/model ",
-      captureServiceUrl: "http://judge:1/",
       somethingUnknown: "ignore me",
     });
     const readBack = (await getConfig()).body;
     eq(
-      "合法一单九项整单落库（外加 captureCommitSchema=2），认不出的键不写，读回来是同一组值",
+      "合法一单八项整单落库（外加 captureCommitSchema=2），认不出的键不写，读回来是同一组值",
       [
         valid.status,
         valid.body.ok,
@@ -11730,7 +11727,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         readBack.serverFallback,
         readBack.idleSeconds,
         readBack.model,
-        readBack.serviceUrl,
         values.captureCommitSchema,
         "somethingUnknown" in values,
       ],
@@ -11746,10 +11742,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "captureServerFallback",
           "captureServerIdleSeconds",
           "captureModel",
-          "captureServiceUrl",
           "captureCommitSchema",
         ],
-        before + 10,
+        before + 9,
         true,
         "20",
         "global",
@@ -11757,7 +11752,6 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         true,
         "900",
         "acme/model",
-        "http://judge:1",
         "2",
         false,
       ],
@@ -11927,12 +11921,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [true, true, []],
     );
 
-    await postConfig({ captureEarlyJudge: "discriminator", captureServiceUrl: "" });
+    await postConfig({ captureEarlyJudge: "discriminator", systemoneServiceUrl: "" });
     const disc = (await getConfig()).body;
     eq(
       "换成判别模型但服务地址 / 决策服务模型都没配 → early 回落 false，缺项点名两个键",
       [disc.early, disc.missing],
-      [false, ["captureServiceUrl", "systemoneServiceModel"]],
+      [false, ["systemoneServiceUrl", "systemoneServiceModel"]],
     );
   }
 
@@ -19809,7 +19803,7 @@ check(
       {
         captureEarlyCommit: true,
         captureEarlyJudge: "discriminator",
-        captureServiceUrl: "http://judge:1",
+        systemoneServiceUrl: "http://judge:1",
         systemoneServiceModel: "judge-model",
       },
       logger,

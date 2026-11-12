@@ -262,7 +262,6 @@ export function createPanelStore(deps = {}) {
       captureServerFallback: false,
       captureServerIdleSeconds: 600,
       captureModel: "",
-      captureServiceUrl: "",
       // 写回判断题面：初始坐默认那段的草稿，首次 refresh 后以服务端投影为准。
       capturePrompt: "",
       captureTemplate: "",
@@ -317,7 +316,6 @@ export function createPanelStore(deps = {}) {
     "captureServerFallback",
     "captureServerIdleSeconds",
     "captureModel",
-    "captureServiceUrl",
     "capturePrompt",
     "captureTemplate",
     "captureFormat",
@@ -334,7 +332,6 @@ export function createPanelStore(deps = {}) {
     captureServerFallback: false,
     captureServerIdleSeconds: 600,
     captureModel: "",
-    captureServiceUrl: "",
     capturePrompt: "",
     captureTemplate: "",
     captureFormat: "",
@@ -402,7 +399,6 @@ export function createPanelStore(deps = {}) {
       captureServerFallback: out.serverFallback === true,
       captureServerIdleSeconds: Number.isFinite(idle) ? idle : 600,
       captureModel: typeof out.model === "string" ? out.model : "",
-      captureServiceUrl: typeof out.serviceUrl === "string" ? out.serviceUrl : "",
       capturePrompt: normalizeCapturePrompt(out.prompt),
       captureTemplate: normalizeCaptureTemplate(out.template),
       captureFormat: normalizeCaptureFormat(out.format),
@@ -832,7 +828,6 @@ export function createPanelStore(deps = {}) {
           ? captureConfirmed.captureServerIdleSeconds
           : state.form.captureServerIdleSeconds,
       captureModel: state.form.captureModel,
-      captureServiceUrl: state.form.captureServiceUrl,
       // 空串要原样发：空 = 用内置默认，是有意义的值，不能像数字那样替换成已确认值。
       capturePrompt: state.form.capturePrompt,
       captureTemplate: state.form.captureTemplate,

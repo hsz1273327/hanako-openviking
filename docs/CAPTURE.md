@@ -203,7 +203,8 @@ entry id 来自 JSONL 每条记录的 `id` 字段（8 位十六进制，配 `par
 
 - `llm`：宿主模型按格式回三行。`captureModel` 留空就用宿主辅助模型（utility），不算缺配置
 - `discriminator`：`/v1/systemone` 的 `choice` 题，选项 `t1..tN` 对应候选，`new` 对应
-  「不属于上面任何一个话题」。要 `captureServiceUrl` 与决策服务模型，缺一个都算没配好
+  「不属于上面任何一个话题」。要「记忆搜索 → 精排 → 决策服务」里的 `systemoneServiceUrl`
+  与决策服务模型，缺一个都算没配好
 
 答案解析（`parseTopicAnswer`）刻意宽容，先看「归属：」那一行，认不出再扫全文。
 简述只认「简述：」这一种字段名，字段之间夹空行不影响：
@@ -334,7 +335,9 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 （`captureTopicScope`）、上下文轮数（`captureContextTurns`）、最少触发轮数
 （`captureMinTurns`）、判断模型（`captureModel`）。
 
-「判别模型设置」：同一组前四项，最后一项换成判别服务地址（`captureServiceUrl`）。
+「判别模型设置」：同一组前四项，最后一项换成一行只读说明：判别服务地址与密钥在
+「记忆搜索 → 精排 → 决策服务」里配（`systemoneServiceUrl`），写回页不再单独维护地址。
+地址没配时，卡片上的红字是「判别服务未配置，去「记忆搜索 → 精排」填」。
 
 关闭模式下不出现提前提交、上下文轮数、最少触发轮数、判断模型与判别服务地址；
 这些值不会因为切模式被清掉，切回来还在。反过来，在「语言模型设置 / 判别模型设置」里把

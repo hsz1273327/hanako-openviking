@@ -27,7 +27,6 @@ import {
   CAPTURE_TOPIC_SCOPES,
   captureModeMissing,
   normalizeGateModel,
-  normalizeServiceUrl,
   promptForStorage,
   readSwitches,
   serializeCaptureCommitSchema,
@@ -68,7 +67,6 @@ async function project(ctx) {
     serverFallback: switches.captureServerFallback,
     idleSeconds: serializeCaptureIdleSeconds(switches.captureServerIdleSeconds),
     model: switches.captureModel,
-    serviceUrl: switches.captureServiceUrl,
     prompt: switches.capturePrompt,
     template: switches.captureTemplate,
     format: switches.captureFormat,
@@ -226,23 +224,6 @@ export default function registerCaptureRoutes(app, ctx) {
         return c.json({ ok: false, error: "captureModel 必须形如 provider/model" }, 400);
       }
       changes.push(["captureModel", value]);
-    }
-
-    // 判别服务地址：空串合法；非空必须是 http / https，存规范化后的串。
-    if (has(body, "captureServiceUrl")) {
-      if (typeof body.captureServiceUrl !== "string") {
-        return c.json({ ok: false, error: "captureServiceUrl 必须是字符串" }, 400);
-      }
-      const value = body.captureServiceUrl.trim();
-      if (!value) {
-        changes.push(["captureServiceUrl", ""]);
-      } else {
-        const normalized = normalizeServiceUrl(value);
-        if (!normalized) {
-          return c.json({ ok: false, error: "captureServiceUrl 必须是合法的 http(s) 地址" }, 400);
-        }
-        changes.push(["captureServiceUrl", normalized]);
-      }
     }
 
     // 判断题面：非字符串直接拒，超长整单拒；长度按用户提交的原文判断。
