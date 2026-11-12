@@ -377,6 +377,7 @@ import {
   resolveCaptureTemplate,
   parseTopicAnswer,
   deriveTopicTitle,
+  cleanTitleText,
   captureTags,
   captureDecision,
   createCaptureHandler,
@@ -8196,6 +8197,50 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     );
     eq(
+      "parseTopicAnswer：全角冒号 / 加粗 / 主题是 / 合在一行 都能拿到 label；只有归属时 label 为空",
+      [
+        parseTopicAnswer("主题：灯带\n归属：2", cands3).label,
+        parseTopicAnswer("**主题**：灯带\n归属：2", cands3).label,
+        parseTopicAnswer("主题是灯带\n归属是2", cands3).label,
+        parseTopicAnswer("主题：灯带 归属：2", cands3),
+        parseTopicAnswer("归属：2", cands3),
+      ],
+      [
+        "灯带",
+        "灯带",
+        "灯带",
+        { choice: 2, label: "灯带" },
+        { choice: 2, label: "" },
+      ],
+    );
+    eq(
+      "cleanTitleText：命令 / 路径 / 代码块 / 纯符号 → 空；markdown 装饰去掉",
+      [
+        cleanTitleText("cd /x && ls"),
+        cleanTitleText("/home/hsz/workspace"),
+        cleanTitleText("~/notes"),
+        cleanTitleText("```js"),
+        cleanTitleText("—— …"),
+        cleanTitleText("**注意**：xxx"),
+        cleanTitleText("# 报纸"),
+      ],
+      ["", "", "", "", "", "注意：xxx", "报纸"],
+    );
+    eq(
+      "deriveTopicTitle：第一条是命令就跳过，取后面像人话的那句；摘要没主题时用清洗后的第一条",
+      [
+        deriveTopicTitle([
+          { role: "user", content: "cd /x && ls" },
+          { role: "assistant", content: "**灯带**：接线" },
+        ]),
+        deriveTopicTitle([{ role: "user", content: "cd /x && ls" }]),
+      ],
+      [
+        { label: "灯带：接线", summary: "cd /x && ls" },
+        { label: "cd /x && ls", summary: "cd /x && ls" },
+      ],
+    );
+    eq(
       "parseTopicAnswer：回答里出现候选 label 原文就按那个候选认，长 label 优先",
       [
         parseTopicAnswer("我就是上线检查那段", cands3),
@@ -8236,7 +8281,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         { label: "第一行 第二行 第三行", summary: "先说话的是助手" },
-        { label: "灯带电源走线", summary: "层高还是 0.2" },
+        { label: "灯带电源走线", summary: "灯带电源走线" },
       ],
     );
 

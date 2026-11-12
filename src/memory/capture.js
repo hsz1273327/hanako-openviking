@@ -148,7 +148,8 @@ function stripDecoration(text) {
 /** 一行里冒号后面的那段值；认全角与半角冒号，允许行首空格与 markdown 装饰。 */
 function fieldValue(line, name) {
   const cleaned = stripDecoration(line).replace(/^[\s#\-]+/, "");
-  const match = cleaned.match(new RegExp(`^${name}\\s*[：:]\\s*(.*)$`));
+  // 冒号（全角/半角）与「是」都认：模型常写「主题是…」「**主题**：…」。
+  const match = cleaned.match(new RegExp(`^${name}\\s*(?:[：:]|是)\\s*(.*)$`));
   return match ? match[1].trim() : "";
 }
 
@@ -192,7 +193,9 @@ export function parseTopicAnswer(text, candidates) {
   for (const line of lines) {
     const theme = fieldValue(line, "主题");
     if (theme) {
-      label = stripDecoration(theme).replace(/\s+/g, " ").trim();
+      // 主题与归属写在同一行时，只取「归属」之前那截。
+      const cut = theme.split(/(?:^|\s)归属\s*(?:[：:]|是)/)[0];
+      label = stripDecoration(cut).replace(/\s+/g, " ").trim();
       break;
     }
   }
@@ -249,6 +252,28 @@ function oneLine(text, max) {
   return clipChars(collapsed, max);
 }
 
+/** 命令行 / 路径 / 代码块这类开头不像话题标题，清洗后返回空串。 */
+const COMMAND_PREFIX =
+  /^(?:cd|git|npm|pnpm|yarn|npx|ls|cat|head|tail|grep|rg|find|node|python3?|pip3?|uv|curl|wget|docker|make|sudo|brew|ssh|scp|rsync|chmod|mkdir|rm|mv|cp|sed|awk|tar|systemctl|journalctl)\b/i;
+
+/**
+ * 把一段原文清洗成能当标题的一句：去 markdown 装饰与行首标记，跳过路径、代码块、
+ * 命令行、纯符号。返回空串表示「这句不像人话」，由调用方继续找下一句。
+ */
+export function cleanTitleText(text) {
+  if (String(text ?? "").trimStart().startsWith("```")) return "";
+  const stripped = stripDecoration(text)
+    .replace(/^[\s#>\-+]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return "";
+  if (stripped.startsWith("```")) return "";
+  if (stripped.startsWith("/") || stripped.startsWith("~")) return "";
+  if (COMMAND_PREFIX.test(stripped)) return "";
+  if (!/[0-9A-Za-z\u4e00-\u9fff]/.test(stripped)) return "";
+  return stripped;
+}
+
 /**
  * 新话题的 label / summary 就地派生，不再多花一次模型调用。
  * label 优先用判断器给的「主题」，没有就退回本段第一条 user 消息（没有 user 用第一条）。
@@ -258,8 +283,26 @@ export function deriveTopicTitle(segment, theme = "") {
   const list = Array.isArray(segment) ? segment : [];
   const first = list[0];
   const firstUser = list.find((message) => message?.role === "user") || first;
-  const label = oneLine(String(theme ?? "").trim() ? theme : firstUser?.content, 24);
-  const summary = oneLine(first?.content, 80);
+  const fromTheme = cleanTitleText(theme);
+  // 模型给了主题就优先用；没有主题才从本段消息里找第一句像人话的。
+  let labelText = fromTheme;
+  if (!labelText) {
+    // 优先从 user 消息里找（用户的话更像话题），再轮到其它角色。
+    const ordered = [firstUser, ...list.filter((message) => message !== firstUser)];
+    for (const message of ordered) {
+      const candidate = cleanTitleText(message?.content);
+      if (candidate) {
+        labelText = candidate;
+        break;
+      }
+    }
+  }
+  // 一条像样的都没有：退回原文（至少能看见是什么），不要凭空造标题。
+  if (!labelText) labelText = String(theme ?? "").trim() || String(firstUser?.content ?? "");
+  const label = oneLine(labelText, 24);
+  // 摘要同样优先用模型的主题句；没有才用清洗后的第一条消息。
+  const summarySource = fromTheme || cleanTitleText(first?.content) || first?.content;
+  const summary = oneLine(summarySource, 80);
   return { label: label || "新话题", summary };
 }
 
@@ -397,7 +440,29 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
         timeoutMs: CAPTURE_ASK_TIMEOUT_MS,
         maxTokens: CAPTURE_ASK_MAX_TOKENS,
       });
+      // 只打前 300 字与行数：用来分辨「模型没给主题」还是「给了但没解析出来」。
+      const rawAnswer = String(answer ?? "");
+      let answerHead = "";
+      try {
+        answerHead = JSON.stringify(rawAnswer.slice(0, 300));
+        sdk.logger?.debug?.(
+          `openviking topic answer: chars=${Array.from(rawAnswer).length} lines=${rawAnswer.split(/\r?\n/).length} head=${answerHead}`,
+        );
+      } catch {
+        /* 日志不能影响判断 */
+      }
       const parsed = parseTopicAnswer(answer, pool);
+      // 宿主日志不落 debug（实测 0 条 DEBUG），新话题又没解析出主题时用 warn 再打一条：
+      // 这正是会退回「第一句前 24 字」的那条路，不刷正常回答。
+      if (parsed?.choice === "new" && !parsed.label) {
+        try {
+          sdk.logger?.warn?.(
+            `openviking topic answer has no label: chars=${Array.from(rawAnswer).length} lines=${rawAnswer.split(/\r?\n/).length} head=${answerHead}`,
+          );
+        } catch {
+          /* 日志不能影响判断 */
+        }
+      }
       if (!parsed) return null;
       if (parsed.choice === "new") {
         return { kind: "new", ...deriveTopicTitle(current, parsed.label) };
