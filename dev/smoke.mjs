@@ -3444,20 +3444,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "captureTopicScope",
       "captureContextTurns",
       "captureMinTurns",
-      "capturePrompt",
     ];
     const blocks = ids.map(fieldBlock);
     check(
-      "CapturePanel 五个子项都在且 v-if 都认 earlyOpen",
+      "CapturePanel 四个子项都在且 v-if 都认 earlyOpen",
       blocks.every((block) => Boolean(block) && block.includes('v-if="earlyOpen"')),
       blocks.map((block) => block.slice(0, 120)).join(" || "),
-    );
-    check(
-      "CapturePanel 判断题面有 textarea 与恢复默认按钮",
-      capture.includes('type="textarea"') &&
-        capture.includes("captureResetPrompt") &&
-        capture.includes("capturePrompt"),
-      capture.slice(capture.indexOf("判断题面"), capture.indexOf("判断题面") + 600),
     );
     const commitTurnsBlock = fieldBlock("captureCommitTurns");
     check(

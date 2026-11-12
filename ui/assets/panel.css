@@ -714,6 +714,7 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 }
 .topic-tools { margin-bottom: 8px; max-width: 320px; }
 .topic-table { max-width: 100%; }
+.topic-tabs .n-tabs-pane-wrapper { margin-top: 6px; }
 .topic-table .n-data-table-th {
   font-size: 13px;
   font-weight: 600;
