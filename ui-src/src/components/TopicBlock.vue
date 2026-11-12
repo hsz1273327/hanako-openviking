@@ -289,9 +289,8 @@ onMounted(load);
           </div>
       </NTabPane>
 
-      <NTabPane name="prompts" tab="提示词">
-        <div class="topic-pane" :key="'prompts'">
-          <!-- 判断题面：写出题面那一句，留空 = 内置默认问法。 -->
+      <NTabPane name="prompt" tab="判断题面">
+        <div class="topic-pane" :key="'prompt'">
           <div class="field">
             <div class="prompt-head">
               <label for="capturePrompt">判断题面</label>
@@ -301,7 +300,7 @@ onMounted(load);
             <NInput
               type="textarea"
               size="small"
-              :autosize="{ minRows: 5, maxRows: 16 }"
+              :autosize="{ minRows: 8, maxRows: 24 }"
               :maxlength="CAPTURE_PROMPT_MAX"
               :input-props="{ id: 'capturePrompt', spellcheck: 'false' }"
               :value="configState.form.capturePrompt"
@@ -312,8 +311,11 @@ onMounted(load);
             />
             <span class="field-hint">提前提交时共用这一句，留空 = 内置那句默认问法。判别模型的选项由话题表自动生成，这一格只决定怎么问。</span>
           </div>
+        </div>
+      </NTabPane>
 
-          <!-- 题面骨架：五个占位符；缺 current 占位符会被判无效并回退内置模板。 -->
+      <NTabPane name="template" tab="题面骨架">
+        <div class="topic-pane" :key="'template'">
           <div class="field">
             <div class="prompt-head">
               <label for="captureTemplate">题面骨架</label>
@@ -323,7 +325,7 @@ onMounted(load);
             <NInput
               type="textarea"
               size="small"
-              :autosize="{ minRows: 13, maxRows: 13 }"
+              :autosize="{ minRows: 16, maxRows: 30 }"
               :maxlength="CAPTURE_TEMPLATE_MAX"
               :input-props="{ id: 'captureTemplate', spellcheck: 'false' }"
               :value="configState.form.captureTemplate"
@@ -334,8 +336,11 @@ onMounted(load);
             />
             <span class="field-hint" v-pre>占位符：{{question}} 题面、{{candidates}} 已有话题、{{previous}} 之前对话、{{current}} 当前对话、{{format}} 答案格式。必须包含 {{current}}，否则回退内置模板并记一条警告。</span>
           </div>
+        </div>
+      </NTabPane>
 
-          <!-- 答案格式：填进骨架里 {{format}} 的那一段，留空 = 内置三行格式。 -->
+      <NTabPane name="format" tab="答案格式">
+        <div class="topic-pane" :key="'format'">
           <div class="field">
             <div class="prompt-head">
               <label for="captureFormat">答案格式</label>
@@ -345,7 +350,7 @@ onMounted(load);
             <NInput
               type="textarea"
               size="small"
-              :autosize="{ minRows: 8, maxRows: 18 }"
+              :autosize="{ minRows: 12, maxRows: 24 }"
               :maxlength="CAPTURE_FORMAT_MAX"
               :input-props="{ id: 'captureFormat', spellcheck: 'false' }"
               :value="configState.form.captureFormat"
@@ -356,7 +361,7 @@ onMounted(load);
             />
             <span class="field-hint" v-pre>这一段会替换题面骨架里的 {{format}} 占位符；留空 = 内置的三行格式（主题 / 简述 / 归属）。模型答歪时先改这里：行数、字段名、要素顺序都由它决定。</span>
           </div>
-          </div>
+        </div>
       </NTabPane>
     </NTabs>
 
