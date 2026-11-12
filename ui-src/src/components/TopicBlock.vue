@@ -7,15 +7,7 @@
 // 删除只动本地记录，确认后把那一行从列表里去掉，不整表重拉。
 // 样式在 ui/assets/panel.css，组件不写 <style>。
 import { computed, h, onMounted, ref } from "vue";
-import {
-  NButton,
-  NCard,
-  NCollapse,
-  NCollapseItem,
-  NDataTable,
-  NInput,
-  NPopconfirm,
-} from "naive-ui";
+import { NButton, NCard, NDataTable, NInput, NPopconfirm } from "naive-ui";
 import {
   filterTopics,
   topicRowView,
@@ -25,13 +17,7 @@ import { useTopics } from "../composables/useTopics.js";
 
 const { state, load, beginEdit, cancelEdit, setDraft, submitLabel, remove } = useTopics();
 
-// 默认收起：没有展开项。展开状态只是本组件的视图状态，不进 store。
-const expanded = ref([]);
 const query = ref("");
-
-function onExpanded(names) {
-  expanded.value = Array.isArray(names) ? names : [];
-}
 
 const filtered = computed(() => filterTopics(state.topics, query.value));
 const rows = computed(() => filtered.value.map((topic) => topicRowView(topic, Date.now())));
@@ -170,37 +156,34 @@ onMounted(load);
       <span id="topicCount" class="topic-count">{{ topicsCountText(state.topics.length) }}</span>
     </template>
 
-    <NCollapse :expanded-names="expanded" @update:expanded-names="onExpanded">
-      <NCollapseItem title="话题列表" name="topics">
-        <div class="topic-tools">
-          <NInput
-            id="topicSearch"
-            size="small"
-            clearable
-            placeholder="按标签或摘要过滤"
-            aria-label="按标签或摘要过滤"
-            :input-props="{ spellcheck: 'false' }"
-            :value="query"
-            @update:value="(value) => (query = value ?? '')"
-          />
-        </div>
+    <div class="topic-tools">
+      <NInput
+        id="topicSearch"
+        size="small"
+        clearable
+        placeholder="按标签或摘要过滤"
+        aria-label="按标签或摘要过滤"
+        :input-props="{ spellcheck: 'false' }"
+        :value="query"
+        @update:value="(value) => (query = value ?? '')"
+      />
+    </div>
 
-        <div v-if="rows.length" class="topic-table">
-          <NDataTable
-            size="small"
-            :columns="columns"
-            :data="rows"
-            :row-key="(row) => row.id"
-            :pagination="false"
-            :max-height="320"
-            :row-props="rowProps"
-            :bordered="false"
-          />
-        </div>
+    <!-- 表格直接铺开，没有折叠壳；行数超过 8 行才启用表体内部滚动。 -->
+    <div v-if="rows.length" class="topic-table">
+      <NDataTable
+        size="small"
+        :columns="columns"
+        :data="rows"
+        :row-key="(row) => row.id"
+        :pagination="false"
+        :max-height="rows.length > 8 ? 320 : undefined"
+        :row-props="rowProps"
+        :bordered="false"
+      />
+    </div>
 
-        <p v-else class="topic-empty">还没有话题</p>
-      </NCollapseItem>
-    </NCollapse>
+    <p v-else class="topic-empty">还没有话题</p>
 
     <p v-if="state.note" class="topic-note" :class="{ bad: state.noteBad }">{{ state.note }}</p>
   </NCard>

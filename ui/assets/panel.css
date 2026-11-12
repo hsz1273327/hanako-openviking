@@ -720,7 +720,8 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   opacity: 0.95;
 }
 .topic-table .n-data-table-th,
-.topic-table .n-data-table-td { padding: 6px 8px; vertical-align: middle; }
+.topic-table .n-data-table-td { padding: 5px 8px; vertical-align: middle; }
+.topic-table .n-data-table-td { line-height: 1.45; }
 .topic-table .n-data-table-td { overflow: hidden; }
 .topic-table .n-data-table-th__title { white-space: nowrap; }
 /* dormant 行整行变浅；状态列本来就写着「沉睡」，颜色只是辅助。 */
