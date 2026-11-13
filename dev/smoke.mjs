@@ -776,6 +776,7 @@ function recallSdk({ values = {}, fetchImpl, dataDir, logger, reads, models }) {
     logger: {
       info: (...args) => sink.info?.(...args),
       warn: (...args) => sink.warn?.(...args),
+      debug: (...args) => sink.debug?.(...args),
     },
   };
 }
@@ -3429,6 +3430,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "当前话题：发布窗口 —— 定在周四\n\n新的对话：\n",
     ],
   );
+  check(
+    "候选池渲染每条都是「标签 —— 简述」，简述跟着标签一起进题面",
+    (() => {
+      const rendered = renderTopicPrompt(
+        [],
+        [{ role: "user", content: "新的" }],
+        [
+          { label: "发布窗口", summary: "周四上线" },
+          { label: "灯带", summary: "电源走线" },
+        ],
+        "题面",
+        "格式",
+        "{{candidates}}\n{{current}}",
+      );
+      return rendered.includes("[1] 发布窗口 —— 周四上线") &&
+        rendered.includes("[2] 灯带 —— 电源走线");
+    })(),
+  );
+
   eq(
     "一致性题两条 criteria 的名字固定是 same / changed",
     Object.keys(CAPTURE_CONSISTENCY_CRITERIA),
@@ -8509,6 +8529,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       verdict: { kind: "new", label: "发布窗口", summary: "周四上线" },
       sessionId: "s1",
       at: "2026-01-01T00:00:00.000Z",
+      label: "发布窗口",
+      summary: "周四上线",
     });
     const second = recordSegment(table, {
       verdict: { kind: "existing", id: first.topic.id },
@@ -8528,6 +8550,35 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         second.topic.lastSeenAt,
       ],
       [true, 1, true, 2, false, 2, ["s1", "s2"], "2026-01-02T00:00:00.000Z"],
+    );
+
+    const evolved = recordSegment(table, {
+      verdict: { kind: "existing", id: first.topic.id },
+      sessionId: "s1",
+      at: "2026-01-03T00:00:00.000Z",
+      summary: "周四上线；这一段补上了回滚方案与灰度顺序。",
+    });
+    eq(
+      "recordSegment：归到已有话题时只更新 summary，label 不动，段数继续加",
+      [
+        evolved.topic.summary,
+        evolved.topic.label,
+        evolved.previousSummary,
+        evolved.summaryUpdated,
+        evolved.topic.segments,
+      ],
+      ["周四上线；这一段补上了回滚方案与灰度顺序。", "发布窗口", "周四上线", true, 3],
+    );
+    const kept = recordSegment(table, {
+      verdict: { kind: "existing", id: first.topic.id },
+      sessionId: "s1",
+      at: "2026-01-04T00:00:00.000Z",
+      summary: "",
+    });
+    eq(
+      "recordSegment：模型没给简述（空串）时保留旧描述，不拿空串盖掉",
+      [kept.topic.summary, kept.summaryUpdated, kept.topic.segments],
+      ["周四上线；这一段补上了回滚方案与灰度顺序。", false, 4],
     );
 
     const serialDir = path.join(root, "topics-serialize");
@@ -8681,7 +8732,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           ]),
       });
 
-    const sameModel = twoStepModel("2");
+    const sameModel = twoStepModel("2\n简述：发布窗口与回滚方案合并后的完整描述");
+    const summaryLogs = [];
     const same = await runCapture({
       token: "topic-same",
       lines,
@@ -8691,6 +8743,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       server: pending,
       topics: existing,
       topicId,
+      logger: { debug: (message) => summaryLogs.push(String(message)) },
     });
     const sameCommit = same.calls.find(
       (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
@@ -8706,6 +8759,26 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         same.report.mode,
       ],
       [true, true, "t_77777777-7777-4777-8777-777777777777", 2, false, "llm"],
+    );
+    eq(
+      "归到已有话题时 summary 换成模型写的合并描述，label 不变",
+      (() => {
+        const topic = readTopics(same.stateDir).topics.find(
+          (item) => item.id === "t_77777777-7777-4777-8777-777777777777",
+        );
+        return [topic?.summary, topic?.label];
+      })(),
+      ["发布窗口与回滚方案合并后的完整描述", "另一件事"],
+    );
+    check(
+      "简述更新打一条 debug 日志：更新前后各前 40 字",
+      summaryLogs.some(
+        (line) =>
+          line.includes("topic summary updated") &&
+          line.includes("别的模块") &&
+          line.includes("发布窗口与回滚方案"),
+      ),
+      JSON.stringify(summaryLogs),
     );
     eq(
       "提前提交的 commit 带三件套 tags（id / seq / label）",
@@ -8731,6 +8804,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           "归属：<已有话题编号，或 新>",
         ),
       String(sameModel.calls.stream[1]?.messages?.[0]?.content || ""),
+    );
+
+    const longSummaryModel = twoStepModel(`2\n简述：${"简".repeat(600)}`);
+    const longSummary = await runCapture({
+      token: "topic-summary-long",
+      lines,
+      cursor: judgeCursor,
+      values: llmBase,
+      models: longSummaryModel.models,
+      server: pending,
+      topics: existing,
+      topicId,
+    });
+    eq(
+      "归到已有话题的简述超 500 字：截到 500，label 仍然不变",
+      (() => {
+        const topic = readTopics(longSummary.stateDir).topics.find(
+          (item) => item.id === "t_77777777-7777-4777-8777-777777777777",
+        );
+        return [topic?.summary?.length, topic?.label];
+      })(),
+      [500, "另一件事"],
     );
 
     const newModel = twoStepModel("new");

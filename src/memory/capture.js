@@ -521,6 +521,20 @@ function reportOf(partial = {}) {
   };
 }
 
+/** 话题简述演进：只打更新前后的前 40 字，不落正文。 */
+function logTopicSummary(sdk, outcome) {
+  if (!outcome || outcome.isNew || !outcome.summaryUpdated) return;
+  try {
+    const before = clipChars(outcome.previousSummary, 40);
+    const after = clipChars(outcome.topic?.summary, 40);
+    sdk.logger?.debug?.(
+      `openviking topic summary updated: ${outcome.topic?.label || ""} ${before} -> ${after}`,
+    );
+  } catch {
+    /* 日志不能影响写回 */
+  }
+}
+
 function errorText(error) {
   return String(error?.message || error || "unknown");
 }
@@ -607,7 +621,13 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
       if (parsed.choice === "new") {
         return { kind: "new", ...deriveTopicTitle(current, parsed.label, parsed.summary) };
       }
-      return { kind: "existing", id: pool[parsed.choice - 1].id };
+      // 归到已有话题时把模型写的合并简述带回去，recordSegment 用它更新 summary；
+      // label 不在这一支里改：话题名要保持稳定。
+      return {
+        kind: "existing",
+        id: pool[parsed.choice - 1].id,
+        summary: parsed.summary,
+      };
     };
   }
 
@@ -821,10 +841,12 @@ export async function anchorSegment({
         sessionId,
         at,
         label: topicVerdict.label,
-        summary: topicVerdict.summary,
+        // 简述上限 500：模型回答已截过一次，这里兜住直接调用 anchorSegment 的路径。
+        summary: clipTopicSummary(topicVerdict.summary),
       }),
     { onWriteError: warnLine },
   );
+  logTopicSummary(sdk, recorded);
   return {
     topic: {
       id: recorded.topic.id,
@@ -890,7 +912,7 @@ export async function commitSegment({
         sessionId,
         at,
         label: topicVerdict.label,
-        summary: topicVerdict.summary,
+        summary: clipTopicSummary(topicVerdict.summary),
       });
       const tags = captureTags(outcome.topic, outcome.seq);
       await client.commit(sessionId, { tags });
@@ -898,6 +920,7 @@ export async function commitSegment({
     },
     { onWriteError: warnLine },
   );
+  logTopicSummary(sdk, recorded);
 
   // 提交成功之后的游标。
   const next = markCommitted(base, {

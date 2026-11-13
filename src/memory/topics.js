@@ -192,12 +192,23 @@ export function recordSegment(table, { verdict, sessionId, at, label, summary } 
     existingId && table.topics.find((topic) => topic && topic.id === existingId);
 
   if (existing) {
+    // 归到已有话题时只更新简述：话题名要保持稳定，归一次换一次名字会让人认不出。
+    // 空简述 = 模型这一段没给/没解析到，保留旧描述，不拿空串盖掉。
+    const previousSummary = stringOf(existing.summary);
+    const nextSummary = stringOf(summary);
+    if (nextSummary) existing.summary = nextSummary;
     existing.segments = positiveInt(existing.segments) + 1;
     if (when) existing.lastSeenAt = when;
     if (session && !existing.sessionIds.includes(session)) {
       existing.sessionIds.push(session);
     }
-    return { topic: existing, seq: existing.segments, isNew: false };
+    return {
+      topic: existing,
+      seq: existing.segments,
+      isNew: false,
+      previousSummary,
+      summaryUpdated: Boolean(nextSummary) && nextSummary !== previousSummary,
+    };
   }
 
   const topic = {
