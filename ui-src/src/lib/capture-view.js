@@ -140,6 +140,40 @@ export function captureFormatStatus(text) {
   return "已修改";
 }
 
+/**
+ * 内置默认一致性题面（提前提交第一步）。与 src/ov/prompt-defaults.js 的
+ * DEFAULT_CAPTURE_CONSISTENCY_PROMPT 逐字一致；空串 = 用这一份。
+ */
+export const DEFAULT_CAPTURE_CONSISTENCY_PROMPT = [
+  "下面有一个正在进行的对话话题，和一段新的对话。",
+  "",
+  "判断这段新对话是不是还在讲同一件事。",
+  "",
+  "同一件事：在推进同一个问题、同一个模块、同一个决定。",
+  "换了：转到另一件事、另一个问题、另一个地方去了。",
+  "",
+  "只回一个词：一致 / 换了",
+].join("\n");
+
+export function normalizeCaptureConsistencyPrompt(value) {
+  if (typeof value !== "string" || !value) return "";
+  return Array.from(value).slice(0, CAPTURE_PROMPT_MAX).join("");
+}
+
+/** 空配置坐默认全文当草稿，touched 之后不再盖他。 */
+export function captureConsistencyDraft(configValue, touched = false) {
+  const value = normalizeCaptureConsistencyPrompt(configValue);
+  if (value) return value;
+  return touched ? "" : DEFAULT_CAPTURE_CONSISTENCY_PROMPT;
+}
+
+export function captureConsistencyStatus(text) {
+  const value = normalizeCaptureConsistencyPrompt(text);
+  if (value === DEFAULT_CAPTURE_CONSISTENCY_PROMPT) return "当前为默认题面";
+  if (!value.trim()) return "已修改 · 题面为空时使用内置默认";
+  return "已修改";
+}
+
 /** 强制轮数 / 上下文轮数 / 最少轮数 / 候选池 / 空闲秒数的范围：与后端路由 / manifest 同一组边界。 */
 export const CAPTURE_TURNS_RANGE = Object.freeze([1, 100]);
 export const CAPTURE_CONTEXT_RANGE = Object.freeze([1, 20]);
@@ -219,6 +253,15 @@ export function captureStatusRows(data, opts = {}) {
  * 设置页的提示：提前提交存着开着，但判断方式缺配置，所以这一轮没生效。
  * 开关本身关着（或已经生效）时不提示。
  */
+/** 话题子页的四个页签：顺序与页面一致，默认停在话题列表。 */
+export const CAPTURE_TOPIC_TABS = Object.freeze(["topics", "prompt", "template", "format"]);
+export const DEFAULT_CAPTURE_TOPIC_TAB = "topics";
+
+/** 只认四个已知页名，其余一律回话题列表。 */
+export function normalizeCaptureTopicTab(value) {
+  return CAPTURE_TOPIC_TABS.includes(value) ? value : DEFAULT_CAPTURE_TOPIC_TAB;
+}
+
 /**
  * 判断方式下拉：关闭 / 大语言模型固定，判别模型只有决策服务配好才追加。
  *

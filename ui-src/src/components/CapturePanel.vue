@@ -41,7 +41,9 @@ import {
   CAPTURE_CONTEXT_RANGE,
   CAPTURE_IDLE_RANGE,
   CAPTURE_MIN_RANGE,
+  CAPTURE_PROMPT_MAX,
   CAPTURE_TURNS_RANGE,
+  DEFAULT_CAPTURE_TOPIC_TAB,
   captureFallbackNote,
   captureJudgeOptions,
 } from "../lib/capture-view.js";
@@ -55,11 +57,22 @@ const {
   setCaptureForm,
   setCaptureNumber,
   setFocus,
+  touchCaptureConsistencyPrompt,
+  setCaptureConsistencyPrompt,
+  resetCaptureConsistencyPrompt,
+  captureConsistencyStatusOf,
 } = useConfig();
 const { options } = useModels();
 
 // 子页签只是本页视图状态，不进 store、不触发任何读 / 写 / 重算。
 const activeTab = ref(DEFAULT_CAPTURE_TAB);
+// 话题页自己的四个页签：提到这一层，写回页的入口才能直接落到「判断题面」。
+const topicTab = ref(DEFAULT_CAPTURE_TOPIC_TAB);
+
+function goPrompt() {
+  selectTab("topics");
+  topicTab.value = "prompt";
+}
 
 function selectTab(name) {
   activeTab.value = normalizeCaptureTab(name);
@@ -114,6 +127,15 @@ const scopeOptions = Object.freeze([
 ]);
 const modelOptions = computed(() => options(state.form.captureModel));
 const fallbackNote = computed(() => captureFallbackNote(state.captureConfig));
+const consistencyStatusText = computed(() => captureConsistencyStatusOf());
+
+function onConsistencyInput(value) {
+  touchCaptureConsistencyPrompt(value ?? "");
+}
+
+function onConsistencyChange(value) {
+  setCaptureConsistencyPrompt(value ?? "");
+}
 
 function onEnter(event) {
   event.preventDefault();
@@ -336,6 +358,32 @@ function onEnter(event) {
                 />
                 <span class="field-hint">留空 = 用宿主的辅助模型（utility）；非空形如 provider/model。</span>
               </div>
+
+              <div class="field">
+                <div class="prompt-head">
+                  <label for="captureConsistencyPrompt">一致性判断题面</label>
+                  <span id="captureConsistencyPromptStatus" class="prompt-status">{{ consistencyStatusText }}</span>
+                  <NButton
+                    id="captureResetConsistencyPrompt"
+                    size="small"
+                    quaternary
+                    @click="resetCaptureConsistencyPrompt()"
+                  >恢复默认</NButton>
+                </div>
+                <NInput
+                  type="textarea"
+                  size="small"
+                  :rows="3"
+                  :maxlength="CAPTURE_PROMPT_MAX"
+                  :input-props="{ id: 'captureConsistencyPrompt', spellcheck: 'false' }"
+                  :value="state.form.captureConsistencyPrompt"
+                  @focus="setFocus('captureConsistencyPrompt')"
+                  @blur="setFocus(''); onConsistencyChange(state.form.captureConsistencyPrompt)"
+                  @update:value="onConsistencyInput"
+                  @keydown.enter.exact="onEnter"
+                />
+                <span class="field-hint">提前提交的第一步只用这一句判断「还在不在当前话题」；决定归到哪个话题仍是「话题」那三块的事。留空 = 用内置默认。</span>
+              </div>
             </div>
           </NTabPane>
 
@@ -421,6 +469,14 @@ function onEnter(event) {
         <!-- 文案整段写在一行里：模板里的换行会被压成一个空格，中文句子中间会多出空档。 -->
         <NText class="hint-line" depth="3">打开后每轮增量提交到 OpenViking，由服务端抽成可检索的长期记忆；写在本机门牌（peer）下，不覆盖其它机器的记忆；记忆搜索与写回互不影响。</NText>
       </NCard>
+
+      <!-- 语言模型设置页的提示词入口：放在卡片末尾，正文仍然只在「话题」那三块里维护。 -->
+      <div v-if="judgeMode === 'llm'" class="prompt-entry">
+        <span class="field-label">判断用的提示词</span>
+        <p class="field-static">大语言模型按「话题 → 判断题面 / 题面骨架 / 答案格式」归类；按钮直接切过去。</p>
+        <NButton size="small" secondary @click="goPrompt">去编辑提示词</NButton>
+        <p class="field-static">默认值与占位符规则以那三块为准，这里不重复、也不预览改后的内容。</p>
+      </div>
     </div>
 
     <div
@@ -441,7 +497,7 @@ function onEnter(event) {
       :hidden="!capturePaneVisible(activeTab, 'topics')"
     >
       <!-- 话题表默认收起，展开只切显隐。 -->
-      <TopicBlock />
+      <TopicBlock v-model:tab="topicTab" />
     </div>
   </div>
 </template>

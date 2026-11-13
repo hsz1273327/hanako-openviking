@@ -383,6 +383,10 @@ import {
   clipTopicLabel,
   clipTopicSummary,
   captureTags,
+  parseConsistencyAnswer,
+  renderConsistencyPrompt,
+  renderConsistencyContext,
+  CAPTURE_CONSISTENCY_CRITERIA,
   captureDecision,
   createCaptureHandler,
 } from "../src/memory/capture.js";
@@ -416,6 +420,7 @@ import readline from "node:readline";
 // 前端那份同名规则：两边必须一模一样，否则页面查一份、卡片写另一份。
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
   DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE,
   GATE_PROMPT_RETIRED_DEFAULTS,
@@ -461,7 +466,11 @@ import {
   CAPTURE_TURNS_RANGE,
   DEFAULT_CAPTURE_PROMPT,
   captureFallbackNote,
+  DEFAULT_CAPTURE_CONSISTENCY_PROMPT as UI_DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
+  captureConsistencyDraft,
+  captureConsistencyStatus,
   captureJudgeOptions,
+  normalizeCaptureTopicTab,
   captureFormatDraft,
   captureFormatStatus,
   capturePromptDraft,
@@ -3397,6 +3406,48 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 
   eq(
+    "parseConsistencyAnswer：一致 / 同 / 继续 / same 算一致，换了 / 不同 / 新 / diff 算换了，其余没答",
+    [
+      ["一致", "同", "继续", "same", "Same."],
+      ["换了", "不同", "不一致", "新", "diff", "Different topic"],
+      ["", "不知道", "也许吧"],
+    ].map((list) => list.map(parseConsistencyAnswer)),
+    [[true, true, true, true, true], [false, false, false, false, false, false], [null, null, null]],
+  );
+  eq(
+    "renderConsistencyPrompt：题面 + 当前话题 label/summary + 新的对话；上下文里不重复题面",
+    [
+      renderConsistencyPrompt(
+        { label: "发布窗口", summary: "定在周四" },
+        [{ role: "user", content: "还是周四吗" }],
+        "只回一个词",
+      ),
+      renderConsistencyContext({ label: "发布窗口", summary: "定在周四" }, []),
+    ],
+    [
+      "只回一个词\n\n当前话题：发布窗口 —— 定在周四\n\n新的对话：\n[用户] 还是周四吗",
+      "当前话题：发布窗口 —— 定在周四\n\n新的对话：\n",
+    ],
+  );
+  eq(
+    "一致性题两条 criteria 的名字固定是 same / changed",
+    Object.keys(CAPTURE_CONSISTENCY_CRITERIA),
+    ["same", "changed"],
+  );
+  eq(
+    "captureConsistencyDraft：空配置坐默认全文，touched 后留空；状态跟着默认 / 修改走",
+    [
+      captureConsistencyDraft(""),
+      captureConsistencyDraft("", true),
+      captureConsistencyDraft("我的题面"),
+      captureConsistencyStatus(UI_DEFAULT_CAPTURE_CONSISTENCY_PROMPT),
+      captureConsistencyStatus("我的题面"),
+      UI_DEFAULT_CAPTURE_CONSISTENCY_PROMPT === DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
+    ],
+    [UI_DEFAULT_CAPTURE_CONSISTENCY_PROMPT, "", "我的题面", "当前为默认题面", "已修改", true],
+  );
+
+  eq(
     "captureJudgeOptions：判别服务没配只有关闭 / 大语言模型，配好才追加判别模型",
     [
       captureJudgeOptions(false).map((item) => item.value),
@@ -3406,6 +3457,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ["off", "llm"],
       ["off", "llm", "discriminator"],
     ],
+  );
+
+  eq(
+    "normalizeCaptureTopicTab：四个页名原样，其余回话题列表",
+    ["prompt", "template", "format", "topics", "bogus", ""].map(normalizeCaptureTopicTab),
+    ["prompt", "template", "format", "topics", "topics", "topics"],
   );
 
   const capture = uiCode("components/CapturePanel.vue");
@@ -5722,7 +5779,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     await cap.setCaptureForm("captureEarlyJudge", "discriminator");
     const capturePosts = calls.filter((call) => call.method === "POST" && call.path === "/capture-config");
     eq(
-      "saveCapture 成功：整单只发一单，body 是 form 十三个新键，落地以回包为准",
+      "saveCapture 成功：整单只发一单，body 是 form 十四个新键，落地以回包为准",
       [
         capturePosts.length - beforePosts,
         Object.keys(capturePosts.at(-1)?.body || {}).sort(),
@@ -5739,6 +5796,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         1,
         [
           "captureCommitTurns",
+          "captureConsistencyPrompt",
           "captureContextTurns",
           "captureEarlyCommit",
           "captureEarlyJudge",
@@ -7579,9 +7637,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     return file;
   }
 
-  function prepareState(stateDir, id, { cursor, overrides } = {}) {
+  function prepareState(stateDir, id, { cursor, overrides, topicId } = {}) {
     patchSession(stateDir, id, {
-      capture: { cursor: normalizeCursor(cursor) },
+      capture: {
+        cursor: normalizeCursor(cursor),
+        ...(typeof topicId === "string" && topicId ? { topicId } : {}),
+      },
       ...(overrides ? { overrides } : {}),
     });
   }
@@ -7630,6 +7691,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     fileMissing = false,
     topics,
     topicsRaw,
+    topicId,
   }) {
     const dir = path.join(root, token);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -7637,7 +7699,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     // 模拟「会话刚建、JSONL 还没落盘」：父目录在，文件本身不存在。
     if (fileMissing) fs.rmSync(file, { force: true });
     const stateDir = path.join(dir, "state");
-    prepareState(stateDir, id, { cursor, overrides });
+    prepareState(stateDir, id, { cursor, overrides, topicId });
     fs.mkdirSync(stateDir, { recursive: true });
     if (topics) writeTopics(stateDir, topics);
     if (typeof topicsRaw === "string") {
@@ -8525,13 +8587,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
 
     eq(
-      "captureDecision 顺序：empty → 强制轮数（不归类）→ 关提前提交 → 最少轮数 → 基线 → 归类",
+      "captureDecision 顺序：empty → 强制轮数（两步都不走）→ 关提前提交 → 最少轮数 → 无缓存话题直接立基线",
       [
         await captureDecision({ pendingTurns: 0, forcedTurns: 2, early: true, classify: async () => ({ kind: "new" }) }),
         await captureDecision({ pendingTurns: 2, forcedTurns: 2, early: true, classify: async () => ({ kind: "new" }) }),
         await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: false, classify: async () => ({ kind: "new" }) }),
         await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: true, minTurns: 2, classify: async () => ({ kind: "new" }) }),
-        await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: true, minTurns: 1, previousEmpty: true, classify: async () => ({ kind: "new" }) }),
+        await captureDecision({ pendingTurns: 1, forcedTurns: 2, early: true, minTurns: 1, currentTopic: null, classify: async () => ({ kind: "new" }) }),
       ],
       [
         { commit: false, reason: "empty" },
@@ -8656,6 +8718,74 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       [true, true, 1, true],
     );
 
+    // 两步走：有缓存话题时先比一致性，一致就完全不调归类。
+    const consistentModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "一致" }]),
+    });
+    const consistent = await runCapture({
+      token: "topic-consistency-same",
+      lines,
+      cursor: judgeCursor,
+      values: llmBase,
+      models: consistentModel.models,
+      server: pending,
+      topics: existing,
+      topicId,
+    });
+    const consistentCommit = consistent.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "有缓存话题 + 第一步回一致：不提交、只问一次模型（归类零调用）",
+      [
+        consistent.report.committed,
+        Boolean(consistentCommit),
+        consistentModel.calls.stream.length,
+        consistent.report.pendingTurns,
+      ],
+      [false, false, 1, 1],
+    );
+
+    const changedModel = modelSdk({
+      stream: () =>
+        ndjsonResponse([
+          { type: "text-delta", delta: "换了\n主题：新的事\n简述：换了另一件事\n归属：新" },
+        ]),
+    });
+    const changed = await runCapture({
+      token: "topic-consistency-changed",
+      lines,
+      cursor: judgeCursor,
+      values: llmBase,
+      models: changedModel.models,
+      server: pending,
+      topics: existing,
+      topicId,
+    });
+    eq(
+      "有缓存话题 + 第一步回换了：提交，模型被问两次（先一致性、再归类）",
+      [changed.report.committed, changedModel.calls.stream.length, changed.report.topic?.isNew],
+      [true, 2, true],
+    );
+
+    const noCacheModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
+    });
+    const noCache = await runCapture({
+      token: "topic-consistency-no-cache",
+      lines,
+      cursor: judgeCursor,
+      values: llmBase,
+      models: noCacheModel.models,
+      server: pending,
+      topics: existing,
+    });
+    eq(
+      "没有缓存话题：直接提交，第一步不调（模型只被归类问一次）",
+      [noCache.report.committed, noCacheModel.calls.stream.length, noCache.report.topic?.id],
+      [true, 1, topicId],
+    );
+
     const themedModel = modelSdk({
       stream: () =>
         ndjsonResponse([
@@ -8720,6 +8850,64 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     );
 
+    // 判别模型的第一步：同样的 choice 题，只给 same / changed 两条 criteria。
+    const discSame = await runCapture({
+      token: "topic-consistency-disc-same",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        ...llmBase,
+        captureEarlyJudge: "discriminator",
+        systemoneServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+      },
+      server: pending,
+      topics: existing,
+      topicId,
+      judge: () => ({ answers: { q: { choice: "same", confidence: 0.9 } } }),
+    });
+    const discSameCalls = discSame.calls.filter(
+      (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
+    );
+    const discSameBody = bodyOf(discSameCalls[0]);
+    eq(
+      "判别模型第一步回 same：不提交，只问一次，criteria 只有 same / changed",
+      [
+        discSame.report.committed,
+        discSameCalls.length,
+        Object.keys(discSameBody.questions?.q?.criteria || {}),
+        discSameBody.questions?.q?.instructions,
+      ],
+      [false, 1, ["same", "changed"], DEFAULT_CAPTURE_CONSISTENCY_PROMPT],
+    );
+
+    let discStep = 0;
+    const discChanged = await runCapture({
+      token: "topic-consistency-disc-changed",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        ...llmBase,
+        captureEarlyJudge: "discriminator",
+        systemoneServiceUrl: "http://judge:1",
+        systemoneServiceModel: "judge-model",
+      },
+      server: pending,
+      topics: existing,
+      topicId,
+      judge: () => {
+        discStep += 1;
+        return discStep === 1
+          ? { answers: { q: { choice: "changed", confidence: 0.9 } } }
+          : { answers: { q: { choice: "new", confidence: 0.9 } } };
+      },
+    });
+    eq(
+      "判别模型第一步回 changed：进第二步归类，提交并新建话题",
+      [discChanged.report.committed, discChanged.report.topic?.isNew, discStep],
+      [true, true, 2],
+    );
+
     const failModel = modelSdk({
       stream: async () => {
         throw new Error("judge boom");
@@ -8734,6 +8922,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       models: failModel.models,
       server: pending,
       topics: existing,
+      topicId,
       logger: { warn: (message) => warnings.push(String(message)) },
     });
     const failedCommit = failed.calls.find(
@@ -8745,7 +8934,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         failed.report.committed,
         Boolean(failedCommit),
         failed.cursor.lastCommitCount,
-        warnings.some((message) => message.includes("topic judge failed")),
+        warnings.some((message) => message.includes("topic consistency check failed")),
       ],
       [false, false, 0, true],
     );
@@ -9702,87 +9891,134 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         ["u1", "a1", "u2", "a2"],
       ],
     );
+    const currentTopic = { id: "t_current", label: "当前话题", summary: "正在做的事" };
+    let forcedProbe = 0;
     let forcedAsked = 0;
     const forcedDecision = await captureDecision({
       early: true,
       pendingTurns: 3,
       forcedTurns: 3,
       minTurns: 2,
+      currentTopic,
+      probe: async () => {
+        forcedProbe += 1;
+        return false;
+      },
       classify: async () => {
         forcedAsked += 1;
         return { kind: "new" };
       },
     });
+    let tooFewProbe = 0;
     let tooFewAsked = 0;
     const tooFewDecision = await captureDecision({
       early: true,
       pendingTurns: 1,
       forcedTurns: 10,
       minTurns: 2,
+      currentTopic,
+      probe: async () => {
+        tooFewProbe += 1;
+        return false;
+      },
       classify: async () => {
         tooFewAsked += 1;
         return { kind: "new" };
       },
     });
+    let baselineProbe = 0;
     let baselineAsked = 0;
     const baselineDecision = await captureDecision({
       early: true,
       pendingTurns: 2,
       forcedTurns: 10,
       minTurns: 2,
-      previousEmpty: true,
+      currentTopic: null,
+      probe: async () => {
+        baselineProbe += 1;
+        return false;
+      },
       classify: async () => {
         baselineAsked += 1;
         return { kind: "new" };
       },
     });
-    let failedAsked = 0;
-    const failedDecision = await captureDecision({
+    let consistentAsked = 0;
+    const consistentDecision = await captureDecision({
       early: true,
       pendingTurns: 2,
       forcedTurns: 10,
       minTurns: 2,
+      currentTopic,
+      probe: async () => true,
       classify: async () => {
-        failedAsked += 1;
-        return null;
+        consistentAsked += 1;
+        return { kind: "existing", id: "t_other" };
       },
     });
+    let unknownAsked = 0;
+    const unknownDecision = await captureDecision({
+      early: true,
+      pendingTurns: 2,
+      forcedTurns: 10,
+      minTurns: 2,
+      currentTopic,
+      probe: async () => null,
+      classify: async () => {
+        unknownAsked += 1;
+        return { kind: "existing", id: "t_other" };
+      },
+    });
+    let threwAsked = 0;
     const threwDecision = await captureDecision({
       early: true,
       pendingTurns: 2,
       forcedTurns: 10,
       minTurns: 2,
+      currentTopic,
+      probe: async () => {
+        throw new Error("probe down");
+      },
       classify: async () => {
-        throw new Error("boom");
+        threwAsked += 1;
+        return { kind: "new" };
       },
     });
     eq(
-      "captureDecision：空 → forced（不归类）→ 关提前提交 → 太少 → 基线（不归类）→ 归类失败两种",
+      "captureDecision：forced / 太少 / 无缓存话题都不进第一步；一致不进第二步；第一步失败不归类",
       [
-        await captureDecision({ early: true, pendingTurns: 0, forcedTurns: 2 }),
         forcedDecision,
+        forcedProbe,
         forcedAsked,
-        await captureDecision({ early: false, pendingTurns: 1, forcedTurns: 2 }),
         tooFewDecision,
+        tooFewProbe,
         tooFewAsked,
         baselineDecision,
+        baselineProbe,
         baselineAsked,
-        failedDecision,
-        failedAsked,
+        consistentDecision,
+        consistentAsked,
+        unknownDecision,
+        unknownAsked,
         threwDecision,
+        threwAsked,
       ],
       [
-        { commit: false, reason: "empty" },
         { commit: true, reason: "turns" },
         0,
-        { commit: false, reason: "below-limit" },
+        0,
         { commit: false, reason: "too-few-turns" },
+        0,
         0,
         { commit: true, reason: "baseline" },
         0,
-        { commit: false, reason: "classify-failed" },
-        1,
-        { commit: false, reason: "classify-failed" },
+        0,
+        { commit: false, reason: "same-topic" },
+        0,
+        { commit: false, reason: "consistency-failed" },
+        0,
+        { commit: false, reason: "consistency-failed" },
+        0,
       ],
     );
 
@@ -9790,14 +10026,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const otherVerdict = { kind: "existing", id: "t_other" };
     const newVerdict = { kind: "new", label: "新事", summary: "" };
     eq(
-      "captureDecision：认到当前话题 → same-topic；认到别的话题 / 新话题 → topic 且 verdict 透出",
+      "captureDecision：换了才归类；归到当前话题仍不提交，归到别的话题 / 新话题提交并透出 verdict",
       [
         await captureDecision({
           early: true,
           pendingTurns: 2,
           forcedTurns: 10,
           minTurns: 2,
-          currentTopicId: "t_current",
+          currentTopic,
+          probe: async () => false,
           classify: async () => sameVerdict,
         }),
         await captureDecision({
@@ -9805,7 +10042,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           pendingTurns: 2,
           forcedTurns: 10,
           minTurns: 2,
-          currentTopicId: "t_current",
+          currentTopic,
+          probe: async () => false,
           classify: async () => otherVerdict,
         }),
         await captureDecision({
@@ -9813,6 +10051,8 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           pendingTurns: 2,
           forcedTurns: 10,
           minTurns: 2,
+          currentTopic,
+          probe: async () => false,
           classify: async () => newVerdict,
         }),
       ],
@@ -11685,6 +11925,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       idleSeconds: "600",
       model: "",
       prompt: "",
+      consistencyPrompt: "",
       template: "",
       format: "",
       judges: ["llm", "discriminator"],
@@ -11947,6 +12188,28 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
     // 收尾：清回空串，后面的断言按默认题面走。
     await postConfig({ capturePrompt: "" });
+
+    const consistencyText = "这段还在当前话题上吗？只回一致或换了。";
+    const consistencyWritten = await postConfig({
+      captureConsistencyPrompt: consistencyText,
+    });
+    eq(
+      "POST /capture-config 写入一致性判断题面：响应与投影都是原文",
+      [
+        consistencyWritten.status,
+        consistencyWritten.body.consistencyPrompt,
+        (await getConfig()).body.consistencyPrompt,
+      ],
+      [200, consistencyText, consistencyText],
+    );
+    const consistencyDefault = await postConfig({
+      captureConsistencyPrompt: DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
+    });
+    eq(
+      "POST /capture-config 提交一致性默认 → 落库空串，投影回到空串",
+      [consistencyDefault.status, writes.at(-2), (await getConfig()).body.consistencyPrompt],
+      [200, ["captureConsistencyPrompt", ""], ""],
+    );
   }
 
   // ---- 3. 提前提交生效 / 回落：llm 空模型不算缺，discriminator 才看服务配置 ----

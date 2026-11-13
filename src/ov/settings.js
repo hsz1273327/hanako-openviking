@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CAPTURE_PROMPT_RETIRED_DEFAULTS,
+  DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
   DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE,
   CAPTURE_TOPIC_QUESTION,
@@ -186,6 +187,8 @@ export const DEFAULTS = {
   captureModel: "",
   // 写回判断题面：空串 = 用内置那句默认问法（见 src/memory/capture.js）。
   capturePrompt: "",
+  // 提前提交第一步（一致性判断）的题面：空串 = 内置默认。
+  captureConsistencyPrompt: "",
   captureTemplate: "",
   // 记忆搜索总开关：只停读这一半，写回不受影响。
   recallEnabled: true,
@@ -239,6 +242,7 @@ export const DEFAULTS = {
 /** 八个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
 const PROMPT_DEFAULT_VALUES = Object.freeze({
   capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
+  captureConsistencyPrompt: Object.freeze([DEFAULT_CAPTURE_CONSISTENCY_PROMPT]),
   captureTemplate: Object.freeze([DEFAULT_CAPTURE_TEMPLATE]),
   captureFormat: Object.freeze([DEFAULT_CAPTURE_FORMAT]),
   gatePrompt: Object.freeze([DEFAULT_GATE_PROMPT, ...GATE_PROMPT_RETIRED_DEFAULTS]),
@@ -1283,6 +1287,10 @@ export async function readSwitches(sdk) {
     // 写回判断题面：提前提交时共用这一句，空串 = 运行时不变量那句默认问法。
     // 读取路径不做转换：盘上是什么就读什么；默认值不落库由写入端与启动迁移负责。
     capturePrompt: normalizeCapturePrompt(await read(sdk, "capturePrompt")),
+    // 一致性判断（提前提交第一步）的题面：与题面同一套读取口径，空串 = 内置默认。
+    captureConsistencyPrompt: normalizeCapturePrompt(
+      await read(sdk, "captureConsistencyPrompt"),
+    ),
     // 题面骨架：空串 = 内置默认模板；少了 {{current}} 由运行时判无效并回退。
     captureTemplate: normalizeCaptureTemplate(await read(sdk, "captureTemplate")),
     // 答案格式：空串 = 内置默认；与题面 / 骨架同一套读取口径。

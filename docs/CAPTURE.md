@@ -199,6 +199,26 @@ entry id 来自 JSONL 每条记录的 `id` 字段（8 位十六进制，配 `par
 格式仍然进题面，只是从硬编码变成了配置项：行数、字段名、要素顺序都能改。解析器认的是
 「主题： / 简述： / 归属：」，格式写歪了模型答歪，先改这一格再谈解析。
 
+提前提交分两步，顺序固定：
+
+1. **比一致性（轻）**：拿会话缓存的当前话题（`state.capture.topicId` 在话题表里的
+   `label` + `summary`）跟这一段新对话比，只回答「还在这条话题上，还是换了」。
+   题面是 `captureConsistencyPrompt`（空串 = 内置默认）。回「一致 / 同 / 继续 / same」
+   算一致，回「换了 / 不同 / 新 / diff」算换了，两边都不像算判断失败。
+2. **归类（重）**：只有第一步判定换了才走，复用 `capturePrompt` / `captureTemplate` /
+   `captureFormat`，决定归到哪个已有话题还是新建。
+
+边界：
+
+- 一致 → 不提交，继续攒；这一步完全不调归类
+- 没有缓存话题（首次提交 / 话题表里查不到那个 id）→ 直接提交立基线，不进第一步
+- 第一步判断失败 → 本轮不提交，也不归类，等下一轮
+- 轮数到 `captureCommitTurns` 强制线 → 直接提交，两步都不走
+
+判别模型的第一步是同一道 `choice` 题，criteria 固定两条：`same`（还是当前话题）与
+`changed`（已经换话题）。答案形状与召回那条一样，取 `answers.q.choice`；不认识的
+choice 按判断失败处理。
+
 两种判断方式：
 
 - `llm`：宿主模型按格式回三行。`captureModel` 留空就用宿主辅助模型（utility），不算缺配置
@@ -347,9 +367,11 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 关闭模式下不出现提前提交、上下文轮数、最少触发轮数、判断模型与判别服务地址；
 这些值不会因为切模式被清掉，切回来还在。反过来，在「语言模型设置 / 判别模型设置」里把
 提前提交关掉，等同于回到「关闭」：页签收回到「基础配置」，再选回模型档时其它设置原样保留。判断题面 / 题面骨架 / 答案格式在「话题」页签里，
-不在这张卡。（`capturePrompt` / `captureTemplate` / `captureFormat`）
+不在这张卡。（`capturePrompt` / `captureTemplate` / `captureFormat`；
+第一步的 `captureConsistencyPrompt` 在写回页「语言模型设置」里。）
 
-默认值不落库（`capturePrompt` / `captureTemplate` / `captureFormat` / `gatePrompt` /
+默认值不落库（`capturePrompt` / `captureTemplate` / `captureFormat` /
+`captureConsistencyPrompt` / `gatePrompt` /
 `gateContextPrompt` / `rerankPrompt` / `gateDecisionPrompt` / `rerankSystemonePrompt` 八个键同一规则）：写入时，值等于内置默认
 （含历史默认）就存空串，读取路径不做任何转换；盘上已有的旧值由 App 在 `agent/before-start`
 与 `provider/before-request` 两处无状态扫描，命中的改写成空串。没有标记文件、没有版本号：

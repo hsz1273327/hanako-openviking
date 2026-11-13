@@ -202,6 +202,17 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .field:last-child { margin-bottom: 0; }
 .field-label { font-size: 11.5px; line-height: 1.35; opacity: 0.62; }
 .field-hint { font-size: 10.5px; line-height: 1.4; opacity: 0.45; }
+/* 写回页末尾的提示词入口：一段说明 + 按钮 + 不重复规则的注记。 */
+.prompt-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ov-border, rgba(128, 128, 128, 0.18));
+}
+.prompt-entry .field-static { margin: 0; }
 /* 只读说明：与 hint 同一档字号，但读起来是一段话而不是提示。 */
 .field-static { margin: 0; font-size: 11.5px; line-height: 1.55; opacity: 0.7; }
 

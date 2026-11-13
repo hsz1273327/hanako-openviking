@@ -15,6 +15,7 @@ import { createClient } from "../ov/client.js";
 import { resolvePeer } from "../ov/identity.js";
 import {
   CAPTURE_TOPIC_QUESTION,
+  DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
   DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_TEMPLATE,
 } from "../ov/prompt-defaults.js";
@@ -51,6 +52,9 @@ export { CAPTURE_TOPIC_QUESTION };
 
 /** 答案格式的默认值；字面量在 prompt-defaults.js（= DEFAULT_CAPTURE_FORMAT），settings 的写时归一也要用。 */
 export const CAPTURE_TOPIC_FORMAT = DEFAULT_CAPTURE_FORMAT;
+
+/** 提前提交第一步的默认题面；空串 = 用这一份。 */
+export const CAPTURE_CONSISTENCY_PROMPT = DEFAULT_CAPTURE_CONSISTENCY_PROMPT;
 
 export const CAPTURE_SAMPLE_CHARS = 1200;
 export const CAPTURE_ASK_TIMEOUT_MS = 6000;
@@ -262,6 +266,49 @@ export function parseTopicAnswer(text, candidates) {
 }
 
 /** 把一段消息压成一行，按字符截断。 */
+/** 一致性题面的生效值：空串 / 空白 → 内置默认，其余原样（不 trim 用户那句）。 */
+export function resolveCaptureConsistencyPrompt(switches) {
+  const value =
+    typeof switches?.captureConsistencyPrompt === "string"
+      ? switches.captureConsistencyPrompt
+      : "";
+  return value.trim() ? value : CAPTURE_CONSISTENCY_PROMPT;
+}
+
+/** 第一步的上下文：当前话题是什么 + 这一段新对话，不含题面本身。 */
+export function renderConsistencyContext(topic, messages) {
+  const label = String(topic?.label ?? "").trim();
+  const summary = String(topic?.summary ?? "").trim();
+  const head = summary ? `${label} —— ${summary}` : label;
+  const body = renderMessages(messages).join("\n");
+  return `当前话题：${head || "（未命名）"}\n\n新的对话：\n${body}`;
+}
+
+/** 第一步的完整题面：题面 + 上下文。 */
+export function renderConsistencyPrompt(topic, messages, question = CAPTURE_CONSISTENCY_PROMPT) {
+  const ask = String(question || CAPTURE_CONSISTENCY_PROMPT);
+  return `${ask}\n\n${renderConsistencyContext(topic, messages)}`;
+}
+
+/**
+ * 第一步答案的读数：宽容匹配一致 / 换了，两边都不像就是没答。
+ *
+ * 「不一致」先按换了算，别被里面的「一致」带跑。只认一个词或一句话里的明确措辞，
+ * 不做模糊相似度：判不出来就让这一轮不提交，比猜一个错的方向安全。
+ */
+export function parseConsistencyAnswer(text) {
+  const cleaned = String(text ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[。．.!！?？,，、;；:："'“”‘’\s]/g, "");
+  if (!cleaned) return null;
+  if (/换了|不同|不一致|新话题|另一个|diff|different|new/.test(cleaned)) return false;
+  if (/一致|相同|同一|继续|same/.test(cleaned)) return true;
+  if (cleaned === "同") return true;
+  if (cleaned === "新") return false;
+  return null;
+}
+
 function oneLine(text, max) {
   const collapsed = String(text ?? "").replace(/\s+/g, " ").trim();
   return clipChars(collapsed, max);
@@ -390,8 +437,8 @@ export async function captureDecision({
   pendingTurns,
   forcedTurns,
   minTurns,
-  previousEmpty,
-  currentTopicId,
+  currentTopic,
+  probe,
   classify,
 } = {}) {
   const turns = Number(pendingTurns);
@@ -400,7 +447,7 @@ export async function captureDecision({
   const forced = Number.isFinite(Number(forcedTurns))
     ? Number(forcedTurns)
     : CAPTURE_COMMIT_TURNS_DEFAULT;
-  // 强制线不吃最少轮数，也不问模型：攒够了就交。
+  // 强制线不吃最少轮数，也不问模型：攒够了就交，两步都不走。
   if (turns >= forced) return { commit: true, reason: "turns" };
   if (early !== true) return { commit: false, reason: "below-limit" };
 
@@ -408,10 +455,25 @@ export async function captureDecision({
     ? Number(minTurns)
     : CAPTURE_MIN_TURNS_DEFAULT;
   if (turns < min) return { commit: false, reason: "too-few-turns" };
-  // 「之前」还是空的（全新建会话 / 刚从零开始）：没有可比的一段，直接立基线。
-  if (previousEmpty === true) return { commit: true, reason: "baseline" };
-  if (typeof classify !== "function") return { commit: false, reason: "classify-failed" };
 
+  // 没有缓存话题（首次提交 / 表里查不到那个 id）：没有可比的对象，
+  // 直接立基线。归类交给 commitSegment 在提交时补，不进第一步。
+  const topic = currentTopic && typeof currentTopic === "object" ? currentTopic : null;
+  if (!topic || !topic.id) return { commit: true, reason: "baseline" };
+
+  // 第一步：只回答还在这条话题上，还是换了。判不出来不提交，也不进第二步。
+  if (typeof probe !== "function") return { commit: false, reason: "consistency-failed" };
+  let same;
+  try {
+    same = await probe();
+  } catch {
+    return { commit: false, reason: "consistency-failed" };
+  }
+  if (same === true) return { commit: false, reason: "same-topic" };
+  if (same !== false) return { commit: false, reason: "consistency-failed" };
+
+  // 第二步：确定换了之后才归类，复用原来的题面 / 骨架 / 格式。
+  if (typeof classify !== "function") return { commit: false, reason: "classify-failed" };
   let verdict;
   try {
     verdict = await classify();
@@ -422,7 +484,7 @@ export async function captureDecision({
     return { commit: false, reason: "classify-failed" };
   }
   if (verdict.kind === "new") return { commit: true, reason: "topic", verdict };
-  if (verdict.id === currentTopicId) return { commit: false, reason: "same-topic" };
+  if (verdict.id === topic.id) return { commit: false, reason: "same-topic" };
   return { commit: true, reason: "topic", verdict };
 }
 
@@ -573,6 +635,72 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
   }
 
   return async () => null;
+}
+
+/**
+ * 一致性判断（提前提交第一步）的两条 criteria：判别模型只在这两者之间选。
+ * 描述互斥、各自说清「什么样算这一边」；不由用户改，用户改的是题面。
+ */
+export const CAPTURE_CONSISTENCY_CRITERIA = Object.freeze({
+  same: "这段新对话还在讲当前话题：在推进同一个问题、同一个模块、同一个决定。",
+  changed: "这段新对话已经换到另一件事、另一个问题，或者另一个地方去了。",
+});
+
+/**
+ * 造第一步的探针：返回 true=还在这条话题上，false=换了，null=没答出来。
+ *
+ * 大语言模型走宿主模型，只让回一个词；判别模型走 /v1/systemone 的 choice 题，
+ * 两条 criteria 对应 same / changed，答案形状与召回那条一样是 answers.q.choice。
+ */
+function buildConsistencyProbe({ judge, sdk, switches, topic, segment }) {
+  const current = Array.isArray(segment) ? segment : [];
+  const question = resolveCaptureConsistencyPrompt(switches);
+
+  if (judge === "llm") {
+    const rendered = renderConsistencyPrompt(topic, current, question);
+    return async () =>
+      parseConsistencyAnswer(
+        await askModelChannel(sdk, {
+          modelRef: switches.captureModel,
+          prompt: rendered,
+          timeoutMs: CAPTURE_ASK_TIMEOUT_MS,
+          // 只要一个词，给 32 个 token 足够；判不出来比编一个词安全。
+          maxTokens: 32,
+        }),
+      );
+  }
+
+  if (judge === "discriminator") {
+    const endpoint = `${String(switches.systemoneServiceUrl || "").replace(/\/+$/, "")}/v1/systemone`;
+    const context = renderConsistencyContext(topic, current);
+    return async () => {
+      const data = await postJson(
+        sdk,
+        endpoint,
+        {
+          model: switches.systemoneServiceModel,
+          state: { type: "text", content: context },
+          questions: {
+            q: {
+              type: "choice",
+              instructions: question,
+              criteria: { ...CAPTURE_CONSISTENCY_CRITERIA },
+            },
+          },
+        },
+        CAPTURE_ASK_TIMEOUT_MS,
+        serviceAuthHeaders(switches.systemoneServiceKey),
+      );
+      const answer = data?.answers?.q;
+      if (!answer || typeof answer !== "object") return null;
+      const choice = String(answer.choice ?? "").trim();
+      if (choice === "same") return true;
+      if (choice === "changed") return false;
+      return null;
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -875,17 +1003,28 @@ export function createCaptureHandler(sdk, deps = {}) {
           messages.slice(0, cursor.lastCommitMessageCount),
           switches.captureContextTurns,
         );
-        const previousEmpty = previous.length === 0;
         const currentTopicId =
           typeof state?.capture?.topicId === "string" ? state.capture.topicId : "";
         // 候选池只读不写；归类本身不改表，落表要等 commit 成功（见下面 withTopics）。
-        const topics = readTopics(dataDir);
-        const candidates = candidatePool(topics, {
+        const topTable = readTopics(dataDir);
+        // 会话缓存的当前话题：第一步拿它的 label + summary 跟这一段比。
+        // 表里查不到（被删了 / 换了机器）按「没有缓存话题」处理，直接立基线。
+        const currentTopic = currentTopicId
+          ? topTable.topics.find((topic) => topic?.id === currentTopicId) || null
+          : null;
+        const candidates = candidatePool(topTable, {
           sessionId,
           scope: switches.captureTopicScope,
           limit: switches.captureTopicCandidates,
         });
         let classifyError = null;
+        const probe = buildConsistencyProbe({
+          judge,
+          sdk,
+          switches,
+          topic: currentTopic,
+          segment,
+        });
         const classify = async () => {
           try {
             return await buildClassifier({
@@ -909,14 +1048,16 @@ export function createCaptureHandler(sdk, deps = {}) {
             pendingTurns,
             forcedTurns: switches.captureCommitTurns,
             minTurns: switches.captureMinTurns,
-            previousEmpty,
-            currentTopicId,
+            currentTopic,
+            probe,
             classify,
           });
           if (classifyError) {
             // 探路失败本轮不切段；日志留证据，下一轮或强制轮数再来。
             warn(sdk, `topic judge failed: ${errorText(classifyError)}`);
             classifyError = null;
+          } else if (decision.reason === "consistency-failed") {
+            warn(sdk, "topic consistency check failed: 答案认不出，本轮不切段");
           } else if (decision.reason === "classify-failed") {
             warn(sdk, "topic judge failed: 答案认不出，本轮不切段");
           }

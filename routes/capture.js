@@ -68,6 +68,7 @@ async function project(ctx) {
     idleSeconds: serializeCaptureIdleSeconds(switches.captureServerIdleSeconds),
     model: switches.captureModel,
     prompt: switches.capturePrompt,
+    consistencyPrompt: switches.captureConsistencyPrompt,
     template: switches.captureTemplate,
     format: switches.captureFormat,
     judges: [...CAPTURE_EARLY_JUDGES],
@@ -239,6 +240,23 @@ export default function registerCaptureRoutes(app, ctx) {
         );
       }
       changes.push(["capturePrompt", promptForStorage("capturePrompt", body.capturePrompt)]);
+    }
+
+    // 提前提交第一步（一致性判断）的题面：与判断题面同一套规则。
+    if (has(body, "captureConsistencyPrompt")) {
+      if (typeof body.captureConsistencyPrompt !== "string") {
+        return c.json({ ok: false, error: "captureConsistencyPrompt 必须是字符串" }, 400);
+      }
+      if (Array.from(body.captureConsistencyPrompt).length > CAPTURE_PROMPT_MAX) {
+        return c.json(
+          { ok: false, error: `captureConsistencyPrompt 最多 ${CAPTURE_PROMPT_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push([
+        "captureConsistencyPrompt",
+        promptForStorage("captureConsistencyPrompt", body.captureConsistencyPrompt),
+      ]);
     }
 
     // 题面骨架模板：同样的规则（非字符串拒、按字符限长、写时归一）。

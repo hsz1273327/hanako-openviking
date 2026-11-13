@@ -22,6 +22,8 @@ import {
   CAPTURE_FORMAT_MAX,
   CAPTURE_PROMPT_MAX,
   CAPTURE_TEMPLATE_MAX,
+  DEFAULT_CAPTURE_TOPIC_TAB,
+  normalizeCaptureTopicTab,
 } from "../lib/capture-view.js";
 import {
   filterTopics,
@@ -49,8 +51,16 @@ const {
   captureFormatStatusOf,
 } = useConfig();
 
-// 子页签只是本组件的视图状态：默认停在话题列表，切走再回来不重建、不丢草稿。
-const activeTab = ref("topics");
+// 子页签由父组件持有（写回页的「去编辑提示词」要能指到判断题面），
+// 默认停在话题列表；切走再回来不重建、不丢草稿。
+const props = defineProps({
+  tab: { type: String, default: DEFAULT_CAPTURE_TOPIC_TAB },
+});
+const emit = defineEmits(["update:tab"]);
+const activeTab = computed({
+  get: () => normalizeCaptureTopicTab(props.tab),
+  set: (value) => emit("update:tab", normalizeCaptureTopicTab(value)),
+});
 const query = ref("");
 // 详情抽屉：只记 id，内容从同一份 topics 里取，删掉后自然消失。
 const detailId = ref("");

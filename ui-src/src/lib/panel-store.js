@@ -79,15 +79,19 @@ import {
   CAPTURE_MIN_RANGE,
   CAPTURE_TOPIC_CANDIDATES_RANGE,
   CAPTURE_TURNS_RANGE,
+  DEFAULT_CAPTURE_CONSISTENCY_PROMPT,
   DEFAULT_CAPTURE_FORMAT,
   DEFAULT_CAPTURE_PROMPT,
   DEFAULT_CAPTURE_TEMPLATE,
+  captureConsistencyDraft,
+  captureConsistencyStatus,
   captureFormatDraft,
   captureFormatStatus,
   capturePromptDraft,
   capturePromptStatus,
   captureTemplateDraft,
   captureTemplateStatus,
+  normalizeCaptureConsistencyPrompt,
   normalizeCaptureFormat,
   normalizeCapturePrompt,
   normalizeCaptureTemplate,
@@ -264,6 +268,7 @@ export function createPanelStore(deps = {}) {
       captureModel: "",
       // 写回判断题面：初始坐默认那段的草稿，首次 refresh 后以服务端投影为准。
       capturePrompt: "",
+      captureConsistencyPrompt: "",
       captureTemplate: "",
       captureFormat: "",
     },
@@ -303,6 +308,8 @@ export function createPanelStore(deps = {}) {
     captureTemplateTouched: false,
     // 答案格式同样。
     captureFormatTouched: false,
+    // 一致性判断题面同一个道理。
+    captureConsistencyTouched: false,
   };
 
   const CAPTURE_FORM_KEYS = [
@@ -317,6 +324,7 @@ export function createPanelStore(deps = {}) {
     "captureServerIdleSeconds",
     "captureModel",
     "capturePrompt",
+    "captureConsistencyPrompt",
     "captureTemplate",
     "captureFormat",
   ];
@@ -333,6 +341,7 @@ export function createPanelStore(deps = {}) {
     captureServerIdleSeconds: 600,
     captureModel: "",
     capturePrompt: "",
+    captureConsistencyPrompt: "",
     captureTemplate: "",
     captureFormat: "",
   });
@@ -402,6 +411,7 @@ export function createPanelStore(deps = {}) {
       captureServerIdleSeconds: Number.isFinite(idle) ? idle : 600,
       captureModel: typeof out.model === "string" ? out.model : "",
       capturePrompt: normalizeCapturePrompt(out.prompt),
+      captureConsistencyPrompt: normalizeCaptureConsistencyPrompt(out.consistencyPrompt),
       captureTemplate: normalizeCaptureTemplate(out.template),
       captureFormat: normalizeCaptureFormat(out.format),
     };
@@ -414,6 +424,13 @@ export function createPanelStore(deps = {}) {
         state.form.capturePrompt = capturePromptDraft(
           captureConfirmed.capturePrompt,
           state.capturePromptTouched,
+        );
+        continue;
+      }
+      if (key === "captureConsistencyPrompt") {
+        state.form.captureConsistencyPrompt = captureConsistencyDraft(
+          captureConfirmed.captureConsistencyPrompt,
+          state.captureConsistencyTouched,
         );
         continue;
       }
@@ -832,6 +849,7 @@ export function createPanelStore(deps = {}) {
       captureModel: state.form.captureModel,
       // 空串要原样发：空 = 用内置默认，是有意义的值，不能像数字那样替换成已确认值。
       capturePrompt: state.form.capturePrompt,
+      captureConsistencyPrompt: state.form.captureConsistencyPrompt,
       captureTemplate: state.form.captureTemplate,
       captureFormat: state.form.captureFormat,
     };
@@ -907,6 +925,26 @@ export function createPanelStore(deps = {}) {
 
   function capturePromptStatusOf() {
     return capturePromptStatus(state.form.capturePrompt);
+  }
+
+  /** 一致性判断题面：同样的三态与收笔方式。 */
+  function touchCaptureConsistencyPrompt(value) {
+    state.captureConsistencyTouched = true;
+    state.form.captureConsistencyPrompt = value;
+  }
+
+  function setCaptureConsistencyPrompt(value) {
+    state.form.captureConsistencyPrompt = value;
+    return saveCapture();
+  }
+
+  function resetCaptureConsistencyPrompt() {
+    touchCaptureConsistencyPrompt(DEFAULT_CAPTURE_CONSISTENCY_PROMPT);
+    return saveCapture();
+  }
+
+  function captureConsistencyStatusOf() {
+    return captureConsistencyStatus(state.form.captureConsistencyPrompt);
   }
 
   /** 题面模板：与判断题面同一套收笔方式（输入只改草稿，失焦 / 回车才提交）。 */
@@ -1470,6 +1508,10 @@ export function createPanelStore(deps = {}) {
     setCapturePrompt,
     resetCapturePrompt,
     capturePromptStatusOf,
+    touchCaptureConsistencyPrompt,
+    setCaptureConsistencyPrompt,
+    resetCaptureConsistencyPrompt,
+    captureConsistencyStatusOf,
     touchCaptureTemplate,
     setCaptureTemplate,
     resetCaptureTemplate,

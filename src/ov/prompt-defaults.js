@@ -77,6 +77,21 @@ export const CAPTURE_PROMPT_RETIRED_DEFAULTS = Object.freeze([
 ]);
 
 /**
+ * 提前提交第一步（一致性判断）的默认题面。
+ *
+ * 只回答「还在不在当前话题上」，不负责归类：归类是第二步的事，题面在
+ * capturePrompt / captureTemplate / captureFormat 那三格里。空串 = 用这一份。
+ */
+export const DEFAULT_CAPTURE_CONSISTENCY_PROMPT = `下面有一个正在进行的对话话题，和一段新的对话。
+
+判断这段新对话是不是还在讲同一件事。
+
+同一件事：在推进同一个问题、同一个模块、同一个决定。
+换了：转到另一件事、另一个问题、另一个地方去了。
+
+只回一个词：一致 / 换了`;
+
+/**
  * 话题判断的答案格式。解析靠它：字段名、行数、要素顺序都在这里说。
  * 空串 = 用这一份；面板里也能改，改完由 captureFormat 落库。
  */
