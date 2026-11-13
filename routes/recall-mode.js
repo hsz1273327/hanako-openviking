@@ -18,6 +18,7 @@ import {
   RECALL_GATE_FALLBACKS,
   RECALL_GATES,
   RECALL_PREAMBLE_MAX,
+  RECALL_WRAP_MODES,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_URL_MAX,
   RERANK_LANE_SCHEMA,
@@ -43,6 +44,7 @@ import {
   normalizeGatePrompt,
   normalizeQueryMode,
   normalizeRecallPreamble,
+  normalizeRecallWrapMode,
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
@@ -78,6 +80,7 @@ const SPECS = Object.freeze({
   queryMode: QUERY_MODES,
   rerank: RERANK_MODES,
   assembleMode: ASSEMBLE_MODES,
+  recallWrapMode: RECALL_WRAP_MODES,
 });
 
 /** 打分服务的四字段：两组（精排 / 决策）的地址与模型。 */
@@ -214,6 +217,7 @@ async function current(ctx) {
     rerankKeep: serializeRerankKeep(await ctx.config.get("rerankKeep")),
     // 组装：脏值 / 缺项一律画成 rules（与 readSwitches 同口径）。
     assembleMode: normalizeAssembleMode(await ctx.config.get("assembleMode")),
+    recallWrapMode: normalizeRecallWrapMode(await ctx.config.get("recallWrapMode")),
     // 注入前言：没配过投影内置默认；明确存了空串仍然投影空串（读取原样）。
     recallPreamble: normalizeRecallPreamble(
       (await ctx.config.get("recallPreamble")) ?? DEFAULT_RECALL_PREAMBLE,

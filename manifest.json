@@ -487,6 +487,30 @@
             "description": "注入的记忆块开头那段说明，告诉模型这些是历史背景、不是本轮指令。留空 = 用内置默认；最长 1000 个字符。只在真的注入了记忆时出现，没有候选时不会只输出前言。",
             "default": ""
           },
+          "recallWrapMode": {
+            "type": "string",
+            "title": "记忆包装方式",
+            "description": "注入的记忆用哪种包装：tag 标签块（默认，剥离最稳）、codeblock 代码块、document 文档标签、json 对象（信号最强、转义开销最大）、plain 纯文本分隔线（最轻）、system 注入 system prompt（身份最清楚，但每轮变化会打断 prefix 缓存，云端计费变贵）。认不出的值回 tag。",
+            "default": "tag",
+            "enum": [
+              "tag",
+              "codeblock",
+              "document",
+              "json",
+              "plain",
+              "system"
+            ],
+            "ui": {
+              "enumLabels": [
+                "标签块（默认）",
+                "代码块",
+                "文档标签",
+                "JSON",
+                "纯文本",
+                "System prompt"
+              ]
+            }
+          },
           "injectBudgetTokens": {
             "type": "integer",
             "title": "注入预算",

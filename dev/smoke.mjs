@@ -144,6 +144,8 @@ import {
   RECALL_TIMEOUT_MIN,
   RECALL_TIMEOUT_MAX,
   RECALL_PREAMBLE_MAX,
+  RECALL_WRAP_MODES,
+  normalizeRecallWrapMode,
   DEFAULT_RECALL_PREAMBLE,
   resolveRecallPreamble,
   normalizeRecallPreamble,
@@ -205,6 +207,7 @@ import {
   recallQuery,
   recallQueryPlan,
   injectMemory,
+  injectSystemMemory,
   estimateTokens,
   trimToBudget,
   CONTEXT_MESSAGES_MAX,
@@ -541,6 +544,9 @@ import {
   DEFAULT_GATE_DECISION_PROMPT as UI_DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT as UI_DEFAULT_GATE_PROMPT,
   DEFAULT_RECALL_PREAMBLE as UI_DEFAULT_RECALL_PREAMBLE,
+  RECALL_WRAP_MODES as UI_RECALL_WRAP_MODES,
+  RECALL_WRAP_OPTIONS as UI_RECALL_WRAP_OPTIONS,
+  normalizeRecallWrapMode as uiNormalizeRecallWrapMode,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT as UI_DEFAULT_RERANK_PROMPT,
   DEFAULT_RERANK_SYSTEMONE_PROMPT as UI_DEFAULT_RERANK_SYSTEMONE_PROMPT,
@@ -2506,6 +2512,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
 
   // ---- 召回前两层：默认值 / 合法值 / 非法值回退 ----
   const layerDefault = await readSwitches(sdkWith({}));
+  const layerWrap = await readSwitches(sdkWith({ recallWrapMode: "json" }));
   const layerSet = await readSwitches(sdkWith({ recallGate: "rules", queryMode: "context" }));
   eq(
     "召回前两层：默认 off/last，合法值照读，枚举外 / null / 数字 / 大小写不符一律回默认",
@@ -2522,6 +2529,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
     ],
     [["off", "last"], ["off", "last"], ["rules", "context"], ["off", "last", "off", "last", "off"]],
+  );
+
+  eq(
+    "包装方式读侧：默认 tag、自定义照读、脏值回 tag",
+    [layerDefault.recallWrapMode, layerWrap.recallWrapMode, normalizeRecallWrapMode("nope")],
+    ["tag", "json", "tag"],
   );
 
   // ---- 模型标识：只认 provider/model；空串 = 用宿主辅助模型 ----
@@ -2880,6 +2893,24 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ["systemone", "rerank", "model"],
       ["systemone", "rerank", "model"],
     ], [DEFAULT_GATE_PROMPT, DEFAULT_GATE_DECISION_PROMPT, DEFAULT_GATE_CONTEXT_PROMPT, DEFAULT_RERANK_PROMPT, DEFAULT_RERANK_SYSTEMONE_PROMPT], [GATE_PROMPT_MAX, RERANK_PROMPT_MAX], ["{{n}}", { systemone: "自适应", rerank: "800", model: "1500" }]],
+  );
+
+  eq(
+    "包装方式枚举两端同值 / 六个选项都有代价说明 / system 明确写缓存代价",
+    [
+      RECALL_WRAP_MODES,
+      UI_RECALL_WRAP_MODES,
+      UI_RECALL_WRAP_OPTIONS.length,
+      UI_RECALL_WRAP_OPTIONS.every((option) => option.note),
+      UI_RECALL_WRAP_OPTIONS.find((option) => option.value === "system")?.label.includes("缓存"),
+    ],
+    [
+      UI_RECALL_WRAP_MODES,
+      RECALL_WRAP_MODES,
+      6,
+      true,
+      true,
+    ],
   );
 
   eq(
@@ -6274,6 +6305,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     rerankModel: "",
     rerankChannels: [],
     assembleMode: "rules",
+    recallWrapMode: "tag",
     recallPreamble: "",
     rerankServiceUrl: "",
     rerankServiceModel: "",
@@ -19801,6 +19833,109 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     "写回剥离：带属性的记忆块与前言一起被剥掉，用户原话留下",
     stripInjected(`${shaped}\n\n这条怎么改？`),
     "这条怎么改？",
+  );
+
+  const wrapItems = [
+    {
+      text: '<memory uri="viking://user/default/memories/events/2026/11/11/a.md" type="events">周三交稿</memory>',
+      uri: "viking://user/default/memories/events/2026/11/11/a.md",
+      type: "events",
+    },
+    {
+      text: '<memory uri="viking://user/default/memories/entities/tool.md" type="entities">工具说明</memory>',
+      uri: "viking://user/default/memories/entities/tool.md",
+      type: "entities",
+    },
+  ];
+  const wrapBlocks = Object.fromEntries(
+    ["tag", "codeblock", "document", "json", "plain"].map((mode) => [
+      mode,
+      memoryBlock(wrapItems, 1000, "背景记忆。", mode),
+    ]),
+  );
+  eq(
+    "五种正文包装形态：tag 标签 / codeblock 围栏 / document 文档 / json 对象 / plain 分隔线",
+    [
+      wrapBlocks.tag.startsWith("<openviking-memory>"),
+      wrapBlocks.codeblock.startsWith("```memory\n"),
+      wrapBlocks.document.startsWith('<document type="openviking-memory">'),
+      (() => {
+        const parsed = JSON.parse(wrapBlocks.json);
+        return [parsed.memories.length, parsed.memories[0].time, parsed.memories[0].text];
+      })(),
+      !wrapBlocks.plain.includes("<openviking-memory") &&
+        wrapBlocks.plain.startsWith("--- openviking-memory ---"),
+    ],
+    [
+      true,
+      true,
+      true,
+      [2, "2026-11-11", "周三交稿"],
+      true,
+    ],
+  );
+  eq(
+    "每种正文包装都能完整剥离，只剩用户原话",
+    ["tag", "codeblock", "document", "json", "plain"].map((mode) =>
+      stripInjected(`${wrapBlocks[mode]}\n\n用户原话`),
+    ),
+    ["用户原话", "用户原话", "用户原话", "用户原话", "用户原话"],
+  );
+  eq(
+    "system 模式：system 里带前言与记忆，user 仍然是原话",
+    (() => {
+      const sysBlock = memoryBlock(wrapItems, 1000, "背景记忆。", "system");
+      const result = injectSystemMemory(
+        { messages: [{ role: "system", content: "你是助手" }, { role: "user", content: "问" }] },
+        sysBlock,
+      );
+      return [
+        result.messages[0].content.includes("背景记忆。"),
+        result.messages[0].content.includes('time="2026-11-11"'),
+        result.messages[1].content,
+      ];
+    })(),
+    [true, true, "问"],
+  );
+  eq(
+    "codeblock 围栏会避开正文里的反引号串，剥离仍然完整",
+    (() => {
+      const code = memoryBlock([{ text: "```bash\nnpm run build\n```", type: "events" }], 1000, "", "codeblock");
+      return [
+        code.startsWith("````memory\n"),
+        stripInjected(`${code}\n\n用户原话`),
+      ];
+    })(),
+    [true, "用户原话"],
+  );
+  eq(
+    "未知包装值回退 tag：配置归一与渲染两层都回默认",
+    [
+      normalizeRecallWrapMode("nope"),
+      uiNormalizeRecallWrapMode("nope"),
+      memoryBlock(wrapItems, 1000, "背景记忆。", "nope"),
+    ],
+    ["tag", "tag", wrapBlocks.tag],
+  );
+  eq(
+    "system 注入：system 消息带记忆，user 消息保持干净；没有 system 时补一条在最前面",
+    (() => {
+      const first = injectSystemMemory(
+        { messages: [{ role: "system", content: "你是助手" }, { role: "user", content: "问" }] },
+        "MEMORY",
+      );
+      const none = injectSystemMemory({ messages: [{ role: "user", content: "问" }] }, "MEMORY");
+      const field = injectSystemMemory({ system: "SYS", messages: [] }, "MEMORY");
+      return [
+        first.messages[0].content,
+        first.messages[1].content,
+        none.messages[0].role,
+        none.messages[0].content,
+        none.messages[1].content,
+        field.system,
+      ];
+    })(),
+    ["你是助手\n\nMEMORY", "问", "system", "MEMORY", "问", "SYS\n\nMEMORY"],
   );
 }
 

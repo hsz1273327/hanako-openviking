@@ -25,7 +25,19 @@
 //   - NInputNumber 里有真 <input>，<label for=id> 有效，用 NFormItem 自带标签；
 //   - NSwitch 渲染的是 button，label for 指不过去，用纯文本标签 + aria-label。
 import { computed } from "vue";
-import { NButton, NCard, NForm, NFormItem, NGrid, NGridItem, NInput, NInputNumber, NSwitch } from "naive-ui";
+import {
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NGrid,
+  NGridItem,
+  NInput,
+  NInputNumber,
+  NSelect,
+  NSwitch,
+} from "naive-ui";
+import { RECALL_WRAP_OPTIONS } from "../lib/recall-layers.js";
 import { useConfig } from "../composables/useConfig.js";
 
 const {
@@ -46,6 +58,16 @@ const assembleOn = computed(() => state.form.assembleMode === "rules");
 /** 开关改了就整单提交（setForm → saveLayers，与精排那张卡同一套回滚）。 */
 function onSwitch(value) {
   return setForm("assembleMode", value ? "rules" : "off");
+}
+
+const wrapNote = computed(
+  () =>
+    RECALL_WRAP_OPTIONS.find((option) => option.value === state.form.recallWrapMode)?.note || "",
+);
+
+/** 包装方式：选了立刻提交，下一次注入就换形态，不混着用。 */
+function onWrap(value) {
+  setForm("recallWrapMode", value);
 }
 
 /** 前言：每敲一个字先写草稿，失焦 / 回车才提交（与判断提示词同一套）。 */
@@ -109,6 +131,23 @@ function onNumberChange(key, value) {
         </NForm>
       </NGridItem>
     </NGrid>
+
+    <div class="field wrap-field">
+      <label for="recallWrapMode">包装方式</label>
+      <NSelect
+        size="small"
+        aria-label="记忆包装方式"
+        :options="RECALL_WRAP_OPTIONS"
+        :input-props="{ id: 'recallWrapMode' }"
+        :value="state.form.recallWrapMode"
+        @update:value="onWrap"
+      />
+      <span class="field-hint">{{ wrapNote }}</span>
+      <span v-if="state.form.recallWrapMode === 'system'" class="field-hint">
+        System prompt 档每轮内容变化会打断 prefix 缓存，云端按缓存命中计费时会更贵。
+      </span>
+      <span class="field-hint">切换后下一次注入立刻按新形态走，不混装。</span>
+    </div>
 
     <div class="field preamble-field">
       <div class="prompt-head">

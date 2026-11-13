@@ -56,6 +56,7 @@ import {
   normalizeRerankPrompt,
   normalizeRerankKeep,
   normalizeRerankSystemonePrompt,
+  normalizeRecallWrapMode,
   normalizeServiceTimeout,
   paintRecallConfig,
   promptDraft,
@@ -263,6 +264,7 @@ export function createPanelStore(deps = {}) {
       rerankKeep: RERANK_KEEP_DEFAULT,
       // 组装默认 rules（去重 + 按分精排不花时间，默认开着是纯收益），首次 refresh 后以服务端投影为准。
       assembleMode: "rules",
+      recallWrapMode: "tag",
       gateModel: "",
       // 写回：机器级设置。轮次 / 秒数在界面上是数字，提交时服务端收数字或数字串。
       captureEarlyCommit: false,
@@ -540,6 +542,7 @@ export function createPanelStore(deps = {}) {
     "rerank",
     "rerankKeep",
     "assembleMode",
+    "recallWrapMode",
     "gateModel",
   ];
 
@@ -704,6 +707,7 @@ export function createPanelStore(deps = {}) {
       // 精排保留条数：归一化后序列化成字符串再发（0 = 不限），与门槛 / 轮数同口径。
       rerankKeep: String(normalizeRerankKeep(state.form.rerankKeep)),
       assembleMode: normalizeAssembleMode(state.form.assembleMode),
+      recallWrapMode: normalizeRecallWrapMode(state.form.recallWrapMode),
       // 前言：配置里存空串 = 内置默认；界面整单提交时原样发，服务端再做一次默认值归一。
       recallPreamble: state.prompts.preamble,
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
@@ -788,6 +792,7 @@ export function createPanelStore(deps = {}) {
     // 组装开关与召回策略同一单，所以也得进「这一单有没有变化」的比较：
     // 漏在这里，切开关会看起来“没改”，一单都不发。
     "assembleMode",
+    "recallWrapMode",
     "recallPreamble",
     ...SCORING_SERVICES.flatMap((service) => [
       service.urlKey,

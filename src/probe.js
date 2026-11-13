@@ -87,6 +87,12 @@ function shapeOf(event, invocation) {
       roles: Array.isArray(payload?.messages)
         ? payload.messages.map((m) => m?.role).filter(Boolean).slice(-6)
         : null,
+      firstRole: Array.isArray(payload?.messages) ? payload.messages[0]?.role || null : null,
+      systemField: typeof payload?.system === "string"
+        ? "string"
+        : typeof payload?.systemPrompt === "string"
+          ? "systemPrompt"
+          : null,
       systemChars: len(
         typeof payload?.system === "string" ? payload.system : payload?.systemPrompt,
       ),

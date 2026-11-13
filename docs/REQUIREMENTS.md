@@ -18,6 +18,9 @@
   把同机所有 agent 折成一个 peer。
 - **R4 零成本**：总闸关 / 只读 / 身份不全 / 服务器不可达，一律在碰数据之前短路；
   通用请求超时 1.5s，召回请求单独一档（5s），失败不重试、不报警、不影响本轮。
+- **R5 包装可配**：`recallWrapMode` 选 tag / codeblock / document / json / plain / system，
+  默认 tag；每种都能被写回剥离干净。system 写进 system prompt，会打断 prefix 缓存，
+  云端计费更贵，界面上必须标明。
 
 ## 2. 技能（检索，非索引）
 

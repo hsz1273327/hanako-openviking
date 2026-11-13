@@ -332,6 +332,7 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .dedupe-card,
 .rerank-card,
 .assemble-card { flex: 0 0 auto; }
+.wrap-field { margin-top: 12px; }
 .preamble-field { margin-top: 12px; }
 
 /* 子页签栏（记忆搜索页 / 记忆共享页共用）：与主标签栏同一档，不参与纵向伸缩，

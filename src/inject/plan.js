@@ -14,11 +14,61 @@ export const MEMORY_TAG_CLOSE = "</openviking-memory>";
 
 // 开标签可能带 time / type 属性；不认属性的话，写回剥离会漏掉带属性的块。
 const INJECTED_RE = /<openviking-memory(?:\s[^>]*)?>[\s\S]*?<\/openviking-memory>\s*/g;
+// codeblock：围栏长度是动态的（正文里反引号更长时会更长），靠反向引用配同一串。
+const CODEBLOCK_RE = /(`{3,})memory\n[\s\S]*?\n\1\s*/g;
+// document：只认我们自己写的那种 type，误伤用户文本的概率最低。
+const DOCUMENT_RE = /<document\s+type="openviking-memory"[^>]*>[\s\S]*?<\/document>\s*/g;
+// plain：固定标题行 + 固定收尾行，按行首匹配。
+const PLAIN_RE = /^--- openviking-memory ---[ \t]*\n[\s\S]*?^--- \/openviking-memory ---[ \t]*\n?/gm;
+
+/** 从 `{` 开始扫到配对的 `}`；字符串里的括号与转义不参与计数。 */
+function balancedJsonEnd(text, start) {
+  let depth = 0;
+  let quote = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') {
+      quote = true;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return -1;
+}
+
+/** 去掉 JSON 形态的整块。扫描器按配对括号收尾，不靠非贪婪正则猜。 */
+function stripJsonBlocks(text) {
+  const marker = '{"memories":';
+  let out = "";
+  let cursor = 0;
+  for (;;) {
+    const start = text.indexOf(marker, cursor);
+    if (start < 0) return out + text.slice(cursor);
+    out += text.slice(cursor, start);
+    const end = balancedJsonEnd(text, start);
+    if (end < 0) return out + text.slice(start);
+    cursor = end;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+  }
+}
 
 /** 去掉已经注进去的记忆块，得到"人真正说过的话"。去重键必须建立在干净文本上。 */
 export function stripInjected(text) {
   if (typeof text !== "string") return "";
-  return text.replace(INJECTED_RE, "").trim();
+  let out = text.replace(CODEBLOCK_RE, "").replace(DOCUMENT_RE, "");
+  out = stripJsonBlocks(out).replace(PLAIN_RE, "").replace(INJECTED_RE, "");
+  return out.trim();
 }
 
 /** 把消息内容（string 或 parts 数组）里的纯文本读出来。 */
@@ -248,6 +298,56 @@ export function prependBlock(content, block) {
     return { ...content, text: `${block}\n\n${content.text}` };
   }
   return [{ type: "text", text: block }];
+}
+
+/** 把块接在内容末尾，string / parts / object 三种形态都尽量不新增 part。 */
+function appendBlock(content, block) {
+  if (typeof content === "string") return content ? `${content}\n\n${block}` : block;
+  if (Array.isArray(content)) {
+    const parts = content.slice();
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const part = parts[index];
+      if (part && typeof part === "object" && typeof part.text === "string") {
+        parts[index] = { ...part, text: part.text ? `${part.text}\n\n${block}` : block };
+        return parts;
+      }
+    }
+    return [...parts, { type: "text", text: block }];
+  }
+  if (content && typeof content === "object" && typeof content.text === "string") {
+    return { ...content, text: content.text ? `${content.text}\n\n${block}` : block };
+  }
+  return [{ type: "text", text: block }];
+}
+
+/**
+ * system 形态：把记忆放进 system prompt，用户消息保持干净。
+ *
+ * Hana 发出去的 payload 是 OpenAI 兼容形状，实测 system 在 messages[0] 的
+ * role="system" 里（payload 没有独立的 system / systemPrompt 字段）。这里仍兼容
+ * 那两种独立字段：字段存在就接在字段末尾；否则找第一条 system 消息；都没有就
+ * 在最前面插一条。追加而不是替换：改得越少，模型原有系统指令越不容易被冲掉。
+ */
+export function injectSystemMemory(payload, block) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (typeof payload.system === "string") {
+    return { ...payload, system: appendBlock(payload.system, block) };
+  }
+  if (typeof payload.systemPrompt === "string") {
+    return { ...payload, systemPrompt: appendBlock(payload.systemPrompt, block) };
+  }
+  if (!Array.isArray(payload.messages)) return null;
+  const messages = payload.messages.slice();
+  const index = messages.findIndex((message) => message?.role === "system");
+  if (index >= 0) {
+    messages[index] = {
+      ...messages[index],
+      content: appendBlock(readContent(messages[index]), block),
+    };
+  } else {
+    messages.unshift({ role: "system", content: block });
+  }
+  return { ...payload, messages };
 }
 
 /**

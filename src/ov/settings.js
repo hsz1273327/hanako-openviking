@@ -220,6 +220,7 @@ export const DEFAULTS = {
   // 精排保留条数上限。缺省 5；存 0 / 空串 / 脏值都读成「不限」（见 normalizeRerankKeep）。
   rerankKeep: RERANK_KEEP_DEFAULT,
   assembleMode: "rules",
+  recallWrapMode: "tag",
   // 召回注入块的前言：空串 = 内置默认。只在真的注入了记忆时出现。
   recallPreamble: "",
   rerankPrompt: "",
@@ -242,7 +243,7 @@ export const DEFAULTS = {
   systemoneServiceKey: "",
 };
 
-/** 八个提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
+/** 提示词键：内置默认（含历史默认）。写时归一与启动迁移共用这一份。 */
 const PROMPT_DEFAULT_VALUES = Object.freeze({
   capturePrompt: Object.freeze([CAPTURE_TOPIC_QUESTION, ...CAPTURE_PROMPT_RETIRED_DEFAULTS]),
   captureConsistencyPrompt: Object.freeze([DEFAULT_CAPTURE_CONSISTENCY_PROMPT]),
@@ -367,6 +368,21 @@ export const RERANK_MODES = Object.freeze(["off", "llm"]);
  * 认不出的值归一化回 rules：去重与精排不花时间，默认开着是纯收益。
  */
 export const ASSEMBLE_MODES = Object.freeze(["off", "rules"]);
+
+/**
+ * 注入包装形态。默认 tag：与加这一项之前完全一致。
+ *
+ * system 不是文本包装，而是注入位置（system prompt），但放在同一个下拉里：
+ * 用户选的是“这段记忆以什么身份出现”，不是两个独立开关。
+ */
+export const RECALL_WRAP_MODES = Object.freeze([
+  "tag",
+  "codeblock",
+  "document",
+  "json",
+  "plain",
+  "system",
+]);
 
 /**
  * 精排通道类型：语言模型（宿主模型）、判别模型（llama.cpp systemone）、rerank 模型（OpenAI 兼容 rerank）。
@@ -704,6 +720,11 @@ export function normalizeRerank(raw) {
 
 export function normalizeAssembleMode(raw) {
   return oneOf(raw, ASSEMBLE_MODES, DEFAULTS.assembleMode);
+}
+
+/** 包装形态：认不出的值一律回 tag，不改变现有行为。 */
+export function normalizeRecallWrapMode(raw) {
+  return oneOf(raw, RECALL_WRAP_MODES, DEFAULTS.recallWrapMode);
 }
 
 /** 前言读侧归一：非字符串 / 空 → 空串（= 用内置默认），否则按字符截断。 */
@@ -1350,6 +1371,7 @@ export async function readSwitches(sdk) {
     // 0 = 不限。read() 把缺失项换成默认 5，所以「从没配过」与「填了空串」在这里分得开。
     rerankKeep: normalizeRerankKeep(await read(sdk, "rerankKeep")),
     assembleMode: normalizeAssembleMode(await read(sdk, "assembleMode")),
+    recallWrapMode: normalizeRecallWrapMode(await read(sdk, "recallWrapMode")),
     // 注入前言：空串 = 内置默认；运行时用 resolveRecallPreamble 取实际文案。
     recallPreamble: normalizeRecallPreamble(await read(sdk, "recallPreamble")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),

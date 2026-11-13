@@ -59,6 +59,7 @@ import {
   MEMORY_TAG_OPEN,
   estimateTokens,
   injectMemory,
+  injectSystemMemory,
   lastUserText,
   recallQueryPlan,
   recentDialogue,
@@ -2182,23 +2183,31 @@ function escapeAttr(value) {
   return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
+/** 去掉服务端 `<memory>` 包裹，只留正文：plain / json 两种形态不再套标签。 */
+function plainBody(text) {
+  return String(text || "")
+    .replace(/<memory(?:\s[^>]*)?>/gi, "")
+    .replace(/<\/memory\s*>/gi, "")
+    .trim();
+}
+
+/** 一条候选的属性：time / type 各自有才写。 */
+function memoryAttrsOfItem(time, type) {
+  const attrs = [];
+  if (time) attrs.push(`time="${escapeAttr(time)}"`);
+  if (type) attrs.push(`type="${escapeAttr(type)}"`);
+  return attrs;
+}
+
 /**
- * 记忆块：前言出现一次，之后每条候选一个独立块。
- *
- * 为什么每条单独包：时间与类型是每条自己的属性，包在整段外面就只能写一份。
- * 为什么前言也单独占一个块：写回时 stripInjected 只认完整标记块，前言如果裸放在
- * 块外，剥离后会把说明当成用户原话；放进块里才能一起被剥掉。没有候选时整段返回
- * 空串，不会只剩一个光秃秃的前言。
- *
- * 预算只算记忆正文，不算前言与标记：前言是固定说明，不是检索内容，改文案不该
- * 挤掉记忆；标记是承载格式的开销，也不该跟正文抢名额。
- * 先按剩余预算截断这一条，再包标记，保证每个块的关闭标记都不会被截掉。
+ * 候选 -> 正文条目。预算只算正文，条目按剩余预算逐条截断；
+ * 每条都带 time / type，交给各包装形态决定怎么摆。
  */
-export function memoryBlock(input, budgetTokens, preamble = "") {
+function memoryEntriesOf(input, budgetTokens) {
   const items = Array.isArray(input) ? input : [{ text: String(input || "") }];
   const budget = Number(budgetTokens);
   let left = Number.isFinite(budget) && budget > 0 ? budget : Infinity;
-  const blocks = [];
+  const entries = [];
 
   for (const item of items) {
     const source = typeof item?.text === "string" ? item.text.trim() : "";
@@ -2206,21 +2215,92 @@ export function memoryBlock(input, budgetTokens, preamble = "") {
     const body = trimToBudget(source, left);
     if (!body) continue;
     const used = estimateTokens(body);
-    const attrs = [];
-    const time = memoryTimeOf(item?.uri);
-    if (time) attrs.push(`time="${escapeAttr(time)}"`);
-    const type = typeof item?.type === "string" ? item.type.trim() : "";
-    if (type) attrs.push(`type="${escapeAttr(type)}"`);
-    const head = attrs.length ? `${MEMORY_TAG_OPEN.slice(0, -1)} ${attrs.join(" ")}>` : MEMORY_TAG_OPEN;
-    blocks.push(`${head}\n${body}\n${MEMORY_TAG_CLOSE}`);
+    entries.push({
+      body,
+      time: memoryTimeOf(item?.uri),
+      type: typeof item?.type === "string" ? item.type.trim() : "",
+    });
     left = Math.max(0, left - used);
     if (left <= 0) break;
   }
+  return entries;
+}
 
-  if (!blocks.length) return "";
+/** tag 形态：前言一个块，之后每条候选一个块。 */
+function tagBlockOf(entries, preamble) {
+  const blocks = entries.map((entry) => {
+    const attrs = memoryAttrsOfItem(entry.time, entry.type);
+    const head = attrs.length
+      ? `${MEMORY_TAG_OPEN.slice(0, -1)} ${attrs.join(" ")}>`
+      : MEMORY_TAG_OPEN;
+    return `${head}\n${entry.body}\n${MEMORY_TAG_CLOSE}`;
+  });
   const intro = String(preamble || "").trim();
   const head = intro ? [`${MEMORY_TAG_OPEN}\n${intro}\n${MEMORY_TAG_CLOSE}`] : [];
   return [...head, ...blocks].join("\n\n");
+}
+
+/** codeblock：整段套一层 `memory 围栏；围栏长度按正文里最长反引号串加一。 */
+function codeBlockOf(inner) {
+  const longest = Math.max(0, ...Array.from(inner.matchAll(/`+/g), (match) => match[0].length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}memory\n${inner}\n${fence}`;
+}
+
+/** document：模型见过的 `<document>` / `<context>` 一类标签。 */
+function documentBlockOf(inner) {
+  return `<document type="openviking-memory">\n${inner}\n</document>`;
+}
+
+/** json：整块一个对象，信号最强，正文里的引号交给 JSON.stringify。 */
+function jsonBlockOf(entries, preamble) {
+  const payload = {
+    memories: entries.map((entry) => {
+      const item = {};
+      if (entry.time) item.time = entry.time;
+      if (entry.type) item.type = entry.type;
+      item.text = plainBody(entry.body);
+      return item;
+    }),
+  };
+  const intro = String(preamble || "").trim();
+  if (intro) payload.preamble = intro;
+  return JSON.stringify(payload);
+}
+
+/** plain：标题行 + 分隔线，完全不套外层标签。 */
+function plainBlockOf(entries, preamble) {
+  const lines = ["--- openviking-memory ---"];
+  const intro = String(preamble || "").trim();
+  if (intro) lines.push(intro, "");
+  for (const entry of entries) {
+    const label = [entry.time, entry.type].filter(Boolean).join(" · ");
+    if (label) lines.push(`[${label}]`);
+    lines.push(plainBody(entry.body), "");
+  }
+  lines.push("--- /openviking-memory ---");
+  return lines.join("\n").trim();
+}
+
+/**
+ * 记忆块：同一份候选按 recallWrapMode 渲染成不同包装。
+ *
+ * 所有形态都遵守两条：
+ *   1. 前言只在整段最前面出现一次；没有候选时返回空串，不输出光秃秃的前言。
+ *   2. 预算只算记忆正文，不算前言与包装：前言是固定说明，包装是承载格式，
+ *      改文案或换形态不应该挤掉记忆。
+ *
+ * system 形态不在正文里包：它由 injectSystemMemory 放进 system 消息，这里仍产
+ * 标准标签块，保证万一落进用户消息也能被剥离。
+ */
+export function memoryBlock(input, budgetTokens, preamble = "", mode = "tag") {
+  const entries = memoryEntriesOf(input, budgetTokens);
+  if (!entries.length) return "";
+  if (mode === "codeblock") return codeBlockOf(tagBlockOf(entries, preamble));
+  if (mode === "document") return documentBlockOf(tagBlockOf(entries, preamble));
+  if (mode === "json") return jsonBlockOf(entries, preamble);
+  if (mode === "plain") return plainBlockOf(entries, preamble);
+  return tagBlockOf(entries, preamble);
 }
 
 /** 记忆块预算：全局配置与 DESIGN 上限取小。配置缺省或非法时用上限。 */
@@ -2715,10 +2795,12 @@ export function createRecallHandler(sdk, options = {}) {
       }
     }
 
+    const wrapMode = switches.recallWrapMode || "tag";
     const block = memoryBlock(
       assembled.items,
       budget,
       resolveRecallPreamble(switches.recallPreamble),
+      wrapMode,
     );
     if (!block) {
       log(sdk, "info", `skip: empty block (session=${sessionId})`);
@@ -2726,7 +2808,8 @@ export function createRecallHandler(sdk, options = {}) {
       return undefined;
     }
 
-    const injected = injectMemory(payload, block);
+    const injected =
+      wrapMode === "system" ? injectSystemMemory(payload, block) : injectMemory(payload, block);
     if (!injected) {
       log(sdk, "info", `skip: unknown payload shape (session=${sessionId})`);
       await report();

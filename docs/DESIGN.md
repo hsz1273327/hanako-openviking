@@ -190,6 +190,22 @@
 - 前言与标记不计入记忆预算：它们是固定说明与承载格式，不是检索内容；改文案不该挤掉记忆。
 - 写回剥离认带属性的开标签，前言与所有记忆块一起被剥掉，用户原话留下。
 
+包装方式（`recallWrapMode`，默认 `tag`）：
+
+| 值 | 形态 | 代价 / 取舍 |
+|---|---|---|
+| `tag` | `<openviking-memory time type>` 块 | 默认；结构清楚，写回剥离最稳 |
+| `codeblock` | 外层套 language=memory 的代码围栏 | 模型更习惯当数据读；多一层围栏，正文反引号多时围栏会加长 |
+| `document` | `<document type="openviking-memory">` | 模型见过文档标签，先验更强；外层结构比 tag 重 |
+| `json` | `{"memories":[{...}]}` | 字段边界最硬；引号转义与结构字符最费 token，剥离按括号配对扫描 |
+| `plain` | `--- openviking-memory ---` 标题行 | 最轻；结构最弱，剥离依赖固定标题行 |
+| `system` | 写进 system prompt，user 消息不动 | 身份最清楚；每轮变化会打断 prefix 缓存，云端按缓存命中计费时更贵 |
+
+`system` 的实际落点：Hana 发出的 payload 是 OpenAI 兼容形状，实测 system 在
+`messages[0]` 的 `role="system"` 里，payload 没有独立的 `system` / `systemPrompt`
+字段；`injectSystemMemory` 仍兼容那两种字段，没有 system 消息时会在最前面补一条。
+所有形态都由 `stripInjected` 剥掉，JSON 走括号配对扫描，不靠非贪婪正则猜。
+
 ### D. 会话技能面板（人工补丁）
 
 自动路由只能覆盖"分派出去的任务"。主会话自己做着做着发现技能不够用，这个判断应该由**人**做，

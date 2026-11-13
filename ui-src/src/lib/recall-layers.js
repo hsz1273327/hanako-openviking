@@ -86,6 +86,58 @@ export function normalizeAssembleMode(value) {
   return oneOf(value, ASSEMBLE_MODES, "rules");
 }
 
+/**
+ * 注入包装形态。与 src/ov/settings.js 的 RECALL_WRAP_MODES 同值。
+ * 每个选项自带代价说明：下拉里直接看得到，不用去翻文档。
+ */
+export const RECALL_WRAP_MODES = Object.freeze([
+  "tag",
+  "codeblock",
+  "document",
+  "json",
+  "plain",
+  "system",
+]);
+
+export const RECALL_WRAP_OPTIONS = Object.freeze([
+  {
+    value: "tag",
+    label: "标签块 · 默认，剥离最稳",
+    note: "现有形态。外层 <openviking-memory>，结构清楚，写回剥离最可靠。",
+  },
+  {
+    value: "codeblock",
+    label: "代码块 · 多一层围栏",
+    note: "整段套进 ```memory 围栏，模型更习惯把它当数据；多一层围栏占几个 token。",
+  },
+  {
+    value: "document",
+    label: "文档标签 · 结构更重",
+    note: "套 <document type=\"openviking-memory\">，模型见过这类结构；外层标签比 tag 更重。",
+  },
+  {
+    value: "json",
+    label: "JSON · 信号最强，转义最贵",
+    note: "整块写成 {\"memories\":[...]}。字段边界最硬，但引号转义与结构字符会多花 token。",
+  },
+  {
+    value: "plain",
+    label: "纯文本 · 结构最弱",
+    note: "只用分隔线与标题行划界，不套外层标签；结构最弱，剥离依赖固定标题。",
+  },
+  {
+    value: "system",
+    label: "System prompt · 身份最清楚，缓存会失效",
+    note:
+      "放进 system prompt，用户消息保持干净。每轮内容变化会打断 prefix 缓存，云端按缓存命中计费时会更贵。",
+  },
+]);
+
+/** 与后端同口径：认不出的值一律回 tag。 */
+export function normalizeRecallWrapMode(value) {
+  return oneOf(value, RECALL_WRAP_MODES, "tag");
+}
+
 // 近重复的默认值 / 边界 / 步长，与 src/ov/settings.js 的 DEDUPE_THRESHOLD_* 同值。
 // 步长只影响数字框的加减手感，不是归一化要圆整到的格点。
 // 默认 0.6 而不是 0.8：比的是每条记忆的 # Summary 段（没有就取前 300 字），不是全文。
@@ -1131,6 +1183,7 @@ export function paintRerankConfig(out) {
 export function paintAssembleConfig(out) {
   return {
     assembleMode: normalizeAssembleMode(out?.assembleMode),
+    recallWrapMode: normalizeRecallWrapMode(out?.recallWrapMode),
     recallPreamble: normalizeRecallPreamble(out?.recallPreamble),
   };
 }
