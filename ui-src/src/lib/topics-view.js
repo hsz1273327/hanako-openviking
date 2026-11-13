@@ -60,6 +60,9 @@ export function topicRowView(topic, nowMs) {
   const label = oneLine(row.label);
   const dormant = row.status === "dormant";
   const sessions = Array.isArray(row.sessionIds) ? row.sessionIds.length : 0;
+  const anchors = (Array.isArray(row.anchors) ? row.anchors : [])
+    .filter((item) => typeof item === "string" && item)
+    .slice(0, 8);
   return {
     id,
     shortId: shortTopicId(id),
@@ -68,6 +71,9 @@ export function topicRowView(topic, nowMs) {
     segmentsText: `${nonNegativeInt(row.segments)} 段`,
     seenText: relativeTime(row.lastSeenAt, nowMs),
     sessionsText: `${sessions} 个会话`,
+    anchors,
+    anchorsText: anchors.slice(0, 3).join("、"),
+    anchorsTitle: anchors.join("、"),
     statusText: dormant ? "沉睡" : "活跃",
     dormant,
     labelEditable: true,

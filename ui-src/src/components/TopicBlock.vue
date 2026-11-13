@@ -177,6 +177,17 @@ const columns = computed(() => [
       h("span", { class: "topic-summary", title: row.summary }, row.summary || "—"),
   },
   {
+    title: "关键词",
+    key: "anchors",
+    width: 150,
+    render: (row) =>
+      h(
+        "span",
+        { class: "topic-anchors", title: row.anchorsTitle || "" },
+        row.anchorsText || "—",
+      ),
+  },
+  {
     title: "段数",
     key: "segments",
     width: 58,
@@ -388,6 +399,9 @@ onMounted(load);
           {{ detailRow.segmentsText }} · 最近 {{ detailRow.seenText }} · {{ detailRow.sessionsText }}
         </p>
         <p class="topic-detail-summary">{{ detailTopic.summary || "暂无简述" }}</p>
+        <p v-if="detailRow.anchors.length" class="topic-detail-anchors">
+          关键词：{{ detailRow.anchors.join("、") }}
+        </p>
         <template #footer>
           <div class="topic-detail-ops">
             <NButton size="small" @click="editFromDetail(detailRow.id)">改标签</NButton>

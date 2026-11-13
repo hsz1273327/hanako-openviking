@@ -390,6 +390,11 @@ import {
   captureDecision,
   createCaptureHandler,
 } from "../src/memory/capture.js";
+import {
+  ANCHOR_MAX,
+  extractAnchors,
+  mergeAnchors,
+} from "../src/memory/anchors.js";
 // 话题表：读 / 写 / 候选池 / 记段，全部纯本地。
 import {
   emptyTopics,
@@ -3407,6 +3412,77 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
 
   eq(
+    "extractAnchors：路径 / 反引号 / 命令 / URL / 错误码与版本号各有样本",
+    (() => {
+      const anchors = extractAnchors([
+        {
+          role: "user",
+          content: [
+            "看 src/memory/capture.js 和 `captureCommitTurns`，再对一下 /home/hsz/manifest.json",
+            "npm run build",
+            "https://example.com/docs?x=1",
+            "报错 INVALID_ARGUMENT 和 ERR_TIMEOUT，版本 v0.1.0",
+          ].join("\n"),
+        },
+      ]);
+      return {
+        anchors,
+        has: [
+          "src/memory/capture.js",
+          "captureCommitTurns",
+          "/home/hsz/manifest.json",
+          "npm run build",
+          "https://example.com/docs?x=1",
+          "INVALID_ARGUMENT",
+          "ERR_TIMEOUT",
+          "v0.1.0",
+        ].every((item) => anchors.some((anchor) => anchor.toLowerCase() === item.toLowerCase())),
+      };
+    })(),
+    {
+      anchors: extractAnchors([
+        {
+          role: "user",
+          content: [
+            "看 src/memory/capture.js 和 `captureCommitTurns`，再对一下 /home/hsz/manifest.json",
+            "npm run build",
+            "https://example.com/docs?x=1",
+            "报错 INVALID_ARGUMENT 和 ERR_TIMEOUT，版本 v0.1.0",
+          ].join("\n"),
+        },
+      ]),
+      has: true,
+    },
+  );
+  eq(
+    "extractAnchors：忽略大小写去重，按次数降序、同频按首次出现；超 8 个只留前 8",
+    (() => {
+      const ordered = extractAnchors(["a.js a.js A.JS b.js b.js c.js"]);
+      const many = extractAnchors([
+        Array.from({ length: 10 }, (_, index) => `f${index}.js`).join(" "),
+      ]);
+      return [ordered, many.length, many[0], many[7]];
+    })(),
+    [["a.js", "b.js", "c.js"], ANCHOR_MAX, "f0.js", "f7.js"],
+  );
+  eq(
+    "mergeAnchors：旧 + 新去重、叠加频次、再取前 8",
+    [
+      mergeAnchors(["a.js", "b.js"], ["a.js", "c.js"]),
+      mergeAnchors(
+        Array.from({ length: 8 }, (_, index) => `old${index}.js`),
+        ["new.js"],
+      ).length,
+    ],
+    [["a.js", "b.js", "c.js"], 8],
+  );
+  eq(
+    "extractAnchors：纯标点 / 单字符 / true / false / null 丢掉",
+    extractAnchors(["`true` `false` `null` `x` `...` `,,,`"]),
+    [],
+  );
+
+  eq(
     "parseConsistencyAnswer：一致 / 同 / 继续 / same 算一致，换了 / 不同 / 新 / diff 算换了，其余没答",
     [
       ["一致", "同", "继续", "same", "Same."],
@@ -3437,15 +3513,18 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         [],
         [{ role: "user", content: "新的" }],
         [
-          { label: "发布窗口", summary: "周四上线" },
+          { label: "发布窗口", summary: "周四上线", anchors: ["manifest.json", "v0.1.0"] },
           { label: "灯带", summary: "电源走线" },
         ],
         "题面",
         "格式",
         "{{candidates}}\n{{current}}",
       );
-      return rendered.includes("[1] 发布窗口 —— 周四上线") &&
-        rendered.includes("[2] 灯带 —— 电源走线");
+      return (
+        rendered.includes("[1] 发布窗口 —— 周四上线\n    关键词：manifest.json、v0.1.0") &&
+        rendered.includes("[2] 灯带 —— 电源走线") &&
+        !rendered.includes("[2] 灯带 —— 电源走线\n    关键词：")
+      );
     })(),
   );
 
@@ -8515,6 +8594,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           id: otherId,
           label: "",
           summary: "",
+          anchors: [],
           sessionIds: ["s1"],
           firstSeenAt: "",
           lastSeenAt: "",
@@ -8579,6 +8659,35 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "recordSegment：模型没给简述（空串）时保留旧描述，不拿空串盖掉",
       [kept.topic.summary, kept.summaryUpdated, kept.topic.segments],
       ["周四上线；这一段补上了回滚方案与灰度顺序。", false, 4],
+    );
+
+    const anchorTable = emptyTopics();
+    const anchorFirst = recordSegment(anchorTable, {
+      verdict: { kind: "new" },
+      sessionId: "s1",
+      at: "2026-01-01T00:00:00.000Z",
+      label: "锚点话题",
+      summary: "",
+      anchors: ["a.js", "b.js"],
+    });
+    const anchorFirstAnchors = [...anchorFirst.topic.anchors];
+    const anchorSecond = recordSegment(anchorTable, {
+      verdict: { kind: "existing", id: anchorFirst.topic.id },
+      sessionId: "s1",
+      at: "2026-01-02T00:00:00.000Z",
+      label: "不该改的名字",
+      summary: "",
+      anchors: ["b.js", "c.js"],
+    });
+    eq(
+      "recordSegment：新建写 anchors；已有话题合并去重、按频次重排；简述空也照合并",
+      [
+        anchorFirstAnchors,
+        anchorSecond.topic.anchors,
+        anchorSecond.topic.summary,
+        anchorSecond.topic.label,
+      ],
+      [["a.js", "b.js"], ["b.js", "a.js", "c.js"], "", "锚点话题"],
     );
 
     const serialDir = path.join(root, "topics-serialize");
@@ -9379,6 +9488,25 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         readTopics(second.stateDir).topics[0]?.segments,
       ],
       [first.report.topic?.id, false, 2, 2],
+    );
+
+    const anchorRun = await runCapture({
+      token: "topic-anchors-run",
+      lines: [
+        record({
+          id: "a1",
+          role: "user",
+          content: "把 `captureCommitTurns` 和 manifest.json 一起看\nnpm run build",
+        }),
+        record({ id: "a2", role: "assistant", content: "看到 ERR_TIMEOUT 了" }),
+      ],
+      values: { captureCommitSchema: "2", captureCommitTurns: "1" },
+      server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
+    });
+    eq(
+      "写回链路：这一段抽出的 anchors 跟着新话题落表",
+      readTopics(anchorRun.stateDir).topics[0]?.anchors,
+      ["captureCommitTurns", "manifest.json", "npm run build", "ERR_TIMEOUT"],
     );
 
     const broken = await runCapture({
@@ -20593,6 +20721,7 @@ check(
       id: newTopicId(),
       label: "乙话题",
       summary: "第二件事",
+      anchors: [],
       sessionIds: ["s3"],
       firstSeenAt: NOW,
       lastSeenAt: NOW,

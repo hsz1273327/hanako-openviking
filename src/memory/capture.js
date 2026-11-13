@@ -42,6 +42,7 @@ import {
 import { askModelChannel, postJson, serviceAuthHeaders } from "./recall.js";
 import { readSessionText } from "./session-reader.js";
 import { candidatePool, readTopics, recordSegment, withTopics } from "./topics.js";
+import { extractAnchors } from "./anchors.js";
 
 /**
  * 内置默认题面（面板里可编辑的那一格）。字面量在 src/ov/prompt-defaults.js——
@@ -98,7 +99,13 @@ export function renderTopicPrompt(
   const values = {
     question: String(question || CAPTURE_TOPIC_QUESTION),
     candidates: list.length
-      ? list.map((topic, index) => `[${index + 1}] ${topic.label} —— ${topic.summary}`).join("\n")
+      ? list
+          .map((topic, index) => {
+            const line = `[${index + 1}] ${topic.label} —— ${topic.summary}`;
+            const anchors = (Array.isArray(topic?.anchors) ? topic.anchors : []).filter(Boolean);
+            return anchors.length ? `${line}\n    关键词：${anchors.join("、")}` : line;
+          })
+          .join("\n")
       : "（无）",
     previous: renderMessages(previousMessages).join("\n"),
     current: renderMessages(currentMessages).join("\n"),
@@ -575,7 +582,11 @@ function desiredPolicyOf(switches) {
 function buildClassifier({ judge, sdk, switches, previous, segment, candidates }) {
   const current = Array.isArray(segment) ? segment : [];
   const pool = Array.isArray(candidates) ? candidates : [];
-  const fallback = () => ({ kind: "new", ...deriveTopicTitle(current) });
+  const fallback = () => ({
+    kind: "new",
+    ...deriveTopicTitle(current),
+    anchors: extractAnchors(current),
+  });
   // 配置非空就用用户写的那句，否则用内置默认。trim 只用来判空，不把用户那句本身 trim 掉。
   const question = String(switches.capturePrompt ?? "").trim()
     ? switches.capturePrompt
@@ -619,7 +630,11 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
       }
       if (!parsed) return null;
       if (parsed.choice === "new") {
-        return { kind: "new", ...deriveTopicTitle(current, parsed.label, parsed.summary) };
+        return {
+          kind: "new",
+          ...deriveTopicTitle(current, parsed.label, parsed.summary),
+          anchors: extractAnchors(current),
+        };
       }
       // 归到已有话题时把模型写的合并简述带回去，recordSegment 用它更新 summary；
       // label 不在这一支里改：话题名要保持稳定。
@@ -627,6 +642,7 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
         kind: "existing",
         id: pool[parsed.choice - 1].id,
         summary: parsed.summary,
+        anchors: extractAnchors(current),
       };
     };
   }
@@ -666,7 +682,11 @@ function buildClassifier({ judge, sdk, switches, previous, segment, candidates }
       if (!match) return null;
       const index = Number(match[1]);
       if (!Number.isInteger(index) || index < 1 || index > pool.length) return null;
-      return { kind: "existing", id: pool[index - 1].id };
+      return {
+        kind: "existing",
+        id: pool[index - 1].id,
+        anchors: extractAnchors(current),
+      };
     };
   }
 
@@ -792,7 +812,7 @@ async function resolveTopicVerdict({
   if (topicVerdict && typeof topicVerdict === "object") return topicVerdict;
   // 判断失败不能变成漏写：按新话题落表。
   if (!classifyError) warnLine("topic judge failed at commit: 按新话题处理");
-  return { kind: "new", ...deriveTopicTitle(segment) };
+  return { kind: "new", ...deriveTopicTitle(segment), anchors: extractAnchors(segment) };
 }
 
 /**
@@ -843,6 +863,10 @@ export async function anchorSegment({
         label: topicVerdict.label,
         // 简述上限 500：模型回答已截过一次，这里兜住直接调用 anchorSegment 的路径。
         summary: clipTopicSummary(topicVerdict.summary),
+        // 归类结论里没带就现场从这一段抽；锚点与模型无关。
+        anchors: Array.isArray(topicVerdict.anchors)
+          ? topicVerdict.anchors
+          : extractAnchors(segment),
       }),
     { onWriteError: warnLine },
   );
@@ -913,6 +937,10 @@ export async function commitSegment({
         at,
         label: topicVerdict.label,
         summary: clipTopicSummary(topicVerdict.summary),
+        // 归类结论里没带就现场从这一段抽；锚点与模型无关。
+        anchors: Array.isArray(topicVerdict.anchors)
+          ? topicVerdict.anchors
+          : extractAnchors(segment),
       });
       const tags = captureTags(outcome.topic, outcome.seq);
       await client.commit(sessionId, { tags });

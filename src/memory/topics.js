@@ -7,6 +7,7 @@
 // 后写的那份会把先写的 segments 覆盖掉。按 dataDir 分键排队，同一个文件只有一条链。
 
 import fs from "node:fs";
+import { mergeAnchors } from "./anchors.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -55,6 +56,7 @@ function sanitizeTopic(raw) {
     id,
     label: stringOf(raw.label),
     summary: stringOf(raw.summary),
+    anchors: mergeAnchors([], raw.anchors),
     sessionIds,
     firstSeenAt: stringOf(raw.firstSeenAt),
     lastSeenAt: stringOf(raw.lastSeenAt),
@@ -180,7 +182,7 @@ export function candidatePool(table, { sessionId, scope, limit } = {}) {
  * dormant 的话题被认到时只更新计数与时间，状态保持原样：没有「自动唤醒」策略，
  * 不要在这里发明一个。
  */
-export function recordSegment(table, { verdict, sessionId, at, label, summary } = {}) {
+export function recordSegment(table, { verdict, sessionId, at, label, summary, anchors } = {}) {
   if (!table || typeof table !== "object") return null;
   if (!Array.isArray(table.topics)) table.topics = [];
   table.version = 1;
@@ -197,6 +199,8 @@ export function recordSegment(table, { verdict, sessionId, at, label, summary } 
     const previousSummary = stringOf(existing.summary);
     const nextSummary = stringOf(summary);
     if (nextSummary) existing.summary = nextSummary;
+    // 锚点与简述互相独立：简述空也可以合并新的关键词；旧表没有这个字段按空处理。
+    existing.anchors = mergeAnchors(existing.anchors, anchors);
     existing.segments = positiveInt(existing.segments) + 1;
     if (when) existing.lastSeenAt = when;
     if (session && !existing.sessionIds.includes(session)) {
@@ -215,6 +219,7 @@ export function recordSegment(table, { verdict, sessionId, at, label, summary } 
     id: newTopicId(),
     label: stringOf(label) || "新话题",
     summary: stringOf(summary),
+    anchors: mergeAnchors([], anchors),
     sessionIds: session ? [session] : [],
     firstSeenAt: when,
     lastSeenAt: when,

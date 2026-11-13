@@ -213,6 +213,8 @@ body { background-color: rgba(0, 0, 0, 0.02); }
   border-top: 1px solid var(--ov-border, rgba(128, 128, 128, 0.18));
 }
 .prompt-entry .field-static { margin: 0; }
+.topic-anchors { font-size: 11px; opacity: 0.62; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.topic-detail-anchors { margin: 10px 0 0; font-size: 12px; line-height: 1.6; opacity: 0.72; user-select: text; }
 /* 只读说明：与 hint 同一档字号，但读起来是一段话而不是提示。 */
 .field-static { margin: 0; font-size: 11.5px; line-height: 1.55; opacity: 0.7; }
 
