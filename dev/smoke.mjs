@@ -3478,7 +3478,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
   );
   eq(
     "extractAnchors：纯标点 / 单字符 / true / false / null 丢掉",
-    extractAnchors(["`true` `false` `null` `x` `...` `,,,`"]),
+    extractAnchors(["`true` `false` `null` `x` `...` `,,,` `.md`"]),
     [],
   );
 
@@ -9503,12 +9503,12 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       values: { captureCommitSchema: "2", captureCommitTurns: "1" },
       server: { commit_count: 0, message_count: 0, pending_tokens: 10 },
     });
+    const anchorTopic = readTopics(anchorRun.stateDir).topics[0];
     eq(
       "写回链路：这一段抽出的 anchors 跟着新话题落表",
-      readTopics(anchorRun.stateDir).topics[0]?.anchors,
+      anchorTopic?.anchors,
       ["captureCommitTurns", "manifest.json", "npm run build", "ERR_TIMEOUT"],
     );
-
     const broken = await runCapture({
       token: "broken-topics-run",
       lines: [

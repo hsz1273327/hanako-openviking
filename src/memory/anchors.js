@@ -24,6 +24,8 @@ export function normalizeAnchor(text) {
   if (Array.from(value).length < 2) return "";
   if (/^[\p{P}\p{S}\s]+$/u.test(value)) return "";
   if (NOISE.has(value.toLowerCase())) return "";
+  // 只有扩展名（`.md` / `.js`）没有文件名，不算锚点。
+  if (/^\.[A-Za-z0-9]{1,8}$/.test(value)) return "";
   return Array.from(value).slice(0, ANCHOR_MAX_CHARS).join("");
 }
 
