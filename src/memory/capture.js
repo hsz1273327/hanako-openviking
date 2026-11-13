@@ -447,8 +447,21 @@ export async function captureDecision({
   const forced = Number.isFinite(Number(forcedTurns))
     ? Number(forcedTurns)
     : CAPTURE_COMMIT_TURNS_DEFAULT;
-  // 强制线不吃最少轮数，也不问模型：攒够了就交，两步都不走。
-  if (turns >= forced) return { commit: true, reason: "turns" };
+  const runClassify = async () => {
+    if (typeof classify !== "function") return null;
+    try {
+      const verdict = await classify();
+      return verdict && typeof verdict === "object" ? verdict : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // 强制线也走第二步：提交出去的东西必须有归属，不能因为轮数到了就跳过归类。
+  // 只跳过第一步的一致性比较（没必要再问「还在不在」）。
+  if (turns >= forced) {
+    return { commit: true, reason: "turns", verdict: await runClassify() };
+  }
   if (early !== true) return { commit: false, reason: "below-limit" };
 
   const min = Number.isFinite(Number(minTurns))
@@ -456,10 +469,12 @@ export async function captureDecision({
     : CAPTURE_MIN_TURNS_DEFAULT;
   if (turns < min) return { commit: false, reason: "too-few-turns" };
 
-  // 没有缓存话题（首次提交 / 表里查不到那个 id）：没有可比的对象，
-  // 直接立基线。归类交给 commitSegment 在提交时补，不进第一步。
+  // 没有缓存话题：先归类建锚点，但不提交、不推进游标。
+  // 下次才有东西可以拿来做一致性比较；这一步不能顺手把记忆写出去。
   const topic = currentTopic && typeof currentTopic === "object" ? currentTopic : null;
-  if (!topic || !topic.id) return { commit: true, reason: "baseline" };
+  if (!topic || !topic.id) {
+    return { commit: false, anchor: true, reason: "anchor", verdict: await runClassify() };
+  }
 
   // 第一步：只回答还在这条话题上，还是换了。判不出来不提交，也不进第二步。
   if (typeof probe !== "function") return { commit: false, reason: "consistency-failed" };
@@ -483,8 +498,8 @@ export async function captureDecision({
   if (!verdict || typeof verdict !== "object") {
     return { commit: false, reason: "classify-failed" };
   }
-  if (verdict.kind === "new") return { commit: true, reason: "topic", verdict };
-  if (verdict.id === topic.id) return { commit: false, reason: "same-topic" };
+  // 第一步已经判定换了，就提交；第二步只决定归到哪个话题（哪怕归回当前这条，
+  // 也以第一步的「换了」为准，不能把一次已经发生的切换吞掉）。
   return { commit: true, reason: "topic", verdict };
 }
 
@@ -496,6 +511,7 @@ function reportOf(partial = {}) {
     wrote: 0,
     patched: false,
     committed: false,
+    anchored: false,
     mode: "fixed",
     topic: null,
     pendingTurns: 0,
@@ -703,6 +719,122 @@ function buildConsistencyProbe({ judge, sdk, switches, topic, segment }) {
   return null;
 }
 
+/** 一次提交 / 锚点共用的判据范围：这一段、之前的上下文、候选池。 */
+function segmentContextOf({ dataDir, sessionId, messages, cursor, switches }) {
+  const list = Array.isArray(messages) ? messages : [];
+  const base = normalizeCursor(cursor);
+  const segment = list.slice(base.lastCommitMessageCount, base.lastMessageCount);
+  const previous = tailTurns(
+    list.slice(0, base.lastCommitMessageCount),
+    switches?.captureContextTurns,
+  );
+  const candidates = candidatePool(readTopics(dataDir), {
+    sessionId,
+    scope: switches?.captureTopicScope,
+    limit: switches?.captureTopicCandidates,
+  });
+  return { list, base, segment, previous, candidates };
+}
+
+/**
+ * 拿到这一段的归类结论：调用方给了就用，没给才自己归类。
+ * 判断失败按新话题处理，不让一次模型抽风变成漏写。
+ */
+async function resolveTopicVerdict({
+  sdk,
+  switches,
+  judge,
+  previous,
+  segment,
+  candidates,
+  verdict,
+  warnLine,
+}) {
+  if (verdict && typeof verdict === "object") return verdict;
+  // 默认与实时链路同口径：恒取 captureEarlyJudge（顶层报告里的 mode 仍然是
+  // captureEffectiveEarly ? judge : "fixed"，那个字段不动）。fixed 只作为兜底。
+  const effectiveJudge = judge || switches?.captureEarlyJudge || "fixed";
+  let topicVerdict = null;
+  let classifyError = null;
+  try {
+    topicVerdict = await buildClassifier({
+      judge: effectiveJudge,
+      sdk,
+      switches,
+      previous,
+      segment,
+      candidates,
+    })();
+  } catch (error) {
+    classifyError = error;
+    warnLine(`topic judge failed at commit: ${errorText(error)}`);
+  }
+  if (topicVerdict && typeof topicVerdict === "object") return topicVerdict;
+  // 判断失败不能变成漏写：按新话题落表。
+  if (!classifyError) warnLine("topic judge failed at commit: 按新话题处理");
+  return { kind: "new", ...deriveTopicTitle(segment) };
+}
+
+/**
+ * 只建话题锚点：归类 → 落话题表，不 commit、不推进游标。
+ *
+ * 与 commitSegment 分开，是因为「记下这一段属于哪个话题」和「把这一段记忆提交出去」
+ * 是两件事：首次提交前要先把锚点立起来，下一次才有东西可以比一致性，但这时
+ * 不该产生任何服务端记忆。返回 { topic }。
+ */
+export async function anchorSegment({
+  sdk,
+  dataDir,
+  sessionId,
+  messages,
+  cursor,
+  switches,
+  judge,
+  nowIso,
+  verdict,
+  onWarn,
+}) {
+  const warnLine = typeof onWarn === "function" ? onWarn : (message) => warn(sdk, message);
+  const { segment, previous, candidates } = segmentContextOf({
+    dataDir,
+    sessionId,
+    messages,
+    cursor,
+    switches,
+  });
+  const topicVerdict = await resolveTopicVerdict({
+    sdk,
+    switches,
+    judge,
+    previous,
+    segment,
+    candidates,
+    verdict,
+    warnLine,
+  });
+  const at = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
+  const recorded = await withTopics(
+    dataDir,
+    (table) =>
+      recordSegment(table, {
+        verdict: topicVerdict,
+        sessionId,
+        at,
+        label: topicVerdict.label,
+        summary: topicVerdict.summary,
+      }),
+    { onWriteError: warnLine },
+  );
+  return {
+    topic: {
+      id: recorded.topic.id,
+      seq: recorded.seq,
+      label: recorded.topic.label,
+      isNew: recorded.isNew,
+    },
+  };
+}
+
 /**
  * 提交一段：归类 → 落话题表 → 带三件套标签 commit → 推进本地游标。
  *
@@ -728,50 +860,27 @@ export async function commitSegment({
   verdict,
   onWarn,
 }) {
-  const list = Array.isArray(messages) ? messages : [];
-  const base = normalizeCursor(cursor);
   const warnLine = typeof onWarn === "function" ? onWarn : (message) => warn(sdk, message);
-
-  // 1–3. 判据范围 = 上次提交之后的所有消息；「之前」= 上次提交之前最近若干完整轮。
-  const segment = list.slice(base.lastCommitMessageCount, base.lastMessageCount);
-  const previous = tailTurns(
-    list.slice(0, base.lastCommitMessageCount),
-    switches?.captureContextTurns,
-  );
-  const candidates = candidatePool(readTopics(dataDir), {
+  const { base, segment, previous, candidates } = segmentContextOf({
+    dataDir,
     sessionId,
-    scope: switches?.captureTopicScope,
-    limit: switches?.captureTopicCandidates,
+    messages,
+    cursor,
+    switches,
   });
 
-  // 4. 没有现成结论就自己归类。判断方式与实时链路保持一致。
-  let topicVerdict = verdict && typeof verdict === "object" ? verdict : null;
-  if (!topicVerdict) {
-    // 默认与实时链路同口径：恒取 captureEarlyJudge（顶层报告里的 mode 仍然是
-    // captureEffectiveEarly ? judge : "fixed"，那个字段不动）。fixed 只作为兜底。
-    const effectiveJudge = judge || switches?.captureEarlyJudge || "fixed";
-    let classifyError = null;
-    try {
-      topicVerdict = await buildClassifier({
-        judge: effectiveJudge,
-        sdk,
-        switches,
-        previous,
-        segment,
-        candidates,
-      })();
-    } catch (error) {
-      classifyError = error;
-      warnLine(`topic judge failed at commit: ${errorText(error)}`);
-    }
-    if (!topicVerdict) {
-      // 判断失败不能变成漏写：按新话题落表，commit 照发。
-      if (!classifyError) warnLine("topic judge failed at commit: 按新话题处理");
-      topicVerdict = { kind: "new", ...deriveTopicTitle(segment) };
-    }
-  }
+  const topicVerdict = await resolveTopicVerdict({
+    sdk,
+    switches,
+    judge,
+    previous,
+    segment,
+    candidates,
+    verdict,
+    warnLine,
+  });
 
-  // 5. 表与 commit 在同一次 withTopics 里：commit 失败表不落盘，游标也不动。
+  // 表与 commit 在同一次 withTopics 里：commit 失败表不落盘，游标也不动。
   const at = typeof nowIso === "string" && nowIso ? nowIso : new Date().toISOString();
   const recorded = await withTopics(
     dataDir,
@@ -790,7 +899,7 @@ export async function commitSegment({
     { onWriteError: warnLine },
   );
 
-  // 6. 提交成功之后的游标。
+  // 提交成功之后的游标。
   const next = markCommitted(base, {
     at,
     commitCount: base.lastCommitCount + 1,
@@ -1064,6 +1173,7 @@ export function createCaptureHandler(sdk, deps = {}) {
         }
 
         let committed = false;
+        let anchored = false;
         let topicReport = null;
         let committedTopicId = "";
         if (decision.commit) {
@@ -1092,6 +1202,27 @@ export function createCaptureHandler(sdk, deps = {}) {
           } catch (error) {
             // 提交失败：游标不动，话题表也不落。下一轮对账会认出来。
             warn(sdk, `commit failed: ${errorText(error)}`);
+          }
+        } else if (decision.anchor) {
+          // 只建锚点：归类落表 + 写 capture.topicId，不 commit、不推进游标。
+          // 这是「先有可比的对象」，与服务端记忆无关。
+          try {
+            const out = await anchorSegment({
+              sdk,
+              dataDir,
+              sessionId,
+              messages,
+              cursor,
+              switches,
+              judge,
+              nowIso: now(),
+              verdict: decision.verdict || { kind: "new", ...deriveTopicTitle(segment) },
+            });
+            committedTopicId = out.topic.id;
+            topicReport = out.topic;
+            anchored = true;
+          } catch (error) {
+            warn(sdk, `anchor topic failed: ${errorText(error)}`);
           }
         }
 
@@ -1124,6 +1255,7 @@ export function createCaptureHandler(sdk, deps = {}) {
           wrote,
           patched,
           committed,
+          anchored,
           topic: topicReport,
           pendingTurns: cursor.pendingTurns,
           written: cursor.lastMessageCount,

@@ -8597,10 +8597,10 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         { commit: false, reason: "empty" },
-        { commit: true, reason: "turns" },
+        { commit: true, reason: "turns", verdict: { kind: "new" } },
         { commit: false, reason: "below-limit" },
         { commit: false, reason: "too-few-turns" },
-        { commit: true, reason: "baseline" },
+        { commit: false, anchor: true, reason: "anchor", verdict: { kind: "new" } },
       ],
     );
   }
@@ -8618,6 +8618,16 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
           sessionIds: [ID],
           firstSeenAt: "2026-01-01T00:00:00.000Z",
           lastSeenAt: "2026-01-01T00:00:00.000Z",
+          segments: 1,
+          status: "active",
+        },
+        {
+          id: "t_77777777-7777-4777-8777-777777777777",
+          label: "另一件事",
+          summary: "别的模块",
+          sessionIds: [ID],
+          firstSeenAt: "2025-12-31T00:00:00.000Z",
+          lastSeenAt: "2025-12-31T00:00:00.000Z",
           segments: 1,
           status: "active",
         },
@@ -8645,10 +8655,21 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       captureMinTurns: "1",
       captureCommitTurns: "100",
     };
+    // 有缓存话题时模型会被问两次：第一步一致性回「换了」，第二步照旧回答归类。
+    const twoStepModel = (answer) =>
+      modelSdk({
+        stream: ({ messages }) =>
+          ndjsonResponse([
+            {
+              type: "text-delta",
+              delta: String(messages?.[0]?.content || "").includes("当前话题：")
+                ? "换了"
+                : answer,
+            },
+          ]),
+      });
 
-    const sameModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
-    });
+    const sameModel = twoStepModel("2");
     const same = await runCapture({
       token: "topic-same",
       lines,
@@ -8657,12 +8678,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       models: sameModel.models,
       server: pending,
       topics: existing,
+      topicId,
     });
     const sameCommit = same.calls.find(
       (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
     );
     eq(
-      "提前提交 + llm 认出编号 1：提交、归到同一话题、seq 加到 2",
+      "提前提交 + 第一步换了 + 归类认出编号 2：提交、归到另一话题",
       [
         same.report.committed,
         Boolean(sameCommit),
@@ -8671,33 +8693,35 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         same.report.topic?.isNew,
         same.report.mode,
       ],
-      [true, true, topicId, 2, false, "llm"],
+      [true, true, "t_77777777-7777-4777-8777-777777777777", 2, false, "llm"],
     );
     eq(
       "提前提交的 commit 带三件套 tags（id / seq / label）",
       bodyOf(sameCommit).extraction_metadata.event.tags,
-      [`topic-id=${topicId}`, "topic-seq=2", "topic-label=发布窗口"],
+      [
+        "topic-id=t_77777777-7777-4777-8777-777777777777",
+        "topic-seq=2",
+        "topic-label=另一件事",
+      ],
     );
     check(
       "llm 归类题面里有编号候选与之前 / 对话",
-      String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes("[1] 发布窗口") &&
-        String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes("之前（供参考）："),
-      JSON.stringify(sameModel.calls.stream[0] || {}),
+      String(sameModel.calls.stream[1]?.messages?.[0]?.content || "").includes("[1] 发布窗口") &&
+        String(sameModel.calls.stream[1]?.messages?.[0]?.content || "").includes("之前（供参考）："),
+      JSON.stringify(sameModel.calls.stream[1] || {}),
     );
     check(
       "llm 路径的题面含固定追加的答案格式块（主题 / 简述 / 归属）",
-      String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
+      String(sameModel.calls.stream[1]?.messages?.[0]?.content || "").includes(
         CAPTURE_TOPIC_FORMAT,
       ) &&
-        String(sameModel.calls.stream[0]?.messages?.[0]?.content || "").includes(
+        String(sameModel.calls.stream[1]?.messages?.[0]?.content || "").includes(
           "归属：<已有话题编号，或 新>",
         ),
-      String(sameModel.calls.stream[0]?.messages?.[0]?.content || ""),
+      String(sameModel.calls.stream[1]?.messages?.[0]?.content || ""),
     );
 
-    const newModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "new" }]),
-    });
+    const newModel = twoStepModel("new");
     const fresh = await runCapture({
       token: "topic-new",
       lines,
@@ -8706,6 +8730,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       models: newModel.models,
       server: pending,
       topics: existing,
+      topicId,
     });
     eq(
       "提前提交 + llm 回 new：提交并新建话题",
@@ -8780,18 +8805,80 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       server: pending,
       topics: existing,
     });
+    const noCacheCommit = noCache.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
     eq(
-      "没有缓存话题：直接提交，第一步不调（模型只被归类问一次）",
-      [noCache.report.committed, noCacheModel.calls.stream.length, noCache.report.topic?.id],
-      [true, 1, topicId],
+      "没有缓存话题 + 达到最少轮数：只归类建锚点，不 commit、不调第一步",
+      [
+        noCache.report.committed,
+        noCache.report.anchored,
+        Boolean(noCacheCommit),
+        noCacheModel.calls.stream.length,
+        Boolean(noCache.report.topic?.id),
+        readSession(noCache.stateDir, ID).capture?.topicId === noCache.report.topic?.id,
+        readCursor(noCache.stateDir).lastCommitCount,
+        readCursor(noCache.stateDir).lastCommitMessageCount,
+      ],
+      [false, true, false, 1, true, true, 0, 0],
     );
 
-    const themedModel = modelSdk({
-      stream: () =>
-        ndjsonResponse([
-          { type: "text-delta", delta: "主题：灯带电源走线\n归属：new" },
-        ]),
+    const belowMinModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
     });
+    const belowMin = await runCapture({
+      token: "topic-no-cache-below-min",
+      lines,
+      cursor: judgeCursor,
+      values: { ...llmBase, captureMinTurns: "5" },
+      models: belowMinModel.models,
+      server: pending,
+      topics: existing,
+    });
+    const belowMinCommit = belowMin.calls.find(
+      (call) => methodOf(call) === "POST" && pathOf(call.url).endsWith("/commit"),
+    );
+    eq(
+      "没有缓存话题 + 未达最少轮数：归类零调用，不建锚点也不提交",
+      [
+        belowMin.report.committed,
+        belowMin.report.anchored,
+        Boolean(belowMinCommit),
+        belowMinModel.calls.stream.length,
+        Boolean(readSession(belowMin.stateDir, ID).capture?.topicId),
+      ],
+      [false, false, false, 0, false],
+    );
+
+    // 强制线也走第二步：归类一次，然后带着结论提交。
+    const forcedModel = modelSdk({
+      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
+    });
+    const forcedRun = await runCapture({
+      token: "topic-forced-classify",
+      lines,
+      cursor: judgeCursor,
+      values: {
+        ...llmBase,
+        captureCommitTurns: "1",
+      },
+      models: forcedModel.models,
+      server: pending,
+      topics: existing,
+      topicId,
+    });
+    eq(
+      "强制轮数到线：先归类一次再提交，不是跳过归类",
+      [
+        forcedRun.report.committed,
+        forcedModel.calls.stream.length,
+        forcedRun.report.topic?.id,
+        forcedRun.report.reason,
+      ],
+      [true, 1, topicId, undefined],
+    );
+
+    const themedModel = twoStepModel("主题：灯带电源走线\n归属：new");
     const themed = await runCapture({
       token: "topic-new-theme",
       lines,
@@ -8800,6 +8887,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       models: themedModel.models,
       server: pending,
       topics: existing,
+      topicId,
     });
     eq(
       "提前提交 + llm 回「主题 + new」：新话题的 label 用主题那句，不用本段第一句",
@@ -8808,6 +8896,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     );
 
     // choice 题的答案形状由 questions.q 决定：题面末尾不能带「只输出这两行」的格式块。
+    let discCalls = 0;
     const disc = await runCapture({
       token: "topic-discriminator-prompt",
       lines,
@@ -8820,11 +8909,17 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       },
       server: pending,
       topics: existing,
-      judge: () => ({ answers: { q: { choice: "t1", confidence: 0.9 } } }),
+      topicId,
+      judge: () => {
+        discCalls += 1;
+        return discCalls === 1
+          ? { answers: { q: { choice: "changed", confidence: 0.9 } } }
+          : { answers: { q: { choice: "t2", confidence: 0.9 } } };
+      },
     });
-    const systemoneCall = disc.calls.find(
+    const systemoneCall = disc.calls.filter(
       (call) => methodOf(call) === "POST" && pathOf(call.url) === "/v1/systemone",
-    );
+    )[1];
     const systemoneBody = bodyOf(systemoneCall);
     eq(
       "discriminator 路径：state.content 有题面与「对话：」但不带答案格式块，instructions 仍是题面那一句",
@@ -8840,7 +8935,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       ],
       [
         true,
-        topicId,
+        "t_77777777-7777-4777-8777-777777777777",
         "object",
         "text",
         true,
@@ -9146,7 +9241,13 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     });
     const firstTopics = readTopics(first.stateDir);
     const secondModel = modelSdk({
-      stream: () => ndjsonResponse([{ type: "text-delta", delta: "1" }]),
+      stream: ({ messages }) =>
+        ndjsonResponse([
+          {
+            type: "text-delta",
+            delta: String(messages?.[0]?.content || "").includes("当前话题：") ? "换了" : "1",
+          },
+        ]),
     });
     const second = await runCapture({
       token: "same-topic-2",
@@ -9158,8 +9259,9 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       cursor: first.cursor,
       values: early,
       models: secondModel.models,
-      server: { commit_count: 1, message_count: 2, pending_tokens: 10 },
+      server: { commit_count: 0, message_count: 2, pending_tokens: 10 },
       topics: firstTopics,
+      topicId: first.report.topic?.id,
     });
     eq(
       "新建话题第二次提交（判断器回同一个候选）归回同一 id，segments 加到 2",
@@ -10004,15 +10106,15 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         threwAsked,
       ],
       [
-        { commit: true, reason: "turns" },
+        { commit: true, reason: "turns", verdict: { kind: "new" } },
         0,
-        0,
+        1,
         { commit: false, reason: "too-few-turns" },
         0,
         0,
-        { commit: true, reason: "baseline" },
+        { commit: false, anchor: true, reason: "anchor", verdict: { kind: "new" } },
         0,
-        0,
+        1,
         { commit: false, reason: "same-topic" },
         0,
         { commit: false, reason: "consistency-failed" },
@@ -10026,7 +10128,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
     const otherVerdict = { kind: "existing", id: "t_other" };
     const newVerdict = { kind: "new", label: "新事", summary: "" };
     eq(
-      "captureDecision：换了才归类；归到当前话题仍不提交，归到别的话题 / 新话题提交并透出 verdict",
+      "captureDecision：换了才归类；只要第一步判了换了就提交，归属由归类结果决定",
       [
         await captureDecision({
           early: true,
@@ -10057,7 +10159,7 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
         }),
       ],
       [
-        { commit: false, reason: "same-topic" },
+        { commit: true, reason: "topic", verdict: sameVerdict },
         { commit: true, reason: "topic", verdict: otherVerdict },
         { commit: true, reason: "topic", verdict: newVerdict },
       ],
