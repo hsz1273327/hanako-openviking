@@ -241,6 +241,28 @@ function onEnter(event) {
                 <span class="field-hint">所有情况共用：攒够这么多轮就提交。一轮 = 一条用户消息加至少一条助手消息。范围 1–100。</span>
               </div>
 
+              <!-- 两个轮数挨着：最小（何时开始看）与最大（到点必交）的关系一眼能比。 -->
+              <div class="field">
+                <label for="captureMinTurns">最少触发轮数</label>
+                <NInputNumber
+                  size="small"
+                  style="width: 100%"
+                  :show-button="false"
+                  :update-value-on-input="false"
+                  :min="CAPTURE_MIN_RANGE[0]"
+                  :max="CAPTURE_MIN_RANGE[1]"
+                  :step="1"
+                  placeholder="默认 2"
+                  aria-label="最少触发轮数"
+                  :input-props="{ id: 'captureMinTurns' }"
+                  :value="typeof state.form.captureMinTurns === 'number' ? state.form.captureMinTurns : null"
+                  @focus="setFocus('captureMinTurns')"
+                  @blur="setFocus('')"
+                  @update:value="(value) => setCaptureNumber('captureMinTurns', value)"
+                />
+                <span class="field-hint">攒够这么多轮才开始做一致性判断，默认 2；不能高于强制提交轮数（超出时按强制线算）。范围 1–50。</span>
+              </div>
+
               <div class="field">
                 <span class="field-label">兜底提交</span>
                 <NSwitch
@@ -321,27 +343,6 @@ function onEnter(event) {
                   @update:value="(value) => setCaptureNumber('captureContextTurns', value)"
                 />
                 <span class="field-hint">归类时回看几轮之前的对话，默认 3。范围 1–20。</span>
-              </div>
-
-              <div class="field">
-                <label for="captureMinTurns">最少触发轮数</label>
-                <NInputNumber
-                  size="small"
-                  style="width: 100%"
-                  :show-button="false"
-                  :update-value-on-input="false"
-                  :min="CAPTURE_MIN_RANGE[0]"
-                  :max="CAPTURE_MIN_RANGE[1]"
-                  :step="1"
-                  placeholder="默认 2"
-                  aria-label="最少触发轮数"
-                  :input-props="{ id: 'captureMinTurns' }"
-                  :value="typeof state.form.captureMinTurns === 'number' ? state.form.captureMinTurns : null"
-                  @focus="setFocus('captureMinTurns')"
-                  @blur="setFocus('')"
-                  @update:value="(value) => setCaptureNumber('captureMinTurns', value)"
-                />
-                <span class="field-hint">攒够这么多轮之前不归类、不提前提交，默认 2。范围 1–50。</span>
               </div>
 
               <div class="field">
@@ -433,27 +434,6 @@ function onEnter(event) {
                   @update:value="(value) => setCaptureNumber('captureContextTurns', value)"
                 />
                 <span class="field-hint">归类时回看几轮之前的对话，默认 3。范围 1–20。</span>
-              </div>
-
-              <div class="field">
-                <label for="captureMinTurns">最少触发轮数</label>
-                <NInputNumber
-                  size="small"
-                  style="width: 100%"
-                  :show-button="false"
-                  :update-value-on-input="false"
-                  :min="CAPTURE_MIN_RANGE[0]"
-                  :max="CAPTURE_MIN_RANGE[1]"
-                  :step="1"
-                  placeholder="默认 2"
-                  aria-label="最少触发轮数"
-                  :input-props="{ id: 'captureMinTurns' }"
-                  :value="typeof state.form.captureMinTurns === 'number' ? state.form.captureMinTurns : null"
-                  @focus="setFocus('captureMinTurns')"
-                  @blur="setFocus('')"
-                  @update:value="(value) => setCaptureNumber('captureMinTurns', value)"
-                />
-                <span class="field-hint">攒够这么多轮之前不归类、不提前提交，默认 2。范围 1–50。</span>
               </div>
 
               <div class="field">

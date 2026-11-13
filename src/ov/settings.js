@@ -1262,6 +1262,16 @@ export async function readSwitches(sdk) {
     { ...captureChoice, captureEarlyCommit: earlyCommit.early, captureEarlyJudge: earlyCommit.judge },
     earlyCommit.judge,
   );
+  // 最少触发轮数不能高于强制提交线：高于时提前提交永远轮不到（先被 min 挡住，
+  // 到 forced 又直接走强制提交），留下一个「填了但永远不触发」的死角。
+  // 读取侧取两者较小值：存量配置与只改一个键的半截提交都因此安全，不改盘上的原值；
+  // 下一次整单保存会把投影里的安全值自然写回去。
+  const captureCommitTurns = normalizeCaptureCommitTurns(await read(sdk, "captureCommitTurns"));
+  const captureMinTurns = Math.min(
+    normalizeCaptureMinTurns(await read(sdk, "captureMinTurns")),
+    captureCommitTurns,
+  );
+
   return {
     enabled: await read(sdk, "enabled"),
     autoRecall: await read(sdk, "autoRecall"),
@@ -1276,9 +1286,9 @@ export async function readSwitches(sdk) {
     captureTopicCandidates: normalizeCaptureTopicCandidates(
       await read(sdk, "captureTopicCandidates"),
     ),
-    captureCommitTurns: normalizeCaptureCommitTurns(await read(sdk, "captureCommitTurns")),
+    captureCommitTurns,
     captureContextTurns: normalizeCaptureContextTurns(await read(sdk, "captureContextTurns")),
-    captureMinTurns: normalizeCaptureMinTurns(await read(sdk, "captureMinTurns")),
+    captureMinTurns,
     captureServerFallback: (await read(sdk, "captureServerFallback")) === true,
     captureServerIdleSeconds: normalizeCaptureIdleSeconds(
       await read(sdk, "captureServerIdleSeconds"),

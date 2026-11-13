@@ -357,18 +357,20 @@ uri 结构、正文结构、类型判定，见 `docs/MEMORY-FORMAT.md`（待定�
 「基础配置」（三种模式都有）：
 
 - 强制提交轮数（`captureCommitTurns`，默认 12，范围 1–100）：所有情况共用
+- 最少触发轮数（`captureMinTurns`，默认 2，范围 1–50）：攒够这么多轮才开始做
+  一致性判断；不能高于强制线，读取侧取两者较小值，避免「最小 > 最大」导致永远不触发
 - 服务端兜底：兜底提交开关（`captureServerFallback`）与空闲秒数
   （`captureServerIdleSeconds`，开关关着时变淡且禁用）
 
 「语言模型设置」：提前提交开关（`captureEarlyCommit`）、话题作用域
-（`captureTopicScope`）、上下文轮数（`captureContextTurns`）、最少触发轮数
-（`captureMinTurns`）、判断模型（`captureModel`）。
+（`captureTopicScope`）、上下文轮数（`captureContextTurns`）、判断模型
+（`captureModel`）。
 
-「判别模型设置」：同一组前四项，最后一项换成一行只读说明：判别服务地址与密钥在
+「判别模型设置」：同一组前三项，最后一项换成一行只读说明：判别服务地址与密钥在
 「记忆搜索 → 精排 → 决策服务」里配（`systemoneServiceUrl`），写回页不再单独维护地址。
 地址没配时，卡片上的红字是「判别服务未配置，去「记忆搜索 → 精排」填」。
 
-关闭模式下不出现提前提交、上下文轮数、最少触发轮数、判断模型与判别服务地址；
+关闭模式下不出现提前提交、上下文轮数、判断模型与判别服务地址；
 这些值不会因为切模式被清掉，切回来还在。反过来，在「语言模型设置 / 判别模型设置」里把
 提前提交关掉，等同于回到「关闭」：页签收回到「基础配置」，再选回模型档时其它设置原样保留。判断题面 / 题面骨架 / 答案格式在「话题」页签里，
 不在这张卡。（`capturePrompt` / `captureTemplate` / `captureFormat`；

@@ -3537,24 +3537,36 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       basePane.slice(0, 200),
     );
     check(
-      "语言模型设置：提前提交 / 作用域 / 上下文 / 最少轮数 / 判断模型都在，且没有判别地址",
-      ["captureTopicScope", "captureContextTurns", "captureMinTurns", "captureModel"].every(
+      "语言模型设置：提前提交 / 作用域 / 上下文 / 判断模型都在，最少轮数已移走",
+      ["captureTopicScope", "captureContextTurns", "captureModel"].every(
         (id) => llmPane.includes(`id: '${id}'`),
       ) &&
         llmPane.includes('aria-label="提前提交"') &&
+        !llmPane.includes("captureMinTurns") &&
         !llmPane.includes("systemoneServiceUrl"),
       llmPane.slice(0, 200),
     );
     check(
-      "判别模型设置：提前提交 / 作用域 / 上下文 / 最少轮数都在，服务地址只是一行只读说明",
-      ["captureTopicScope", "captureContextTurns", "captureMinTurns"].every((id) =>
+      "判别模型设置：提前提交 / 作用域 / 上下文都在，最少轮数已移走；服务地址只是一行只读说明",
+      ["captureTopicScope", "captureContextTurns"].every((id) =>
         discPane.includes(`id: '${id}'`),
       ) &&
+        !discPane.includes("captureMinTurns") &&
         discPane.includes('aria-label="提前提交"') &&
         discPane.includes("记忆搜索 → 精排") &&
         !discPane.includes("captureModel") &&
         !discPane.includes("type=\"text\""),
       discPane.slice(0, 200),
+    );
+    check(
+      "基础配置里两个轮数挨着：强制提交 → 最少触发 → 服务端兜底，三种模式都能看到",
+      (() => {
+        const commit = basePane.indexOf("captureCommitTurns");
+        const min = basePane.indexOf("captureMinTurns");
+        const fallback = basePane.indexOf("服务端兜底");
+        return commit >= 0 && min > commit && fallback > min;
+      })(),
+      basePane.slice(0, 200),
     );
     check(
       "UI 的判据上下文 / 最少轮数 / 候选池范围与后端常量同值",
@@ -9393,6 +9405,23 @@ function mockRuntimeFetch({ status = 200, result = { ok: true }, headers = {} } 
       "readSwitches：判别服务地址与模型都配好时，存着的 discriminator 仍按提前提交读",
       [discReady.captureEarlyCommit, discReady.captureEarlyJudge, discReady.captureEffectiveEarly],
       [true, "discriminator", true],
+    );
+
+    const minAbove = await readSwitches(
+      sdkWith({ captureCommitTurns: 5, captureMinTurns: 9 }),
+    );
+    const minNormal = await readSwitches(
+      sdkWith({ captureCommitTurns: 9, captureMinTurns: 5 }),
+    );
+    eq(
+      "最少触发轮数高于强制线时读取侧取较小值：min 拉到 commit，避免永远不触发",
+      [
+        minAbove.captureCommitTurns,
+        minAbove.captureMinTurns,
+        minNormal.captureCommitTurns,
+        minNormal.captureMinTurns,
+      ],
+      [5, 5, 9, 5],
     );
   }
 
