@@ -24,6 +24,7 @@ import {
   DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
   DEFAULT_GATE_PROMPT,
+  DEFAULT_RECALL_PREAMBLE,
   DEFAULT_MODEL_OPTION,
   DEFAULT_RERANK_PROMPT,
   DEFAULT_RERANK_SYSTEMONE_PROMPT,
@@ -59,6 +60,8 @@ import {
   paintRecallConfig,
   promptDraft,
   promptStatus,
+  recallPreambleDraft,
+  recallPreambleStatus,
   rerankChannelsText,
   rerankLanes,
   rerankLanesCountText,
@@ -150,6 +153,12 @@ const PROMPTS = Object.freeze({
     field: "gateContextPrompt",
     default: DEFAULT_GATE_CONTEXT_PROMPT,
     draft: contextPromptDraft,
+  }),
+  preamble: Object.freeze({
+    key: "preamble",
+    field: "recallPreamble",
+    default: DEFAULT_RECALL_PREAMBLE,
+    draft: recallPreambleDraft,
   }),
   rerank: Object.freeze({
     key: "rerank",
@@ -276,10 +285,12 @@ export function createPanelStore(deps = {}) {
       gate: DEFAULT_GATE_PROMPT,
       decision: DEFAULT_GATE_DECISION_PROMPT,
       context: DEFAULT_GATE_CONTEXT_PROMPT,
+      preamble: DEFAULT_RECALL_PREAMBLE,
       rerank: DEFAULT_RERANK_PROMPT,
       systemone: DEFAULT_RERANK_SYSTEMONE_PROMPT,
       gateTouched: false,
       decisionTouched: false,
+      preambleTouched: false,
       contextTouched: false,
       rerankTouched: false,
       systemoneTouched: false,
@@ -693,6 +704,8 @@ export function createPanelStore(deps = {}) {
       // 精排保留条数：归一化后序列化成字符串再发（0 = 不限），与门槛 / 轮数同口径。
       rerankKeep: String(normalizeRerankKeep(state.form.rerankKeep)),
       assembleMode: normalizeAssembleMode(state.form.assembleMode),
+      // 前言：配置里存空串 = 内置默认；界面整单提交时原样发，服务端再做一次默认值归一。
+      recallPreamble: state.prompts.preamble,
       rerankPrompt: normalizeRerankPrompt(state.prompts.rerank),
       rerankSystemonePrompt: normalizeRerankSystemonePrompt(state.prompts.systemone),
       // 没填完的行不提交；服务端只认完整通道，整单校验会直接 400。
@@ -775,6 +788,7 @@ export function createPanelStore(deps = {}) {
     // 组装开关与召回策略同一单，所以也得进「这一单有没有变化」的比较：
     // 漏在这里，切开关会看起来“没改”，一单都不发。
     "assembleMode",
+    "recallPreamble",
     ...SCORING_SERVICES.flatMap((service) => [
       service.urlKey,
       service.modelKey,
@@ -1403,6 +1417,11 @@ export function createPanelStore(deps = {}) {
     return contextPromptStatus(state.prompts.context);
   }
 
+  /** 前言的三态小字。 */
+  function preambleStatusOf() {
+    return recallPreambleStatus(state.prompts.preamble);
+  }
+
   function rerankPromptStatusOf() {
     return rerankPromptStatus(state.prompts.rerank);
   }
@@ -1547,6 +1566,7 @@ export function createPanelStore(deps = {}) {
     contextPromptStatusOf,
     rerankPromptStatusOf,
     systemonePromptStatusOf,
+    preambleStatusOf,
     enabled,
     peerRows,
     peerCountText,

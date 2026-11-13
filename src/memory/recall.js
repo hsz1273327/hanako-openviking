@@ -42,6 +42,7 @@ import {
   readConnection,
   readExcludedPeers,
   readSwitches,
+  resolveRecallPreamble,
   serviceTimeoutOrDefault,
 } from "../ov/settings.js";
 import { effective, patchSession, readSession } from "../state/session.js";
@@ -2156,13 +2157,70 @@ function warnShapeOnce(sdk, result) {
 }
 
 /**
- * 记忆块：固定标记包住服务端裁好的文本。
- * 先按本地预算截断再包标记，保证关闭标记不会被截掉——写回时靠它剥离。
+ * 从 uri 的 events/YYYY/MM/DD 段推日期。推不出来返回空串，不拿文件时间凑。
+ * 只认真实存在的日期：2026/02/31 这类脏段宁可没有 time，也不写一个假日期。
  */
-export function memoryBlock(text, budgetTokens) {
-  const body = trimToBudget(String(text || "").trim(), budgetTokens);
-  if (!body) return "";
-  return `${MEMORY_TAG_OPEN}\n${body}\n${MEMORY_TAG_CLOSE}`;
+export function memoryTimeOf(uri) {
+  const match = /\/events\/(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\/|$)/.exec(String(uri || ""));
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return "";
+  }
+  return `${match[1]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/** 属性值转义：只处理会破坏引号包裹的三个字符。 */
+function escapeAttr(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/**
+ * 记忆块：前言出现一次，之后每条候选一个独立块。
+ *
+ * 为什么每条单独包：时间与类型是每条自己的属性，包在整段外面就只能写一份。
+ * 为什么前言也单独占一个块：写回时 stripInjected 只认完整标记块，前言如果裸放在
+ * 块外，剥离后会把说明当成用户原话；放进块里才能一起被剥掉。没有候选时整段返回
+ * 空串，不会只剩一个光秃秃的前言。
+ *
+ * 预算只算记忆正文，不算前言与标记：前言是固定说明，不是检索内容，改文案不该
+ * 挤掉记忆；标记是承载格式的开销，也不该跟正文抢名额。
+ * 先按剩余预算截断这一条，再包标记，保证每个块的关闭标记都不会被截掉。
+ */
+export function memoryBlock(input, budgetTokens, preamble = "") {
+  const items = Array.isArray(input) ? input : [{ text: String(input || "") }];
+  const budget = Number(budgetTokens);
+  let left = Number.isFinite(budget) && budget > 0 ? budget : Infinity;
+  const blocks = [];
+
+  for (const item of items) {
+    const source = typeof item?.text === "string" ? item.text.trim() : "";
+    if (!source) continue;
+    const body = trimToBudget(source, left);
+    if (!body) continue;
+    const used = estimateTokens(body);
+    const attrs = [];
+    const time = memoryTimeOf(item?.uri);
+    if (time) attrs.push(`time="${escapeAttr(time)}"`);
+    const type = typeof item?.type === "string" ? item.type.trim() : "";
+    if (type) attrs.push(`type="${escapeAttr(type)}"`);
+    const head = attrs.length ? `${MEMORY_TAG_OPEN.slice(0, -1)} ${attrs.join(" ")}>` : MEMORY_TAG_OPEN;
+    blocks.push(`${head}\n${body}\n${MEMORY_TAG_CLOSE}`);
+    left = Math.max(0, left - used);
+    if (left <= 0) break;
+  }
+
+  if (!blocks.length) return "";
+  const intro = String(preamble || "").trim();
+  const head = intro ? [`${MEMORY_TAG_OPEN}\n${intro}\n${MEMORY_TAG_CLOSE}`] : [];
+  return [...head, ...blocks].join("\n\n");
 }
 
 /** 记忆块预算：全局配置与 DESIGN 上限取小。配置缺省或非法时用上限。 */
@@ -2623,7 +2681,6 @@ export function createRecallHandler(sdk, options = {}) {
     // 选），值得看。off 档原样拼；rules 档去重 + 按分精排。
     // 预算裁剪仍然在下面的 memoryBlock 里做（按拼好之后的文本算 token）。
     const assembled = assembleCandidates(kept, switches.assembleMode);
-    const text = assembled.text;
     // kept 是组装之后的段数；第二道网这一轮又滤掉多少条也单独记（只记条数不记原文，
     // 命中内容进了日志等于又把凭据搬了一处）。
     summary.assemble = {
@@ -2658,7 +2715,11 @@ export function createRecallHandler(sdk, options = {}) {
       }
     }
 
-    const block = memoryBlock(text, budget);
+    const block = memoryBlock(
+      assembled.items,
+      budget,
+      resolveRecallPreamble(switches.recallPreamble),
+    );
     if (!block) {
       log(sdk, "info", `skip: empty block (session=${sessionId})`);
       await report();

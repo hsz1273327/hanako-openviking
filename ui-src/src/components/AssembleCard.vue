@@ -25,10 +25,20 @@
 //   - NInputNumber 里有真 <input>，<label for=id> 有效，用 NFormItem 自带标签；
 //   - NSwitch 渲染的是 button，label for 指不过去，用纯文本标签 + aria-label。
 import { computed } from "vue";
-import { NCard, NForm, NFormItem, NGrid, NGridItem, NInputNumber, NSwitch } from "naive-ui";
+import { NButton, NCard, NForm, NFormItem, NGrid, NGridItem, NInput, NInputNumber, NSwitch } from "naive-ui";
 import { useConfig } from "../composables/useConfig.js";
 
-const { state, enabled, setForm, setControlsNumber } = useConfig();
+const {
+  state,
+  enabled,
+  setForm,
+  setControlsNumber,
+  setPrompt,
+  resetPrompt,
+  touchPrompt,
+  preambleStatusOf,
+  setFocus,
+} = useConfig();
 
 // 只有 rules 算「开」。
 const assembleOn = computed(() => state.form.assembleMode === "rules");
@@ -36,6 +46,15 @@ const assembleOn = computed(() => state.form.assembleMode === "rules");
 /** 开关改了就整单提交（setForm → saveLayers，与精排那张卡同一套回滚）。 */
 function onSwitch(value) {
   return setForm("assembleMode", value ? "rules" : "off");
+}
+
+/** 前言：每敲一个字先写草稿，失焦 / 回车才提交（与判断提示词同一套）。 */
+function onPreambleInput(value) {
+  touchPrompt("preamble", value);
+}
+
+function onPreambleChange(value) {
+  setPrompt("preamble", value);
 }
 
 /** 数字格：n-input-number 清空给 null，收成空串走 store 的「不提交」分支。 */
@@ -90,5 +109,32 @@ function onNumberChange(key, value) {
         </NForm>
       </NGridItem>
     </NGrid>
+
+    <div class="field preamble-field">
+      <div class="prompt-head">
+        <label for="recallPreamble">注入前言</label>
+        <span id="recallPreambleStatus" class="prompt-status">{{ preambleStatusOf() }}</span>
+        <NButton id="recallResetPreamble" size="small" quaternary @click="resetPrompt('preamble')">
+          恢复默认
+        </NButton>
+      </div>
+      <NInput
+        type="textarea"
+        size="small"
+        :rows="3"
+        :maxlength="1000"
+        placeholder="留空则用内置默认前言"
+        :input-props="{ id: 'recallPreamble', spellcheck: 'false' }"
+        :value="state.prompts.preamble"
+        @focus="setFocus('recallPreamble')"
+        @blur="setFocus(''); onPreambleChange(state.prompts.preamble)"
+        @update:value="onPreambleInput"
+        @keydown.enter.exact="onPreambleChange(state.prompts.preamble)"
+      />
+      <span class="field-hint">
+        告诉模型这段记忆是什么、算不算数。前言只在注入块里出现一次；没有候选时不会只输出前言。
+        留空 = 用内置默认。
+      </span>
+    </div>
   </NCard>
 </template>

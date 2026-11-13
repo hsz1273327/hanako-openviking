@@ -105,6 +105,7 @@ export function useConfig() {
     contextPromptStatus: () => store.contextPromptStatusOf(),
     rerankPromptStatus: () => store.rerankPromptStatusOf(),
     systemonePromptStatus: () => store.systemonePromptStatusOf(),
+    preambleStatusOf: () => store.preambleStatusOf(),
     applyControls: (...args) => store.applyControls(...args),
   };
 }

@@ -12,7 +12,8 @@ import { QUERY_CHARS_DEFAULT } from "../ov/settings.js";
 export const MEMORY_TAG_OPEN = "<openviking-memory>";
 export const MEMORY_TAG_CLOSE = "</openviking-memory>";
 
-const INJECTED_RE = /<openviking-memory>[\s\S]*?<\/openviking-memory>\s*/g;
+// 开标签可能带 time / type 属性；不认属性的话，写回剥离会漏掉带属性的块。
+const INJECTED_RE = /<openviking-memory(?:\s[^>]*)?>[\s\S]*?<\/openviking-memory>\s*/g;
 
 /** 去掉已经注进去的记忆块，得到"人真正说过的话"。去重键必须建立在干净文本上。 */
 export function stripInjected(text) {

@@ -471,6 +471,7 @@ function joinSegments(list, keepSeps) {
  * 一条候选占一段。段与段之间默认空一行；候选自带 sep 且顺序未变时（rendered 拆条，
  * 服务端本来用单换行分隔）用原始分隔，拼回去与拆分前逐字一致。
  *
+ * items 与 refs 同序，是拼成 text 的那些候选本身；注入层给每条加时间 / 类型属性时用它。
  * refs 与段落一一对应：一条文本为空的候选也占一行，宁可多一行空记录，
  * 也不让序号与段落错位（真实链路上 extractRecallItems 已经滤掉了空文本）。
  *
@@ -487,5 +488,6 @@ export function assembleCandidates(items, mode = "rules") {
   const ordered = mode === "off" ? clean.slice() : sortByScore(dedupeCandidates(clean));
   const text = joinSegments(ordered, keepsOrder(clean, ordered)).trim();
   const refs = ordered.map((item, index) => refOf(item, index + 1));
-  return { text, refs, dropped: { credential: droppedCredential } };
+  // items 与 refs 同序：refs 只带身份与分数，正文仍留在 items 里，注入格式化要用。
+  return { text, refs, items: ordered, dropped: { credential: droppedCredential } };
 }

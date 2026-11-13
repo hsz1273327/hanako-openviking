@@ -11,11 +11,13 @@ import {
   ASSEMBLE_MODES,
   DEFAULT_GATE_CONTEXT_PROMPT,
   DEFAULT_GATE_DECISION_PROMPT,
+  DEFAULT_RECALL_PREAMBLE,
   GATE_CONTEXT_MODES,
   GATE_PROMPT_MAX,
   QUERY_MODES,
   RECALL_GATE_FALLBACKS,
   RECALL_GATES,
+  RECALL_PREAMBLE_MAX,
   RERANK_CHANNELS_MAX,
   RERANK_CHANNEL_URL_MAX,
   RERANK_LANE_SCHEMA,
@@ -40,6 +42,7 @@ import {
   normalizeGateModel,
   normalizeGatePrompt,
   normalizeQueryMode,
+  normalizeRecallPreamble,
   normalizeRerank,
   normalizeRerankModel,
   normalizeRerankPrompt,
@@ -211,6 +214,10 @@ async function current(ctx) {
     rerankKeep: serializeRerankKeep(await ctx.config.get("rerankKeep")),
     // 组装：脏值 / 缺项一律画成 rules（与 readSwitches 同口径）。
     assembleMode: normalizeAssembleMode(await ctx.config.get("assembleMode")),
+    // 注入前言：没配过投影内置默认；明确存了空串仍然投影空串（读取原样）。
+    recallPreamble: normalizeRecallPreamble(
+      (await ctx.config.get("recallPreamble")) ?? DEFAULT_RECALL_PREAMBLE,
+    ),
     rerankPrompt: normalizeRerankPrompt(await ctx.config.get("rerankPrompt")),
     rerankSystemonePrompt: normalizeRerankSystemonePrompt(
       await ctx.config.get("rerankSystemonePrompt"),
@@ -381,6 +388,19 @@ export default function registerRecallModeRoutes(app, ctx) {
         return c.json({ ok: false, error: "dedupeThreshold 必须是数字、字符串或 null" }, 400);
       }
       changes.push(["dedupeThreshold", serializeDedupeThreshold(raw)]);
+    }
+
+    if (has(body, "recallPreamble")) {
+      if (typeof body.recallPreamble !== "string") {
+        return c.json({ ok: false, error: "recallPreamble 必须是字符串" }, 400);
+      }
+      if (Array.from(body.recallPreamble).length > RECALL_PREAMBLE_MAX) {
+        return c.json(
+          { ok: false, error: `recallPreamble 最多 ${RECALL_PREAMBLE_MAX} 个字符` },
+          400,
+        );
+      }
+      changes.push(["recallPreamble", promptForStorage("recallPreamble", body.recallPreamble)]);
     }
 
     if (has(body, "rerankPrompt")) {

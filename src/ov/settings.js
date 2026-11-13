@@ -13,6 +13,7 @@ import {
   CAPTURE_TOPIC_QUESTION,
   DEFAULT_GATE_PROMPT,
   DEFAULT_RERANK_PROMPT,
+  DEFAULT_RECALL_PREAMBLE,
   DEFAULT_RERANK_SYSTEMONE_PROMPT,
   GATE_PROMPT_RETIRED_DEFAULTS,
 } from "./prompt-defaults.js";
@@ -219,6 +220,8 @@ export const DEFAULTS = {
   // 精排保留条数上限。缺省 5；存 0 / 空串 / 脏值都读成「不限」（见 normalizeRerankKeep）。
   rerankKeep: RERANK_KEEP_DEFAULT,
   assembleMode: "rules",
+  // 召回注入块的前言：空串 = 内置默认。只在真的注入了记忆时出现。
+  recallPreamble: "",
   rerankPrompt: "",
   // 判别模型（systemone）那一路的题面。空串 = 用内置那句默认问法。
   rerankSystemonePrompt: "",
@@ -250,6 +253,7 @@ const PROMPT_DEFAULT_VALUES = Object.freeze({
   rerankPrompt: Object.freeze([DEFAULT_RERANK_PROMPT]),
   gateDecisionPrompt: Object.freeze([DEFAULT_GATE_DECISION_PROMPT]),
   rerankSystemonePrompt: Object.freeze([DEFAULT_RERANK_SYSTEMONE_PROMPT]),
+  recallPreamble: Object.freeze([DEFAULT_RECALL_PREAMBLE]),
 });
 
 /** 写入前归一：值等于内置默认就存空串，其余原样（不 trim、不截断、不做类型转换）。 */
@@ -476,6 +480,9 @@ export const CAPTURE_TEMPLATE_MAX = 4000;
 /** 答案格式的字符上限：同样宽一点，够写字段说明与示例。 */
 export const CAPTURE_FORMAT_MAX = 4000;
 
+/** 召回前言的长度上限：一段背景说明，不需要写成小作文。 */
+export const RECALL_PREAMBLE_MAX = 1000;
+
 /** 枚举值收敛：不认识的、缺省的、类型不对的一律回默认值。 */
 function oneOf(raw, allowed, fallback) {
   return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
@@ -697,6 +704,18 @@ export function normalizeRerank(raw) {
 
 export function normalizeAssembleMode(raw) {
   return oneOf(raw, ASSEMBLE_MODES, DEFAULTS.assembleMode);
+}
+
+/** 前言读侧归一：非字符串 / 空 → 空串（= 用内置默认），否则按字符截断。 */
+export function normalizeRecallPreamble(raw) {
+  if (typeof raw !== "string" || !raw) return "";
+  return Array.from(raw).slice(0, RECALL_PREAMBLE_MAX).join("");
+}
+
+/** 运行时用哪一段前言：trim 后为空就用内置默认；自定义文案保留内部换行。 */
+export function resolveRecallPreamble(raw) {
+  const value = normalizeRecallPreamble(raw).trim();
+  return value || DEFAULT_RECALL_PREAMBLE;
 }
 
 /**
@@ -1331,6 +1350,8 @@ export async function readSwitches(sdk) {
     // 0 = 不限。read() 把缺失项换成默认 5，所以「从没配过」与「填了空串」在这里分得开。
     rerankKeep: normalizeRerankKeep(await read(sdk, "rerankKeep")),
     assembleMode: normalizeAssembleMode(await read(sdk, "assembleMode")),
+    // 注入前言：空串 = 内置默认；运行时用 resolveRecallPreamble 取实际文案。
+    recallPreamble: normalizeRecallPreamble(await read(sdk, "recallPreamble")),
     rerankPrompt: normalizeRerankPrompt(await read(sdk, "rerankPrompt")),
     rerankSystemonePrompt: normalizeRerankSystemonePrompt(
       await read(sdk, "rerankSystemonePrompt"),
@@ -1442,3 +1463,6 @@ export async function isActive(sdk) {
   if (!sw.enabled) return false;
   return hasIdentity(sdk);
 }
+
+// 路由与面板投影共用这一份默认文案。
+export { DEFAULT_RECALL_PREAMBLE };

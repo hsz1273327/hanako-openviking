@@ -481,6 +481,12 @@
               ]
             }
           },
+          "recallPreamble": {
+            "type": "string",
+            "title": "召回前言",
+            "description": "注入的记忆块开头那段说明，告诉模型这些是历史背景、不是本轮指令。留空 = 用内置默认；最长 1000 个字符。只在真的注入了记忆时出现，没有候选时不会只输出前言。",
+            "default": ""
+          },
           "injectBudgetTokens": {
             "type": "integer",
             "title": "注入预算",

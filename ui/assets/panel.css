@@ -332,6 +332,7 @@ body { background-color: rgba(0, 0, 0, 0.02); }
 .dedupe-card,
 .rerank-card,
 .assemble-card { flex: 0 0 auto; }
+.preamble-field { margin-top: 12px; }
 
 /* 子页签栏（记忆搜索页 / 记忆共享页共用）：与主标签栏同一档，不参与纵向伸缩，
    字号 12px，焦点环自己画（n-tabs 不输出键盘焦点样式，与 .tabs 那组规则保持一致）。
